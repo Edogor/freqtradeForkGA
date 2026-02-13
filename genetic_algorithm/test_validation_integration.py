@@ -82,6 +82,7 @@ def test_validation_in_evolution():
         print(f"Selected parents: {parent1.id} and {parent2.id}")
         
         # Create offspring through crossover
+        # Note: Using ind_id=10 here for testing purposes (not critical for validation test)
         child1, child2 = crossover(parent1, parent2, generation=1, ind_id=10, method='single_point')
         print("Created offspring through crossover")
         
