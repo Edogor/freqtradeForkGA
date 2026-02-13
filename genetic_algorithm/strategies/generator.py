@@ -380,21 +380,26 @@ class {strategy_name}(IStrategy):
         
         signal_col = 'enter_long' if is_entry else 'exit_long'
         
-        # Build condition expressions
+        # Build condition expressions with respect to logic operators
         condition_exprs = []
         
         for i, cond in enumerate(conditions):
             expr = self._generate_single_condition(cond, indicators)
             if expr:
-                condition_exprs.append(expr)
+                condition_exprs.append((expr, cond.logic))
         
         if not condition_exprs:
             return f"        dataframe['{signal_col}'] = 0\n"
         
-        # Combine conditions based on logic operators
-        # For simplicity, we'll combine with AND by default
-        # In a more advanced version, we'd parse the logic field properly
-        combined_condition = ' &\n            '.join(f"({expr})" for expr in condition_exprs)
+        # Combine conditions based on their logic operators
+        # First condition has no logic prefix, subsequent ones use their logic field
+        combined_parts = [f"({condition_exprs[0][0]})"]
+        
+        for expr, logic in condition_exprs[1:]:
+            operator = ' & ' if logic == 'AND' else ' | '
+            combined_parts.append(f"{operator}\n            ({expr})")
+        
+        combined_condition = ''.join(combined_parts)
         
         code = f"""        conditions = (
             {combined_condition}

@@ -12,11 +12,17 @@ import random
 
 @dataclass
 class IndicatorGene:
-    """Represents a single technical indicator with its parameters."""
+    """
+    Represents a single technical indicator with its parameters.
+    
+    The weight parameter is currently stored for future use in weighted
+    indicator combinations. In a future version, multiple indicators could
+    be combined with different weights to create composite signals.
+    """
     
     type: str  # e.g., 'RSI', 'MACD', 'BBANDS'
     parameters: Dict[str, Any]  # indicator-specific parameters
-    weight: float = 1.0  # importance weight
+    weight: float = 1.0  # importance weight (reserved for future weighted combinations)
     
     def mutate(self, mutation_rate: float, param_ranges: Dict[str, tuple]) -> 'IndicatorGene':
         """
