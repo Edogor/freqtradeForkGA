@@ -10,7 +10,7 @@ from typing import Dict
 
 
 def generate_monotonic_roi(roi_range: tuple = (0.01, 0.10), 
-                          time_points: list = None) -> Dict[int, float]:
+                          time_points: list = None) -> Dict[str, float]:
     """
     Generate a monotonically decreasing ROI table.
     
@@ -22,7 +22,7 @@ def generate_monotonic_roi(roi_range: tuple = (0.01, 0.10),
         time_points: List of time points in minutes (default: [0, 30, 60, 120])
         
     Returns:
-        Dictionary mapping time (minutes) to ROI value
+        Dictionary mapping time (minutes as string) to ROI value
     """
     if time_points is None:
         time_points = [0, 30, 60, 120]
@@ -52,8 +52,8 @@ def generate_monotonic_roi(roi_range: tuple = (0.01, 0.10),
         current_roi = random.uniform(min_next, max_next)
         descending_roi_values.append(current_roi)
     
-    # Create dictionary with time points as keys
-    roi_dict = {time_points[i]: descending_roi_values[i] for i in range(len(time_points))}
+    # Create dictionary with time points as string keys (required by FreqTrade schema validation)
+    roi_dict = {str(time_points[i]): descending_roi_values[i] for i in range(len(time_points))}
     
     # Validate monotonic property
     assert is_monotonic_roi(roi_dict), "Generated ROI is not monotonic"
@@ -61,18 +61,18 @@ def generate_monotonic_roi(roi_range: tuple = (0.01, 0.10),
     return roi_dict
 
 
-def is_monotonic_roi(roi: Dict[int, float]) -> bool:
+def is_monotonic_roi(roi: Dict[str, float]) -> bool:
     """
     Check if ROI table is monotonically decreasing.
     
     Args:
-        roi: Dictionary mapping time to ROI value
+        roi: Dictionary mapping time (as string) to ROI value
         
     Returns:
         True if ROI values decrease (or stay same) over time, False otherwise
     """
-    # Sort by time
-    sorted_times = sorted(roi.keys())
+    # Sort by time (convert to int for proper numerical sorting)
+    sorted_times = sorted(roi.keys(), key=lambda x: int(x))
     
     # Check that values are monotonically decreasing
     for i in range(1, len(sorted_times)):
@@ -82,12 +82,12 @@ def is_monotonic_roi(roi: Dict[int, float]) -> bool:
     return True
 
 
-def fix_monotonic_roi(roi: Dict[int, float]) -> Dict[int, float]:
+def fix_monotonic_roi(roi: Dict[str, float]) -> Dict[str, float]:
     """
     Fix a non-monotonic ROI table by adjusting values to be monotonic.
     
     Args:
-        roi: Dictionary mapping time to ROI value
+        roi: Dictionary mapping time (as string) to ROI value
         
     Returns:
         Fixed ROI dictionary with monotonically decreasing values
@@ -95,8 +95,8 @@ def fix_monotonic_roi(roi: Dict[int, float]) -> Dict[int, float]:
     if is_monotonic_roi(roi):
         return roi.copy()
     
-    # Sort by time
-    sorted_times = sorted(roi.keys())
+    # Sort by time (convert to int for proper numerical sorting)
+    sorted_times = sorted(roi.keys(), key=lambda x: int(x))
     fixed_roi = {}
     
     # First value stays the same
@@ -116,13 +116,13 @@ def fix_monotonic_roi(roi: Dict[int, float]) -> Dict[int, float]:
     return fixed_roi
 
 
-def mutate_roi(roi: Dict[int, float], roi_range: tuple = (0.01, 0.10), 
-               mutation_strength: float = 0.2) -> Dict[int, float]:
+def mutate_roi(roi: Dict[str, float], roi_range: tuple = (0.01, 0.10), 
+               mutation_strength: float = 0.2) -> Dict[str, float]:
     """
     Mutate an ROI table while maintaining monotonic property.
     
     Args:
-        roi: Current ROI dictionary
+        roi: Current ROI dictionary (with string keys)
         roi_range: Tuple of (min_roi, max_roi) as decimal values
         mutation_strength: How much to vary values (0.0-1.0)
         
@@ -135,7 +135,8 @@ def mutate_roi(roi: Dict[int, float], roi_range: tuple = (0.01, 0.10),
     INITIAL_ROI_MULTIPLIER = 2.0  # For first value
     
     min_roi, max_roi = roi_range
-    sorted_times = sorted(roi.keys())
+    # Sort by time (convert to int for proper numerical sorting)
+    sorted_times = sorted(roi.keys(), key=lambda x: int(x))
     mutated_roi = {}
     
     # Mutate the first (highest) value

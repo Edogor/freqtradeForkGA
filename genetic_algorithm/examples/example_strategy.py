@@ -17,7 +17,7 @@ class GAStrategy_Gen0_Ind0(IStrategy):
     # Strategy parameters
     timeframe = '15m'
     stoploss = -0.18061553772933603
-    minimal_roi = {0: 0.058352635524271154, 30: 0.04291445331828134, 60: 0.03717389378869976, 120: 0.032704119289751726}
+    minimal_roi = {"0": 0.058352635524271154, "30": 0.04291445331828134, "60": 0.03717389378869976, "120": 0.032704119289751726}
     trailing_stop = False
     
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:

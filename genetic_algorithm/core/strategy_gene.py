@@ -83,7 +83,7 @@ class StrategyGene:
     # Risk management
     timeframe: str = '5m'
     stoploss: float = -0.10
-    minimal_roi: Dict[int, float] = field(default_factory=lambda: {0: 0.04, 30: 0.02, 60: 0.01})
+    minimal_roi: Dict[str, float] = field(default_factory=lambda: {"0": 0.04, "30": 0.02, "60": 0.01})
     
     # Optional parameters
     trailing_stop: bool = False
@@ -170,9 +170,22 @@ class StrategyGene:
             exit_conditions=exit_conditions,
             timeframe=data.get('timeframe', '5m'),
             stoploss=data.get('stoploss', -0.10),
-            minimal_roi=data.get('minimal_roi', {0: 0.04, 30: 0.02, 60: 0.01}),
+            minimal_roi=cls._normalize_roi(data.get('minimal_roi', {"0": 0.04, "30": 0.02, "60": 0.01})),
             trailing_stop=data.get('trailing_stop', False),
         )
+    
+    @staticmethod
+    def _normalize_roi(roi: Dict[Any, float]) -> Dict[str, float]:
+        """
+        Normalize ROI dictionary to have string keys.
+        
+        Args:
+            roi: ROI dictionary with int or str keys
+            
+        Returns:
+            ROI dictionary with string keys
+        """
+        return {str(k): v for k, v in roi.items()}
     
     def copy(self) -> 'StrategyGene':
         """Create a deep copy of this strategy gene."""

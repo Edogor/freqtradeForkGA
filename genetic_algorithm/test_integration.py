@@ -56,7 +56,7 @@ def test_logic_operators_in_conditions():
         exit_conditions=exit_conditions,
         timeframe='5m',
         stoploss=-0.10,
-        minimal_roi={0: 0.05, 30: 0.03, 60: 0.01},
+        minimal_roi={"0": 0.05, "30": 0.03, "60": 0.01},
         trailing_stop=False,
     )
     
