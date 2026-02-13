@@ -74,6 +74,8 @@ class StrategyGenerator:
         Returns:
             Validated StrategyGene
         """
+        strategy_gene = None
+        
         for attempt in range(self.max_generation_attempts):
             try:
                 # Generate strategy
@@ -98,12 +100,20 @@ class StrategyGenerator:
             except Exception as e:
                 logger.error(f"Error generating strategy (attempt {attempt + 1}): {e}")
         
-        # If all attempts failed, log error and return the last generated strategy anyway
-        # This ensures the system doesn't crash, but the strategy will likely have low fitness
-        logger.error(
-            f"Failed to generate valid strategy Gen{generation}_Ind{individual_id} "
-            f"after {self.max_generation_attempts} attempts. Using last attempt."
-        )
+        # If all attempts failed, log error and return the last generated strategy
+        # If no strategy was ever generated, create a minimal fallback
+        if strategy_gene is None:
+            logger.error(
+                f"Failed to generate any strategy for Gen{generation}_Ind{individual_id}. "
+                f"Creating minimal fallback strategy."
+            )
+            strategy_gene = self._generate_strategy_internal(generation, individual_id)
+        else:
+            logger.error(
+                f"Failed to generate valid strategy Gen{generation}_Ind{individual_id} "
+                f"after {self.max_generation_attempts} attempts. Using last attempt."
+            )
+        
         return strategy_gene
     
     def _generate_strategy_internal(self, generation: int, individual_id: int) -> StrategyGene:

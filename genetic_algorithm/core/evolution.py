@@ -243,12 +243,12 @@ class GeneticAlgorithm:
             
             # Validate offspring if validation is enabled
             if self.config.get('validation', {}).get('enable_validation', True):
-                # Calculate proper individual IDs
-                child1_id = self.elite_size + len(next_gen) - self.elite_size
+                # Calculate proper individual IDs based on current population size
+                child1_id = len(next_gen)
                 child1 = self._validate_or_regenerate(child1, self.current_generation + 1, child1_id)
                 
                 if len(next_gen) < self.population_size - 1:
-                    child2_id = self.elite_size + len(next_gen) - self.elite_size + 1
+                    child2_id = len(next_gen) + 1
                     child2 = self._validate_or_regenerate(child2, self.current_generation + 1, child2_id)
             
             next_gen.add_individual(child1)
