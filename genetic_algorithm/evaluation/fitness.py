@@ -132,6 +132,7 @@ class FitnessEvaluator:
         Calculate overall fitness score from metrics.
         
         Uses weighted combination of metrics with penalties.
+        Now includes profit_factor and sortino_ratio.
         
         Args:
             metrics: Dictionary of performance metrics
@@ -145,6 +146,8 @@ class FitnessEvaluator:
         max_drawdown = metrics.get('max_drawdown', 0)
         win_rate = metrics.get('win_rate', 0)
         num_trades = metrics.get('num_trades', 0)
+        profit_factor = metrics.get('profit_factor', 0)
+        sortino_ratio = metrics.get('sortino_ratio', 0)
         
         # Normalize metrics to 0-1 range
         norm_profit = self._normalize_profit(profit)
@@ -152,14 +155,18 @@ class FitnessEvaluator:
         norm_drawdown = 1 - min(max_drawdown, 1.0)  # Lower drawdown is better
         norm_win_rate = win_rate
         norm_trade_freq = self._normalize_trade_frequency(num_trades)
+        norm_profit_factor = self._normalize_profit_factor(profit_factor)
+        norm_sortino = self._normalize_sortino(sortino_ratio)
         
         # Get weights
         w = self.fitness_weights
-        w_profit = w.get('profit', 0.3)
-        w_sharpe = w.get('sharpe_ratio', 0.25)
-        w_drawdown = w.get('drawdown', 0.2)
-        w_win_rate = w.get('win_rate', 0.15)
-        w_trade_freq = w.get('trade_frequency', 0.1)
+        w_profit = w.get('profit', 0.25)
+        w_sharpe = w.get('sharpe_ratio', 0.15)
+        w_drawdown = w.get('drawdown', 0.15)
+        w_win_rate = w.get('win_rate', 0.10)
+        w_trade_freq = w.get('trade_frequency', 0.10)
+        w_profit_factor = w.get('profit_factor', 0.15)
+        w_sortino = w.get('sortino_ratio', 0.10)
         
         # Calculate weighted fitness
         fitness = (
@@ -167,7 +174,9 @@ class FitnessEvaluator:
             w_sharpe * norm_sharpe +
             w_drawdown * norm_drawdown +
             w_win_rate * norm_win_rate +
-            w_trade_freq * norm_trade_freq
+            w_trade_freq * norm_trade_freq +
+            w_profit_factor * norm_profit_factor +
+            w_sortino * norm_sortino
         )
         
         # Apply penalties
@@ -177,13 +186,52 @@ class FitnessEvaluator:
     
     def _normalize_profit(self, profit: float) -> float:
         """Normalize profit to 0-1 range."""
-        # Assume profit range of -50% to +100%
-        return (profit + 50) / 150
+        # Improved: use sigmoid-like curve for more realistic range
+        # Handle extreme values better
+        if profit <= -50:
+            return 0.0
+        elif profit >= 200:
+            return 1.0
+        # Map -50% to +200% to 0-1
+        return (profit + 50) / 250
     
     def _normalize_sharpe(self, sharpe: float) -> float:
         """Normalize Sharpe ratio to 0-1 range."""
-        # Sharpe ratio typically ranges from -3 to 3
-        return (sharpe + 3) / 6
+        # Sharpe ratio: -2 to +4 is realistic range
+        if sharpe <= -2:
+            return 0.0
+        elif sharpe >= 4:
+            return 1.0
+        return (sharpe + 2) / 6
+    
+    def _normalize_profit_factor(self, profit_factor: float) -> float:
+        """
+        Normalize profit factor to 0-1 range.
+        
+        Profit factor: ratio of gross profit to gross loss
+        < 1.0: losing strategy
+        1.0-1.5: marginal
+        1.5-2.0: good
+        > 2.0: excellent
+        """
+        if profit_factor <= 0.5:
+            return 0.0
+        elif profit_factor >= 3.0:
+            return 1.0
+        # Map 0.5 to 3.0 -> 0 to 1
+        return (profit_factor - 0.5) / 2.5
+    
+    def _normalize_sortino(self, sortino: float) -> float:
+        """
+        Normalize Sortino ratio to 0-1 range.
+        
+        Similar to Sharpe but uses downside deviation
+        """
+        if sortino <= -2:
+            return 0.0
+        elif sortino >= 5:
+            return 1.0
+        return (sortino + 2) / 7
     
     def _normalize_trade_frequency(self, num_trades: int) -> float:
         """Normalize trade frequency to 0-1 range."""

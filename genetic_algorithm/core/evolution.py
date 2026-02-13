@@ -14,6 +14,7 @@ from genetic_algorithm.core.individual import Individual
 from genetic_algorithm.core.selection import select_parents
 from genetic_algorithm.core.crossover import crossover
 from genetic_algorithm.core.mutation import mutate
+from genetic_algorithm.core.adaptive_rates import AdaptiveRateController
 from genetic_algorithm.strategies.generator import StrategyGenerator
 from genetic_algorithm.evaluation.fitness import FitnessEvaluator
 
@@ -51,6 +52,19 @@ class GeneticAlgorithm:
         self.tournament_size = ga_config.get('tournament_size', 3)
         self.selection_method = ga_config.get('selection_method', 'tournament')
         self.convergence_patience = ga_config.get('convergence_patience', 10)
+        
+        # Adaptive rates configuration
+        self.use_adaptive_rates = ga_config.get('use_adaptive_rates', True)
+        if self.use_adaptive_rates:
+            self.adaptive_controller = AdaptiveRateController(
+                base_mutation_rate=self.mutation_rate,
+                base_crossover_rate=self.crossover_rate
+            )
+        
+        # Crossover method configuration
+        self.crossover_method = ga_config.get('crossover_method', 'single_point')
+        self.crossover_methods = ga_config.get('crossover_methods', ['single_point', 'uniform', 'component'])
+        self.use_multi_crossover = ga_config.get('use_multi_crossover', True)
         
         # Initialize components
         self.strategy_generator = StrategyGenerator(self.config)
@@ -153,6 +167,23 @@ class GeneticAlgorithm:
         """
         self.logger.info(f"Creating generation {self.current_generation + 1}")
         
+        # Get current generation stats for adaptive rates
+        stats = population.get_stats()
+        
+        # Update mutation and crossover rates if adaptive
+        current_mutation_rate = self.mutation_rate
+        current_crossover_rate = self.crossover_rate
+        
+        if self.use_adaptive_rates:
+            current_mutation_rate, current_crossover_rate = self.adaptive_controller.get_rates(
+                current_generation=self.current_generation,
+                total_generations=self.generations,
+                best_fitness=stats.best_fitness,
+                diversity_score=stats.diversity_score,
+                stagnation_count=self.no_improvement_count
+            )
+            self.logger.info(f"Adaptive rates: mutation={current_mutation_rate:.3f}, crossover={current_crossover_rate:.3f}")
+        
         # Sort by fitness
         population.sort_by_fitness(reverse=True)
         
@@ -178,12 +209,20 @@ class GeneticAlgorithm:
                 tournament_size=self.tournament_size
             )
             
+            # Choose crossover method
+            if self.use_multi_crossover:
+                # Probabilistically select crossover method
+                crossover_method = random.choice(self.crossover_methods)
+            else:
+                crossover_method = self.crossover_method
+            
             # Crossover
-            if random.random() < self.crossover_rate:
+            if random.random() < current_crossover_rate:
                 child1, child2 = crossover(
                     parent1, parent2,
                     generation=self.current_generation + 1,
-                    ind_id=self.elite_size + offspring_count
+                    ind_id=self.elite_size + offspring_count,
+                    method=crossover_method
                 )
             else:
                 # No crossover, just copy
@@ -197,10 +236,10 @@ class GeneticAlgorithm:
                 child2 = Individual(strategy_gene=gene2)
             
             # Mutation
-            if random.random() < self.mutation_rate:
-                child1 = mutate(child1, self.mutation_rate, self.config)
-            if random.random() < self.mutation_rate:
-                child2 = mutate(child2, self.mutation_rate, self.config)
+            if random.random() < current_mutation_rate:
+                child1 = mutate(child1, current_mutation_rate, self.config)
+            if random.random() < current_mutation_rate:
+                child2 = mutate(child2, current_mutation_rate, self.config)
             
             next_gen.add_individual(child1)
             if len(next_gen) < self.population_size:

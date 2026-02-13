@@ -25,16 +25,30 @@ genetic_algorithm:
   
   # Convergence threshold - stop if no improvement after N generations
   convergence_patience: 10
+  
+  # Adaptive rates - dynamically adjust mutation/crossover based on progress
+  use_adaptive_rates: true
+  
+  # Crossover method: 'single_point', 'uniform', 'component'
+  crossover_method: 'single_point'
+  
+  # Available crossover methods for multi-crossover mode
+  crossover_methods: ['single_point', 'uniform', 'component']
+  
+  # Use multiple crossover methods probabilistically
+  use_multi_crossover: true
 
 # === Fitness Function Weights ===
 # These weights determine how different metrics contribute to overall fitness
 # All weights should sum to 1.0
 fitness_weights:
-  profit: 0.30        # Total profit/return
-  sharpe_ratio: 0.25  # Risk-adjusted returns
-  drawdown: 0.20      # Maximum drawdown (penalty)
-  win_rate: 0.15      # Percentage of winning trades
+  profit: 0.25           # Total profit/return
+  sharpe_ratio: 0.15     # Risk-adjusted returns (Sharpe)
+  drawdown: 0.15         # Maximum drawdown (penalty)
+  win_rate: 0.10         # Percentage of winning trades
   trade_frequency: 0.10  # Number of trades (too few or too many is bad)
+  profit_factor: 0.15    # Ratio of gross profit to gross loss
+  sortino_ratio: 0.10    # Risk-adjusted returns (Sortino - downside risk)
 
 # Fitness penalties
 fitness_penalties:

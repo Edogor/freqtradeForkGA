@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional
 
 from genetic_algorithm.core.individual import Individual
 from genetic_algorithm.core.strategy_gene import StrategyGene, IndicatorGene, ConditionGene
+from genetic_algorithm.utils.roi_helper import mutate_roi
 
 
 def mutate_parameters(individual: Individual, mutation_rate: float,
@@ -127,11 +128,11 @@ def mutate_parameters(individual: Individual, mutation_rate: float,
     # Mutate ROI values
     if random.random() < mutation_rate:
         roi_range = strategy_constraints.get('roi_range', [0.01, 0.10])
-        mutated_gene.minimal_roi = {
-            0: random.uniform(roi_range[0] * 2, roi_range[1]),
-            30: random.uniform(roi_range[0] * 1.5, roi_range[1] * 0.7),
-            60: random.uniform(roi_range[0], roi_range[1] * 0.5),
-        }
+        mutated_gene.minimal_roi = mutate_roi(
+            mutated_gene.minimal_roi, 
+            tuple(roi_range),
+            mutation_strength=0.3
+        )
         mutations_applied.append("roi")
     
     # Create new individual with mutation record
@@ -487,11 +488,11 @@ def mutate_structure(individual: Individual, mutation_rate: float,
     # Mutate ROI
     if random.random() < mutation_rate:
         roi_range = strategy_constraints.get('roi_range', [0.01, 0.10])
-        mutated_gene.minimal_roi = {
-            0: random.uniform(roi_range[0] * 2, roi_range[1]),
-            30: random.uniform(roi_range[0] * 1.5, roi_range[1] * 0.7),
-            60: random.uniform(roi_range[0], roi_range[1] * 0.5),
-        }
+        mutated_gene.minimal_roi = mutate_roi(
+            mutated_gene.minimal_roi,
+            tuple(roi_range),
+            mutation_strength=0.3
+        )
         mutations_applied.append("roi")
     
     # Mutate trailing stop
