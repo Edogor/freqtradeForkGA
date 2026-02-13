@@ -6,7 +6,7 @@ Each strategy is encoded as a set of genes that can be mutated and crossed over.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import random
 
 
@@ -178,7 +178,7 @@ class StrategyGene:
         )
     
     @staticmethod
-    def _normalize_roi(roi: Dict[Any, float]) -> Dict[str, float]:
+    def _normalize_roi(roi: Dict[Union[int, str], float]) -> Dict[str, float]:
         """
         Normalize ROI dictionary to have string keys.
         
