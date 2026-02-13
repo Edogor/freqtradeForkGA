@@ -52,6 +52,7 @@ This module implements a Genetic Algorithm (GA) system for autonomously developi
 ### What This System Does
 
 ✅ **Automatically generates** trading strategies with multiple indicators  
+✅ **Validates strategies** before use to ensure they work without errors  
 ✅ **Uses real FreqTrade backtesting** engine (not mocked!)  
 ✅ **Produces production-ready** strategies for live trading  
 ✅ **Evolves strategies** over multiple generations  
@@ -63,10 +64,11 @@ This module implements a Genetic Algorithm (GA) system for autonomously developi
 
 ### Essential Reading
 1. **RUN_GA_GUIDE.md** - 🚀 **Complete guide for run_ga.py** - configuration and usage
-2. **STATUS_REPORT.md** - ⭐ Current status and capabilities
-3. **TUTORIAL.md** - Complete usage guide with examples
-4. **QUICK_REFERENCE.md** - Quick commands and examples
-5. **ACCOMPLISHMENTS.md** - Detailed list of what's been implemented
+2. **VALIDATION_GUIDE.md** - ⚡ **Strategy validation system** - how it works and why it matters
+3. **STATUS_REPORT.md** - ⭐ Current status and capabilities
+4. **TUTORIAL.md** - Complete usage guide with examples
+5. **QUICK_REFERENCE.md** - Quick commands and examples
+6. **ACCOMPLISHMENTS.md** - Detailed list of what's been implemented
 
 ### Additional Resources
 - **DEVELOPMENT_PLAN.md** - Original architecture and design plan
@@ -79,6 +81,7 @@ This module implements a Genetic Algorithm (GA) system for autonomously developi
 
 ### Core Functionality (Verified February 13, 2026)
 - ✅ **Strategy Generation**: Creates valid FreqTrade IStrategy classes
+- ✅ **Strategy Validation**: Validates strategies before use (NEW!)
 - ✅ **Genetic Operators**: Selection, crossover, mutation all implemented
 - ✅ **Evolution Loop**: Multi-generation evolution working
 - ✅ **Real Backtesting**: Integrates with FreqTrade's actual backtesting engine

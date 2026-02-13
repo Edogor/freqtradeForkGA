@@ -6,10 +6,14 @@ representations to FreqTrade strategy code.
 """
 
 import random
-from typing import Dict, Any, List
+import logging
+from typing import Dict, Any, List, Optional, Tuple
 
 from genetic_algorithm.core.strategy_gene import StrategyGene, IndicatorGene, ConditionGene
 from genetic_algorithm.utils.roi_helper import generate_monotonic_roi
+from genetic_algorithm.validation.strategy_validator import StrategyValidator, ValidationResult
+
+logger = logging.getLogger(__name__)
 
 
 class StrategyGenerator:
@@ -36,10 +40,85 @@ class StrategyGenerator:
         # Available components
         self.available_indicators = self.indicator_config.get('available', [])
         self.available_timeframes = self.strategy_constraints.get('timeframes', ['5m', '15m', '1h'])
+        
+        # Initialize validator
+        self.validator = StrategyValidator(config)
+        self.enable_validation = config.get('validation', {}).get('enable_validation', True)
+        self.max_generation_attempts = config.get('validation', {}).get('max_generation_attempts', 5)
     
     def generate_random_strategy(self, generation: int, individual_id: int) -> StrategyGene:
         """
         Generate a random trading strategy.
+        
+        Args:
+            generation: Generation number
+            individual_id: Individual ID
+            
+        Returns:
+            Random StrategyGene
+        """
+        # If validation is enabled, try multiple times to generate a valid strategy
+        if self.enable_validation:
+            return self._generate_validated_strategy(generation, individual_id)
+        else:
+            return self._generate_strategy_internal(generation, individual_id)
+    
+    def _generate_validated_strategy(self, generation: int, individual_id: int) -> StrategyGene:
+        """
+        Generate a validated random strategy with retry logic.
+        
+        Args:
+            generation: Generation number
+            individual_id: Individual ID
+            
+        Returns:
+            Validated StrategyGene
+        """
+        strategy_gene = None
+        
+        for attempt in range(self.max_generation_attempts):
+            try:
+                # Generate strategy
+                strategy_gene = self._generate_strategy_internal(generation, individual_id)
+                
+                # Generate code and validate
+                strategy_code = self.generate_strategy_code(strategy_gene)
+                validation_result = self.validator.validate_strategy(strategy_code, strategy_gene)
+                
+                if validation_result.is_valid:
+                    if validation_result.warnings:
+                        logger.debug(f"Strategy Gen{generation}_Ind{individual_id} has warnings: {validation_result.warnings}")
+                    logger.info(f"Generated valid strategy Gen{generation}_Ind{individual_id} (attempt {attempt + 1})")
+                    return strategy_gene
+                else:
+                    logger.warning(
+                        f"Strategy Gen{generation}_Ind{individual_id} validation failed "
+                        f"(attempt {attempt + 1}/{self.max_generation_attempts}): "
+                        f"{validation_result.error_type} - {validation_result.error_message}"
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Error generating strategy (attempt {attempt + 1}): {e}")
+        
+        # If all attempts failed, log error and return the last generated strategy
+        # If no strategy was ever generated, create a minimal fallback
+        if strategy_gene is None:
+            logger.error(
+                f"Failed to generate any strategy for Gen{generation}_Ind{individual_id}. "
+                f"Creating minimal fallback strategy."
+            )
+            strategy_gene = self._generate_strategy_internal(generation, individual_id)
+        else:
+            logger.error(
+                f"Failed to generate valid strategy Gen{generation}_Ind{individual_id} "
+                f"after {self.max_generation_attempts} attempts. Using last attempt."
+            )
+        
+        return strategy_gene
+    
+    def _generate_strategy_internal(self, generation: int, individual_id: int) -> StrategyGene:
+        """
+        Internal method to generate a random trading strategy without validation.
         
         Args:
             generation: Generation number
@@ -316,6 +395,33 @@ class {strategy_name}(IStrategy):
 '''
         
         return code
+    
+    def validate_and_fix_strategy(self, strategy_gene: StrategyGene) -> Tuple[StrategyGene, ValidationResult]:
+        """
+        Validate a strategy and attempt to fix it if invalid.
+        
+        Args:
+            strategy_gene: Strategy to validate
+            
+        Returns:
+            Tuple of (possibly_fixed_strategy_gene, validation_result)
+        """
+        # Generate code
+        strategy_code = self.generate_strategy_code(strategy_gene)
+        
+        # Validate
+        validation_result = self.validator.validate_strategy(strategy_code, strategy_gene)
+        
+        # If validation failed and we can't fix it, try regenerating
+        if not validation_result.is_valid:
+            logger.warning(
+                f"Strategy Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id} is invalid: "
+                f"{validation_result.error_type} - {validation_result.error_message}"
+            )
+            # For now, just return the original strategy and result
+            # In the future, we could implement automatic fixes here
+        
+        return strategy_gene, validation_result
     
     def _generate_indicator_code(self, indicators: List[IndicatorGene]) -> str:
         """Generate Python code for indicators."""

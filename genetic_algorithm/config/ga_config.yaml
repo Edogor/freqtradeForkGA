@@ -102,6 +102,24 @@ strategy_constraints:
   # ROI range
   roi_range: [0.01, 0.10]
 
+# === Strategy Validation Configuration ===
+validation:
+  # Enable strategy validation before adding to population
+  enable_validation: true
+  
+  # Enable runtime validation (imports and instantiation)
+  # Note: Set to false if FreqTrade dependencies are not available
+  enable_runtime_validation: false
+  
+  # Maximum attempts to generate a valid strategy
+  max_generation_attempts: 5
+  
+  # Maximum attempts to regenerate/fix invalid offspring
+  max_validation_attempts: 3
+  
+  # Maximum attempts to fix syntax/semantic errors
+  max_fix_attempts: 3
+
 # === Indicator Configuration ===
 indicators:
   # Available indicators for strategy generation
