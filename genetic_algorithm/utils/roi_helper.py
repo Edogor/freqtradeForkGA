@@ -29,12 +29,15 @@ def generate_monotonic_roi(roi_range: tuple = (0.01, 0.10),
     
     min_roi, max_roi = roi_range
     
-    # Start with highest ROI at time 0
-    roi_values = []
+    # Constants for ROI generation
+    INITIAL_ROI_MULTIPLIER = 2.0  # Start with double the minimum ROI
     
     # Generate descending values
-    current_roi = random.uniform(min_roi * 2, max_roi)
-    roi_values.append(current_roi)
+    descending_roi_values = []
+    
+    # Start with highest ROI at time 0
+    current_roi = random.uniform(min_roi * INITIAL_ROI_MULTIPLIER, max_roi)
+    descending_roi_values.append(current_roi)
     
     for i in range(1, len(time_points)):
         # Each subsequent value should be lower
@@ -47,10 +50,10 @@ def generate_monotonic_roi(roi_range: tuple = (0.01, 0.10),
             min_next = max_next * 0.9
         
         current_roi = random.uniform(min_next, max_next)
-        roi_values.append(current_roi)
+        descending_roi_values.append(current_roi)
     
     # Create dictionary with time points as keys
-    roi_dict = {time_points[i]: roi_values[i] for i in range(len(time_points))}
+    roi_dict = {time_points[i]: descending_roi_values[i] for i in range(len(time_points))}
     
     # Validate monotonic property
     assert is_monotonic_roi(roi_dict), "Generated ROI is not monotonic"
@@ -126,6 +129,11 @@ def mutate_roi(roi: Dict[int, float], roi_range: tuple = (0.01, 0.10),
     Returns:
         Mutated ROI dictionary that is still monotonically decreasing
     """
+    # Constants for mutation bounds
+    MIN_ROI_FRACTION = 0.5  # Ensure values stay at least 50% of min ROI
+    MAX_PREVIOUS_FRACTION = 0.99  # Ensure values stay below 99% of previous
+    INITIAL_ROI_MULTIPLIER = 2.0  # For first value
+    
     min_roi, max_roi = roi_range
     sorted_times = sorted(roi.keys())
     mutated_roi = {}
@@ -134,7 +142,7 @@ def mutate_roi(roi: Dict[int, float], roi_range: tuple = (0.01, 0.10),
     current_value = roi[sorted_times[0]]
     variation = current_value * mutation_strength
     new_value = current_value + random.uniform(-variation, variation)
-    new_value = max(min_roi * 2, min(max_roi, new_value))
+    new_value = max(min_roi * INITIAL_ROI_MULTIPLIER, min(max_roi, new_value))
     mutated_roi[sorted_times[0]] = new_value
     
     # Mutate subsequent values, ensuring they stay below previous
@@ -147,7 +155,7 @@ def mutate_roi(roi: Dict[int, float], roi_range: tuple = (0.01, 0.10),
         new_value = current_value + random.uniform(-variation, variation)
         
         # Ensure it's less than or equal to previous and within bounds
-        new_value = max(min_roi * 0.5, min(previous_value * 0.99, new_value))
+        new_value = max(min_roi * MIN_ROI_FRACTION, min(previous_value * MAX_PREVIOUS_FRACTION, new_value))
         mutated_roi[sorted_times[i]] = new_value
     
     # Verify monotonic property

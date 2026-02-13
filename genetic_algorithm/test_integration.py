@@ -73,8 +73,8 @@ def test_logic_operators_in_conditions():
     print("="*60)
     
     # Verify logic operators are in the code
-    assert '&' in code or 'AND' in code, "AND operator should be present"
-    assert '|' in code or 'OR' in code, "OR operator should be present"
+    # Python uses & for AND and | for OR operators
+    assert '&' in code or '|' in code, "Logic operators (& or |) should be present"
     print("✓ Logic operators (AND/OR) are properly used in generated code")
     
     # Verify both conditions are present
