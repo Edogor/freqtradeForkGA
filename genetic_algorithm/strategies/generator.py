@@ -7,7 +7,7 @@ representations to FreqTrade strategy code.
 
 import random
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from genetic_algorithm.core.strategy_gene import StrategyGene, IndicatorGene, ConditionGene
 from genetic_algorithm.utils.roi_helper import generate_monotonic_roi
@@ -108,18 +108,7 @@ class StrategyGenerator:
     
     def _generate_strategy_internal(self, generation: int, individual_id: int) -> StrategyGene:
         """
-        Generate a random trading strategy.
-        
-        Args:
-            generation: Generation number
-            individual_id: Individual ID
-            
-        Returns:
-            Random StrategyGene
-        """
-    def _generate_strategy_internal(self, generation: int, individual_id: int) -> StrategyGene:
-        """
-        Internal method to generate a random trading strategy.
+        Internal method to generate a random trading strategy without validation.
         
         Args:
             generation: Generation number
@@ -397,7 +386,7 @@ class {strategy_name}(IStrategy):
         
         return code
     
-    def validate_and_fix_strategy(self, strategy_gene: StrategyGene) -> tuple[StrategyGene, ValidationResult]:
+    def validate_and_fix_strategy(self, strategy_gene: StrategyGene) -> Tuple[StrategyGene, ValidationResult]:
         """
         Validate a strategy and attempt to fix it if invalid.
         

@@ -25,7 +25,7 @@ class ValidationResult:
     error_type: Optional[str] = None
     error_message: Optional[str] = None
     fixed_code: Optional[str] = None
-    warnings: list = None
+    warnings: Optional[list] = None
     
     def __post_init__(self):
         if self.warnings is None:
@@ -305,7 +305,8 @@ class StrategyValidator:
             try:
                 temp_file.unlink(missing_ok=True)
                 Path(temp_dir).rmdir()
-            except:
+            except (OSError, PermissionError):
+                # Ignore cleanup errors
                 pass
     
     def _try_fix_syntax_errors(self, strategy_code: str, error_result: ValidationResult) -> Optional[ValidationResult]:
