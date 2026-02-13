@@ -114,7 +114,8 @@ def test_monotonic_roi_in_generated_strategy():
         
         # Check ROI is monotonic
         roi = strategy.minimal_roi
-        sorted_times = sorted(roi.keys())
+        # Sort numerically by converting string keys to integers
+        sorted_times = sorted(roi.keys(), key=lambda x: int(x))
         
         for j in range(1, len(sorted_times)):
             current_value = roi[sorted_times[j]]

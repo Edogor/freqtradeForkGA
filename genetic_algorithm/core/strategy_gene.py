@@ -92,6 +92,9 @@ class StrategyGene:
     
     def __post_init__(self):
         """Validate strategy gene after initialization."""
+        # Normalize ROI keys to strings
+        self.minimal_roi = self._normalize_roi(self.minimal_roi)
+        
         if not self.indicators:
             raise ValueError("Strategy must have at least one indicator")
         if not self.entry_conditions:
