@@ -241,6 +241,12 @@ class GeneticAlgorithm:
             if random.random() < current_mutation_rate:
                 child2 = mutate(child2, current_mutation_rate, self.config)
             
+            # Validate offspring if validation is enabled
+            if self.config.get('validation', {}).get('enable_validation', True):
+                child1 = self._validate_or_regenerate(child1, self.current_generation + 1, self.elite_size + offspring_count)
+                if len(next_gen) < self.population_size - 1:
+                    child2 = self._validate_or_regenerate(child2, self.current_generation + 1, self.elite_size + offspring_count + 1)
+            
             next_gen.add_individual(child1)
             if len(next_gen) < self.population_size:
                 next_gen.add_individual(child2)
@@ -331,6 +337,56 @@ class GeneticAlgorithm:
         # Return top strategies
         population.sort_by_fitness(reverse=True)
         return population.get_best(10)
+    
+    def _validate_or_regenerate(self, individual: Individual, generation: int, individual_id: int) -> Individual:
+        """
+        Validate an individual and regenerate if invalid.
+        
+        Args:
+            individual: Individual to validate
+            generation: Generation number
+            individual_id: Individual ID
+            
+        Returns:
+            Valid individual (either the original or a newly generated one)
+        """
+        max_attempts = self.config.get('validation', {}).get('max_validation_attempts', 3)
+        
+        # Validate the strategy
+        strategy_gene, validation_result = self.strategy_generator.validate_and_fix_strategy(individual.strategy_gene)
+        
+        if validation_result.is_valid:
+            return individual
+        
+        # If invalid, try to regenerate
+        self.logger.warning(
+            f"Individual Gen{generation}_Ind{individual_id} failed validation. "
+            f"Attempting to regenerate..."
+        )
+        
+        for attempt in range(max_attempts):
+            try:
+                # Generate a new strategy
+                new_gene = self.strategy_generator.generate_random_strategy(generation, individual_id)
+                new_individual = Individual(strategy_gene=new_gene)
+                
+                # Validate the new strategy
+                _, new_validation = self.strategy_generator.validate_and_fix_strategy(new_gene)
+                
+                if new_validation.is_valid:
+                    self.logger.info(f"Successfully regenerated valid strategy (attempt {attempt + 1})")
+                    return new_individual
+                    
+            except Exception as e:
+                self.logger.error(f"Error during regeneration attempt {attempt + 1}: {e}")
+        
+        # If all regeneration attempts failed, return the original individual
+        # It will likely get low fitness but won't crash the system
+        self.logger.warning(
+            f"Failed to regenerate valid strategy after {max_attempts} attempts. "
+            f"Using original (invalid) strategy."
+        )
+        return individual
     
     def get_top_strategies(self, n: int = 5) -> List[Individual]:
         """
