@@ -469,7 +469,7 @@ class DirectBacktester:
             config_dict = self._create_backtest_config(strategy_name, timerange=timerange)
             
             # Create a mock ccxt exchange object with proper name attribute
-            exchange_name = config_dict.get('exchange', {}).get('name', 'binance')
+            exchange_name = config_dict.get('exchange', {}).get('name', self.DEFAULT_EXCHANGE)
             mock_ccxt = MagicMock()
             mock_ccxt.name = exchange_name.capitalize()  # ccxt exchanges have capitalized names
             mock_ccxt.id = exchange_name.lower()
