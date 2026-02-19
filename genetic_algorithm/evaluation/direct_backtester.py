@@ -468,12 +468,18 @@ class DirectBacktester:
             # Create configuration
             config_dict = self._create_backtest_config(strategy_name, timerange=timerange)
             
+            # Create a mock ccxt exchange object with proper name attribute
+            exchange_name = config_dict.get('exchange', {}).get('name', 'binance')
+            mock_ccxt = MagicMock()
+            mock_ccxt.name = exchange_name.capitalize()  # ccxt exchanges have capitalized names
+            mock_ccxt.id = exchange_name.lower()
+            
             # Mock the exchange to avoid network calls
             with patch.object(Exchange, '_load_async_markets', return_value={}), \
                  patch.object(Exchange, 'markets', PropertyMock(return_value=self._get_mock_markets())), \
                  patch.object(Exchange, 'validate_config', MagicMock()), \
                  patch.object(Exchange, 'validate_timeframes', MagicMock()), \
-                 patch.object(Exchange, '_init_ccxt', MagicMock()), \
+                 patch.object(Exchange, '_init_ccxt', return_value=mock_ccxt), \
                  patch.object(Exchange, 'get_fee', return_value=0.001), \
                  patch.object(Exchange, 'precisionMode', PropertyMock(return_value=2)), \
                  patch.object(Exchange, 'precision_mode_price', PropertyMock(return_value=2)), \
