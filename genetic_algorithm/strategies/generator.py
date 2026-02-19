@@ -262,17 +262,21 @@ class StrategyGenerator:
             logic='AND'
         )
     
-    def generate_strategy_code(self, strategy_gene: StrategyGene) -> str:
+    def generate_strategy_code(self, strategy_gene: StrategyGene, strategy_name: str = None) -> str:
         """
         Convert a StrategyGene to FreqTrade Python code.
         
         Args:
             strategy_gene: Strategy genetic representation
+            strategy_name: Optional custom strategy name. If not provided, 
+                          generates default name from generation and individual_id
             
         Returns:
             Python code as string
         """
-        strategy_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
+        # Use provided name or generate default
+        if strategy_name is None:
+            strategy_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
         
         # Generate indicator code
         indicator_code = self._generate_indicator_code(strategy_gene.indicators)

@@ -202,8 +202,7 @@ class FitnessEvaluator:
             Tuple of (fitness_score, metrics_dict)
         """
         try:
-            # Generate strategy code
-            strategy_code = self.strategy_generator.generate_strategy_code(strategy_gene)
+            # Base strategy name
             generated_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
             
             validation_scores: List[float] = []
@@ -216,11 +215,19 @@ class FitnessEvaluator:
                 logger.info(f"  [{i+1}/{len(self.walk_forward_windows)}] Window {i+1}: "
                            f"Val={wf_window.validation_window.to_freqtrade_format()}")
                 
+                # Generate strategy code with window-specific name
+                # This ensures the class name matches what FreqTrade expects
+                val_strategy_name = f"{generated_name}_W{i}_Val"
+                val_strategy_code = self.strategy_generator.generate_strategy_code(
+                    strategy_gene, 
+                    strategy_name=val_strategy_name
+                )
+                
                 # Run backtest on validation window
                 val_timerange = wf_window.validation_window.to_freqtrade_format()
                 val_result = self.backtester.backtest_strategy(
-                    strategy_code,
-                    f"{generated_name}_W{i}_Val",
+                    val_strategy_code,
+                    val_strategy_name,
                     timerange=val_timerange
                 )
                 
