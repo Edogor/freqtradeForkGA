@@ -6,11 +6,18 @@ and calculating performance metrics.
 """
 
 import logging
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, List, Optional
 
 from genetic_algorithm.core.strategy_gene import StrategyGene
 from genetic_algorithm.evaluation.direct_backtester import DirectBacktester, BacktestResult
 from genetic_algorithm.strategies.generator import StrategyGenerator
+from genetic_algorithm.utils.timerange import (
+    create_walk_forward_windows,
+    aggregate_validation_scores,
+    validate_walk_forward_config,
+    get_walk_forward_summary,
+    WalkForwardWindow
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +45,88 @@ class FitnessEvaluator:
         self.fitness_penalties = config.get('fitness_penalties', {})
         self.backtest_config = config.get('backtesting', {})
         
+        # Walk-forward configuration
+        self.walk_forward_config = config.get('walk_forward', {})
+        self.walk_forward_enabled = self.walk_forward_config.get('enabled', False)
+        
         # Initialize direct backtester and strategy generator
         self.backtester = DirectBacktester(config)
         self.strategy_generator = StrategyGenerator(config)
+        
+        # Initialize walk-forward windows if enabled
+        self.walk_forward_windows: List[WalkForwardWindow] = []
+        if self.walk_forward_enabled:
+            self._initialize_walk_forward()
+    
+    def _initialize_walk_forward(self):
+        """
+        Initialize walk-forward windows from configuration.
+        """
+        try:
+            # Validate configuration
+            validate_walk_forward_config(self.config)
+            
+            # Get timerange from backtesting config
+            timerange = self.backtest_config.get('timerange', '')
+            if not timerange:
+                logger.error("Cannot initialize walk-forward: no timerange specified in backtesting config")
+                self.walk_forward_enabled = False
+                return
+            
+            # Create walk-forward windows
+            wf_config = self.walk_forward_config
+            self.walk_forward_windows = create_walk_forward_windows(
+                timerange=timerange,
+                train_days=wf_config['train_days'],
+                validation_days=wf_config['validation_days'],
+                step_days=wf_config['step_days'],
+                mode=wf_config.get('mode', 'rolling'),
+                min_train_trades=wf_config.get('min_train_trades')
+            )
+            
+            # Log summary
+            summary = get_walk_forward_summary(self.walk_forward_windows)
+            logger.info("=" * 80)
+            logger.info("Walk-Forward Optimization Enabled")
+            logger.info(f"  Number of windows: {summary['num_windows']}")
+            logger.info(f"  Average train days: {summary['avg_train_days']:.1f}")
+            logger.info(f"  Average validation days: {summary['avg_validate_days']:.1f}")
+            logger.info(f"  First train start: {summary['first_train_start']}")
+            logger.info(f"  Last validate end: {summary['last_validate_end']}")
+            logger.info(f"  Aggregation method: {wf_config.get('aggregation', 'mean')}")
+            logger.info("=" * 80)
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize walk-forward: {e}")
+            logger.warning("Disabling walk-forward optimization and falling back to standard evaluation")
+            self.walk_forward_enabled = False
+            self.walk_forward_windows = []
     
     def evaluate(self, strategy_gene: StrategyGene, strategy_name: str = None) -> Tuple[float, Dict[str, float]]:
         """
         Evaluate a strategy's fitness through backtesting.
         
+        Uses walk-forward optimization if enabled, otherwise uses standard evaluation.
+        
         Args:
             strategy_gene: Strategy to evaluate
             strategy_name: Optional name for the strategy (auto-generated if not provided)
+            
+        Returns:
+            Tuple of (fitness_score, metrics_dict)
+        """
+        if self.walk_forward_enabled and self.walk_forward_windows:
+            return self._evaluate_walk_forward(strategy_gene, strategy_name)
+        else:
+            return self._evaluate_standard(strategy_gene, strategy_name)
+    
+    def _evaluate_standard(self, strategy_gene: StrategyGene, strategy_name: str = None) -> Tuple[float, Dict[str, float]]:
+        """
+        Evaluate a strategy using standard backtesting (no walk-forward).
+        
+        Args:
+            strategy_gene: Strategy to evaluate
+            strategy_name: Optional name for the strategy
             
         Returns:
             Tuple of (fitness_score, metrics_dict)
@@ -105,6 +183,136 @@ class FitnessEvaluator:
                 'complexity': strategy_gene.calculate_complexity(),
                 'error': str(e)
             }
+    
+    def _evaluate_walk_forward(self, strategy_gene: StrategyGene, strategy_name: str = None) -> Tuple[float, Dict[str, float]]:
+        """
+        Evaluate a strategy using walk-forward optimization.
+        
+        For each walk-forward window:
+        1. Train on training window (not used for fitness, but for consistency)
+        2. Evaluate on validation window
+        3. Aggregate validation scores
+        
+        Args:
+            strategy_gene: Strategy to evaluate
+            strategy_name: Optional name for the strategy
+            
+        Returns:
+            Tuple of (fitness_score, metrics_dict)
+        """
+        try:
+            # Generate strategy code
+            strategy_code = self.strategy_generator.generate_strategy_code(strategy_gene)
+            generated_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
+            
+            validation_scores: List[float] = []
+            validation_metrics_list: List[Dict[str, float]] = []
+            
+            logger.info(f"Evaluating {generated_name} using walk-forward with {len(self.walk_forward_windows)} windows")
+            
+            # Evaluate on each window
+            for i, wf_window in enumerate(self.walk_forward_windows):
+                logger.debug(f"  Window {i+1}/{len(self.walk_forward_windows)}: "
+                           f"Train={wf_window.train_window.to_freqtrade_format()}, "
+                           f"Val={wf_window.validation_window.to_freqtrade_format()}")
+                
+                # Run backtest on validation window
+                val_timerange = wf_window.validation_window.to_freqtrade_format()
+                val_result = self.backtester.backtest_strategy(
+                    strategy_code,
+                    f"{generated_name}_W{i}_Val",
+                    timerange=val_timerange
+                )
+                
+                # Check if validation backtest was successful
+                if not val_result.success:
+                    logger.warning(f"  Window {i+1} validation failed: {val_result.error_message}")
+                    validation_scores.append(0.0)
+                    continue
+                
+                # Convert validation result to metrics
+                val_metrics = self._backtest_result_to_metrics(val_result)
+                val_metrics['complexity'] = strategy_gene.calculate_complexity()
+                
+                # Calculate fitness for this validation window
+                val_fitness = self.calculate_fitness(val_metrics, strategy_gene)
+                validation_scores.append(val_fitness)
+                validation_metrics_list.append(val_metrics)
+                
+                logger.debug(f"    Validation fitness: {val_fitness:.4f}, "
+                           f"profit: {val_metrics['profit']:.2f}%, "
+                           f"trades: {val_metrics['num_trades']}")
+            
+            # Aggregate validation scores
+            aggregation_method = self.walk_forward_config.get('aggregation', 'mean')
+            aggregated_fitness = aggregate_validation_scores(validation_scores, method=aggregation_method)
+            
+            # Aggregate metrics (use mean for all metrics)
+            if validation_metrics_list:
+                aggregated_metrics = self._aggregate_metrics(validation_metrics_list)
+                aggregated_metrics['complexity'] = strategy_gene.calculate_complexity()
+                aggregated_metrics['walk_forward_windows'] = len(self.walk_forward_windows)
+                aggregated_metrics['validation_scores'] = validation_scores
+                aggregated_metrics['aggregation_method'] = aggregation_method
+            else:
+                aggregated_metrics = {
+                    'profit': 0.0,
+                    'sharpe_ratio': 0.0,
+                    'max_drawdown': 1.0,
+                    'win_rate': 0.0,
+                    'num_trades': 0,
+                    'complexity': strategy_gene.calculate_complexity(),
+                    'walk_forward_windows': len(self.walk_forward_windows),
+                    'error': 'All validation windows failed'
+                }
+            
+            logger.info(f"Strategy {generated_name}: walk-forward fitness={aggregated_fitness:.4f} "
+                       f"({aggregation_method} of {len(validation_scores)} windows), "
+                       f"profit={aggregated_metrics.get('profit', 0):.2f}%, "
+                       f"trades={aggregated_metrics.get('num_trades', 0)}")
+            
+            return aggregated_fitness, aggregated_metrics
+            
+        except Exception as e:
+            generated_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
+            logger.error(f"Error in walk-forward evaluation for {generated_name}: {e}", exc_info=True)
+            return 0.0, {
+                'profit': 0.0,
+                'sharpe_ratio': 0.0,
+                'max_drawdown': 1.0,
+                'win_rate': 0.0,
+                'num_trades': 0,
+                'complexity': strategy_gene.calculate_complexity(),
+                'error': str(e)
+            }
+    
+    def _aggregate_metrics(self, metrics_list: List[Dict[str, float]]) -> Dict[str, float]:
+        """
+        Aggregate metrics from multiple validation windows.
+        
+        Uses arithmetic mean for all metrics.
+        
+        Args:
+            metrics_list: List of metrics dictionaries
+            
+        Returns:
+            Aggregated metrics dictionary
+        """
+        if not metrics_list:
+            return {}
+        
+        # Get all metric keys from first dict
+        metric_keys = [k for k in metrics_list[0].keys() if k not in ['error', 'complexity']]
+        
+        aggregated = {}
+        for key in metric_keys:
+            values = [m.get(key, 0) for m in metrics_list if m.get(key) is not None]
+            if values:
+                aggregated[key] = sum(values) / len(values)
+            else:
+                aggregated[key] = 0.0
+        
+        return aggregated
     
     def _backtest_result_to_metrics(self, result: BacktestResult) -> Dict[str, float]:
         """

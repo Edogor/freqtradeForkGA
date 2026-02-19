@@ -238,6 +238,42 @@ visualization:
   # Save plots to directory
   output_dir: "genetic_algorithm/plots"
 
+# === Walk-Forward Optimization (Anti-Overfitting) ===
+walk_forward:
+  # Enable walk-forward optimization
+  # When enabled, strategies are evaluated on multiple train/validation windows
+  # to prevent overfitting and improve real-world performance
+  enabled: false
+  
+  # Training window size (days)
+  # Number of days to use for training in each walk-forward window
+  train_days: 60
+  
+  # Validation window size (days)
+  # Number of days to use for validation in each walk-forward window
+  validation_days: 15
+  
+  # Step size (days)
+  # How many days to slide forward for the next window
+  # Smaller values = more windows = more robust but slower
+  step_days: 15
+  
+  # Window mode
+  # 'rolling': Fixed-size training windows (more common)
+  # 'anchored': Expanding training windows (starts from beginning)
+  mode: 'rolling'
+  
+  # Aggregation method for validation scores
+  # 'mean': Average performance across all validation windows
+  # 'min': Conservative - worst-case performance
+  # 'harmonic_mean': Penalizes inconsistency
+  # 'weighted': More weight to recent windows
+  aggregation: 'mean'
+  
+  # Minimum trades required in training window (optional)
+  # Skip window if training has fewer trades than this
+  min_train_trades: 10
+
 # === Advanced Features (Optional) ===
 advanced:
   # Enable parallel evaluation of strategies

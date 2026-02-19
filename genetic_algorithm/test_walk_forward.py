@@ -350,6 +350,38 @@ class TestGetWalkForwardSummary:
         assert summary['total_validate_days'] == 0
 
 
+class TestWalkForwardIntegration:
+    """Integration tests for walk-forward with FitnessEvaluator."""
+    
+    def test_walk_forward_config_validation(self):
+        """Test that walk-forward configuration validates correctly."""
+        valid_config = {
+            'walk_forward': {
+                'enabled': True,
+                'train_days': 30,
+                'validation_days': 10,
+                'step_days': 10,
+                'mode': 'rolling',
+                'aggregation': 'mean'
+            }
+        }
+        # Should not raise
+        validate_walk_forward_config(valid_config)
+    
+    def test_disabled_walk_forward_by_default(self):
+        """Test that walk-forward is disabled by default in config."""
+        import yaml
+        from pathlib import Path
+        
+        config_path = Path(__file__).parent / 'config' / 'ga_config.yaml'
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        # Walk-forward should exist but be disabled by default
+        assert 'walk_forward' in config
+        assert config['walk_forward']['enabled'] == False
+
+
 if __name__ == "__main__":
     # Run tests
     pytest.main([__file__, "-v"])

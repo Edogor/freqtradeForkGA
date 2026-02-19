@@ -373,7 +373,8 @@ class DirectBacktester:
     def backtest_strategy(self, 
                          strategy_code: str, 
                          strategy_name: str,
-                         max_retries: int = 2) -> BacktestResult:
+                         max_retries: int = 2,
+                         timerange: str = None) -> BacktestResult:
         """
         Run backtest for a strategy using direct Python API.
         
@@ -381,15 +382,21 @@ class DirectBacktester:
             strategy_code: Python code for strategy
             strategy_name: Name of the strategy
             max_retries: Maximum number of retries on failure
+            timerange: Optional timerange override (format: YYYYMMDD-YYYYMMDD)
             
         Returns:
             BacktestResult object
         """
         start_time = time.time()
         
+        # Use custom timerange if provided, otherwise use default from config
+        backtest_config = self.backtest_config.copy()
+        if timerange:
+            backtest_config['timerange'] = timerange
+        
         # Check cache first
         if self.cache:
-            cached_result = self.cache.get(strategy_code, self.backtest_config)
+            cached_result = self.cache.get(strategy_code, backtest_config)
             if cached_result:
                 logger.info(f"Using cached result for {strategy_name}")
                 return cached_result
@@ -402,12 +409,12 @@ class DirectBacktester:
                     logger.info(f"Retry {attempt}/{max_retries} for {strategy_name}")
                     time.sleep(1)
                 
-                result = self._run_backtest_direct(strategy_code, strategy_name)
+                result = self._run_backtest_direct(strategy_code, strategy_name, timerange=timerange)
                 result.execution_time = time.time() - start_time
                 
                 # Cache successful result
                 if result.success and self.cache:
-                    self.cache.put(strategy_code, self.backtest_config, result)
+                    self.cache.put(strategy_code, backtest_config, result)
                 
                 return result
                 
@@ -426,13 +433,14 @@ class DirectBacktester:
             execution_time=execution_time
         )
     
-    def _run_backtest_direct(self, strategy_code: str, strategy_name: str) -> BacktestResult:
+    def _run_backtest_direct(self, strategy_code: str, strategy_name: str, timerange: str = None) -> BacktestResult:
         """
         Run backtest using FreqTrade Python API with mocked exchange.
         
         Args:
             strategy_code: Python code for strategy
             strategy_name: Name of the strategy
+            timerange: Optional timerange override (format: YYYYMMDD-YYYYMMDD)
             
         Returns:
             BacktestResult object
@@ -458,7 +466,7 @@ class DirectBacktester:
             from freqtrade.exchange.exchange import Exchange
             
             # Create configuration
-            config_dict = self._create_backtest_config(strategy_name)
+            config_dict = self._create_backtest_config(strategy_name, timerange=timerange)
             
             # Mock the exchange to avoid network calls
             with patch.object(Exchange, '_load_async_markets', return_value={}), \
@@ -516,7 +524,7 @@ class DirectBacktester:
                 error_message=f"Execution error: {str(e)}"
             )
     
-    def _create_backtest_config(self, strategy_name: str) -> Dict[str, Any]:
+    def _create_backtest_config(self, strategy_name: str, timerange: str = None) -> Dict[str, Any]:
         """
         Create FreqTrade config for backtesting from GA config.
         
@@ -524,6 +532,7 @@ class DirectBacktester:
         
         Args:
             strategy_name: Name of the strategy
+            timerange: Optional timerange override (format: YYYYMMDD-YYYYMMDD)
             
         Returns:
             Configuration dictionary
@@ -533,7 +542,8 @@ class DirectBacktester:
         
         # Extract values from GA config
         pairs = ga_cfg.get('pairs', ['UNITTEST/BTC'])
-        timerange = ga_cfg.get('timerange', '')
+        # Use provided timerange if available, otherwise use default from config
+        timerange = timerange or ga_cfg.get('timerange', '')
         stake_amount = ga_cfg.get('stake_amount', 0.05)
         max_open_trades = ga_cfg.get('max_open_trades', 3)
         fee = ga_cfg.get('fee', 0.001)
