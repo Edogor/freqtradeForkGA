@@ -163,6 +163,40 @@ class TestCreateWalkForwardWindows:
             assert window.train_window.window_index == i
             assert window.validation_window.window_index == i
     
+    def test_max_windows_limit(self):
+        """Test that max_windows parameter limits the number of windows created."""
+        # Without limit, this would create 3 windows
+        windows_unlimited = create_walk_forward_windows(
+            timerange="20240101-20240301",
+            train_days=30,
+            validation_days=10,
+            step_days=10,
+            mode='rolling'
+        )
+        assert len(windows_unlimited) == 3
+        
+        # With max_windows=2, should only create 2 windows
+        windows_limited = create_walk_forward_windows(
+            timerange="20240101-20240301",
+            train_days=30,
+            validation_days=10,
+            step_days=10,
+            mode='rolling',
+            max_windows=2
+        )
+        assert len(windows_limited) == 2
+        
+        # With max_windows=1, should only create 1 window
+        windows_one = create_walk_forward_windows(
+            timerange="20240101-20240301",
+            train_days=30,
+            validation_days=10,
+            step_days=10,
+            mode='rolling',
+            max_windows=1
+        )
+        assert len(windows_one) == 1
+    
     def test_no_overlapping_validation(self):
         """Test that validation windows don't overlap with their training windows."""
         windows = create_walk_forward_windows(

@@ -100,7 +100,8 @@ def create_walk_forward_windows(
     validation_days: int,
     step_days: int,
     mode: str = 'rolling',
-    min_train_trades: Optional[int] = None
+    min_train_trades: Optional[int] = None,
+    max_windows: Optional[int] = None
 ) -> List[WalkForwardWindow]:
     """
     Create walk-forward windows from a timerange.
@@ -112,6 +113,7 @@ def create_walk_forward_windows(
         step_days: Number of days to slide forward for next window
         mode: 'rolling' (fixed window) or 'anchored' (expanding window)
         min_train_trades: Minimum trades required (not used here, for future use)
+        max_windows: Maximum number of windows to create (safety limit)
         
     Returns:
         List of WalkForwardWindow objects
@@ -151,6 +153,15 @@ def create_walk_forward_windows(
     logger.info(f"  Mode: {mode}")
     logger.info(f"  Train: {train_days} days, Validate: {validation_days} days, Step: {step_days} days")
     logger.info(f"  Total timerange: {timerange} ({total_days} days)")
+    if max_windows:
+        logger.info(f"  Max windows limit: {max_windows}")
+    
+    # Calculate estimated number of windows
+    estimated_windows = (total_days - train_days - validation_days) // step_days + 1
+    if estimated_windows > 10:
+        logger.warning(f"  ⚠️  This configuration will create ~{estimated_windows} windows!")
+        logger.warning(f"  ⚠️  Each individual requires {estimated_windows} backtests - this may be very slow!")
+        logger.warning(f"  ⚠️  Consider: increasing step_days, reducing timerange, or setting max_windows")
     
     while True:
         # Calculate training window
@@ -195,6 +206,12 @@ def create_walk_forward_windows(
         
         windows.append(wf_window)
         logger.debug(f"Created {wf_window}")
+        
+        # Check max windows limit
+        if max_windows and len(windows) >= max_windows:
+            logger.warning(f"Reached max_windows limit of {max_windows}")
+            logger.warning(f"Stopping window creation (would have created more without limit)")
+            break
         
         # Move to next position
         current_pos = current_pos + timedelta(days=step_days)

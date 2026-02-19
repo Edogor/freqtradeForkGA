@@ -273,6 +273,12 @@ walk_forward:
   # Minimum trades required in training window (optional)
   # Skip window if training has fewer trades than this
   min_train_trades: 10
+  
+  # Maximum number of windows to create (safety limit)
+  # Prevents accidentally creating too many windows with small step_days
+  # Set to null to disable limit (not recommended for production)
+  # Recommended: 5-10 windows for reasonable evaluation time
+  max_windows: 10
 
 # === Advanced Features (Optional) ===
 advanced:

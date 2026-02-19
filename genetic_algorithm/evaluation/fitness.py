@@ -81,7 +81,8 @@ class FitnessEvaluator:
                 validation_days=wf_config['validation_days'],
                 step_days=wf_config['step_days'],
                 mode=wf_config.get('mode', 'rolling'),
-                min_train_trades=wf_config.get('min_train_trades')
+                min_train_trades=wf_config.get('min_train_trades'),
+                max_windows=wf_config.get('max_windows')
             )
             
             # Log summary
@@ -212,8 +213,7 @@ class FitnessEvaluator:
             
             # Evaluate on each window
             for i, wf_window in enumerate(self.walk_forward_windows):
-                logger.debug(f"  Window {i+1}/{len(self.walk_forward_windows)}: "
-                           f"Train={wf_window.train_window.to_freqtrade_format()}, "
+                logger.info(f"  [{i+1}/{len(self.walk_forward_windows)}] Window {i+1}: "
                            f"Val={wf_window.validation_window.to_freqtrade_format()}")
                 
                 # Run backtest on validation window

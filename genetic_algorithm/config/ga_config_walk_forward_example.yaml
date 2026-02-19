@@ -48,8 +48,9 @@ fitness_penalties:
 # === Backtesting Configuration ===
 backtesting:
   # Time range for backtesting - should be long enough for multiple windows
-  # Example: 120 days allows for 3 windows with 60-day training and 15-day validation
-  timerange: "20241120-20260218"  # ~90 days
+  # Example: 120 days allows for 2-3 windows with 60-day training and 15-day validation
+  # NOTE: Keep timerange reasonable! Too many windows = very slow evaluation
+  timerange: "20241120-20250218"  # 90 days (creates ~2 windows with settings below)
   
   stake_amount: 0.05
   
@@ -71,18 +72,22 @@ walk_forward:
   # ✅ ENABLED - Walk-forward optimization is active
   enabled: true
   
-  # Training window: 40 days
-  # Each strategy will be evaluated on 40-day training windows
-  train_days: 40
+  # Training window: 60 days
+  # Each strategy will be evaluated on 60-day training windows
+  train_days: 60
   
-  # Validation window: 10 days
-  # Performance is measured on 10-day validation windows (unseen data)
-  validation_days: 10
+  # Validation window: 15 days
+  # Performance is measured on 15-day validation windows (unseen data)
+  validation_days: 15
   
-  # Step size: 10 days
-  # Slide forward by 10 days for each new window
-  # With 90 days total, this creates ~4 walk-forward windows
-  step_days: 10
+  # Step size: 30 days
+  # Slide forward by 30 days for each new window
+  # With 90 days total, this creates 1-2 walk-forward windows (fast!)
+  # 
+  # ⚠️  WARNING: Small step_days = more windows = MUCH slower evaluation!
+  #    Each window requires a full backtest per strategy.
+  #    Example: 10 windows × 20 individuals = 200 backtests per generation!
+  step_days: 30
   
   # Rolling mode: Fixed-size training windows
   # Alternative: 'anchored' for expanding windows
@@ -98,6 +103,11 @@ walk_forward:
   # Minimum trades in training window
   # Skip windows with too few trades
   min_train_trades: 10
+  
+  # Maximum number of windows to create (safety limit)
+  # Prevents accidentally creating too many windows with small step_days
+  # Set to null to disable limit (not recommended)
+  max_windows: 10
 
 # === Strategy Constraints ===
 strategy_constraints:
