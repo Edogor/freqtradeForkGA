@@ -379,7 +379,7 @@ class TestWalkForwardIntegration:
         
         # Walk-forward should exist but be disabled by default
         assert 'walk_forward' in config
-        assert config['walk_forward']['enabled'] == False
+        assert config['walk_forward']['enabled'] is False
 
 
 if __name__ == "__main__":
