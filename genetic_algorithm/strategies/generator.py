@@ -310,10 +310,10 @@ class StrategyGenerator:
         
         elif indicator.type == 'STOCH':
             if is_entry:
-                threshold_range = ind_config.get('k_threshold', [20, 40])
+                threshold_range = ind_config.get('k_threshold', [15, 35])
                 operator = '<'
             else:
-                threshold_range = ind_config.get('d_threshold', [60, 80])
+                threshold_range = ind_config.get('d_threshold', [65, 85])
                 operator = '>'
             
             return ConditionGene(
@@ -1531,8 +1531,9 @@ class {name}(IStrategy):
         indicator_periods = {}
         for ind in indicators:
             # Map both type and instance_id to parameters
-            if ind.type in ['RSI', 'EMA', 'SMA', 'ATR', 'ADX', 'CCI', 'BBANDS']:
-                period = ind.parameters.get('period', 14 if ind.type != 'BBANDS' else 20)
+            if ind.type in ['RSI', 'EMA', 'SMA', 'ATR', 'ADX', 'CCI', 'BBANDS',
+                           'MFI', 'WILLR', 'ROC', 'TEMA', 'KAMA']:
+                period = ind.parameters.get('period', 14 if ind.type not in ('BBANDS', 'TEMA', 'KAMA') else 20)
                 indicator_periods[ind.type] = period
                 if ind.instance_id:
                     indicator_periods[ind.instance_id] = period
@@ -1544,8 +1545,9 @@ class {name}(IStrategy):
         
         # Use the specific indicator's parameters if found
         if target_indicator:
-            if target_indicator.type in ['RSI', 'EMA', 'SMA', 'ATR', 'ADX', 'CCI', 'BBANDS']:
-                period = target_indicator.parameters.get('period', 14 if target_indicator.type != 'BBANDS' else 20)
+            if target_indicator.type in ['RSI', 'EMA', 'SMA', 'ATR', 'ADX', 'CCI', 'BBANDS',
+                                        'MFI', 'WILLR', 'ROC', 'TEMA', 'KAMA']:
+                period = target_indicator.parameters.get('period', 14 if target_indicator.type not in ('BBANDS', 'TEMA', 'KAMA') else 20)
                 indicator_periods[indicator_ref] = period
             elif target_indicator.type == 'STOCH':
                 k_period = target_indicator.parameters.get('k_period', 14)
@@ -1656,10 +1658,10 @@ class {name}(IStrategy):
             elif condition.operator == '>':
                 return f"(dataframe['{close}'] > dataframe['{middle}'])"
         
-        elif indicator_type in ['EMA', 'SMA']:
-            # Moving average conditions
+        elif indicator_type in ['EMA', 'SMA', 'TEMA', 'KAMA']:
+            # Moving average conditions (price crosses above/below MA)
             # Use actual period from indicator_periods (try instance_id first, then type)
-            default_ma_period = 20
+            default_ma_period = 20 if indicator_type in ('EMA', 'SMA') else 30
             period = indicator_periods.get(indicator_ref, indicator_periods.get(indicator_type, default_ma_period))
             col_name = f"{indicator_type.lower()}_{period}{tf_suffix}"
             close = f"close{tf_suffix}" if tf_suffix else "close"
@@ -1741,6 +1743,58 @@ class {name}(IStrategy):
                 return f"(dataframe['vroc'] > {threshold})"
             elif condition.operator in ['<', 'cross_below']:
                 return f"(dataframe['vroc'] < -{abs(threshold)})"
+        
+        elif indicator_type == 'AROON':
+            # AROON oscillator: aroon_up (0-100) and aroon_down (0-100)
+            # cross_above = bullish (aroon_up > aroon_down), cross_below = bearish
+            if condition.operator == 'cross_above':
+                return "(dataframe['aroon_up'] > dataframe['aroon_down'])"
+            elif condition.operator == 'cross_below':
+                return "(dataframe['aroon_up'] < dataframe['aroon_down'])"
+            elif condition.operator == '>':
+                threshold = condition.threshold if condition.threshold is not None else 70
+                return f"(dataframe['aroon_up'] > {threshold})"
+            elif condition.operator == '<':
+                threshold = condition.threshold if condition.threshold is not None else 30
+                return f"(dataframe['aroon_down'] > {threshold})"
+        
+        elif indicator_type == 'MFI':
+            # Money Flow Index (0-100), like RSI but volume-weighted
+            period = indicator_periods.get(indicator_ref, indicator_periods.get('MFI', 14))
+            col = f"mfi_{period}{tf_suffix}"
+            threshold = condition.threshold if condition.threshold is not None else 50
+            if condition.operator in ['cross_above', '>']:
+                return f"(dataframe['{col}'] > {threshold})"
+            elif condition.operator in ['cross_below', '<']:
+                return f"(dataframe['{col}'] < {threshold})"
+        
+        elif indicator_type == 'OBV':
+            # On-Balance Volume: trend confirmation via volume flow
+            # Compare OBV to its own moving average for signals
+            if condition.operator in ['cross_above', '>']:
+                return "(dataframe['obv'] > dataframe['obv'].rolling(20).mean())"
+            elif condition.operator in ['cross_below', '<']:
+                return "(dataframe['obv'] < dataframe['obv'].rolling(20).mean())"
+        
+        elif indicator_type == 'WILLR':
+            # Williams %R: range -100 to 0. Oversold < -80, overbought > -20
+            period = indicator_periods.get(indicator_ref, indicator_periods.get('WILLR', 14))
+            col = f"willr_{period}{tf_suffix}"
+            threshold = condition.threshold if condition.threshold is not None else -50
+            if condition.operator in ['cross_above', '>']:
+                return f"(dataframe['{col}'] > {threshold})"
+            elif condition.operator in ['cross_below', '<']:
+                return f"(dataframe['{col}'] < {threshold})"
+        
+        elif indicator_type == 'ROC':
+            # Rate of Change: positive = upward momentum, negative = downward
+            period = indicator_periods.get(indicator_ref, indicator_periods.get('ROC', 10))
+            col = f"roc_{period}{tf_suffix}"
+            threshold = condition.threshold if condition.threshold is not None else 0
+            if condition.operator in ['cross_above', '>']:
+                return f"(dataframe['{col}'] > {threshold})"
+            elif condition.operator in ['cross_below', '<']:
+                return f"(dataframe['{col}'] < {threshold})"
         
         # === CANDLESTICK PATTERN CONDITIONS ===
         # Patterns return: >0 bullish, <0 bearish, ==0 no pattern
@@ -1824,7 +1878,7 @@ class {name}(IStrategy):
         elif indicator_type == 'ADX':
             period = indicator_periods.get(indicator_ref, indicator_periods.get('ADX', 14))
             return f"adx_{period}{tf_suffix}"
-        elif indicator_type in ('EMA', 'SMA'):
+        elif indicator_type in ('EMA', 'SMA', 'TEMA', 'KAMA'):
             period = indicator_periods.get(indicator_ref, indicator_periods.get(indicator_type, 20))
             return f"{indicator_type.lower()}_{period}{tf_suffix}"
         elif indicator_type == 'BBANDS':
@@ -1846,6 +1900,19 @@ class {name}(IStrategy):
             return "donchian_mid"
         elif indicator_type == 'VWAP':
             return "vwap"
+        elif indicator_type == 'MFI':
+            period = indicator_periods.get(indicator_ref, indicator_periods.get('MFI', 14))
+            return f"mfi_{period}{tf_suffix}"
+        elif indicator_type == 'WILLR':
+            period = indicator_periods.get(indicator_ref, indicator_periods.get('WILLR', 14))
+            return f"willr_{period}{tf_suffix}"
+        elif indicator_type == 'ROC':
+            period = indicator_periods.get(indicator_ref, indicator_periods.get('ROC', 10))
+            return f"roc_{period}{tf_suffix}"
+        elif indicator_type == 'AROON':
+            return "aroon_up"
+        elif indicator_type == 'OBV':
+            return "obv"
         return ""
     
     def _generate_advanced_operator_condition(self, col: str, condition: ConditionGene) -> str:

@@ -47,7 +47,7 @@ def _cleanup_executors():
         try:
             executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
-            pass
+            logger.debug("[PARALLEL] Exception during executor shutdown (cleanup)", exc_info=True)
     _active_executors.clear()
 
 
@@ -78,7 +78,7 @@ def _kill_pool_processes(executor: ProcessPoolExecutor):
                 killed += 1
         except Exception:
             # Process may have already exited
-            pass
+            logger.debug("[PARALLEL] Exception during worker cleanup", exc_info=True)
     
     if killed:
         logger.debug(f"[PARALLEL] Force-killed {killed} lingering worker process(es)")
@@ -492,10 +492,11 @@ def parallel_walk_forward_validation(
         try:
             executor.shutdown(wait=True, cancel_futures=True)
         except Exception:
+            logger.debug("[WF-POSTHOC] Graceful shutdown failed, forcing", exc_info=True)
             try:
                 executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
-                pass
+                logger.debug("[WF-POSTHOC] Forced shutdown also failed", exc_info=True)
         if executor in _active_executors:
             _active_executors.remove(executor)
         # Kill any lingering worker processes

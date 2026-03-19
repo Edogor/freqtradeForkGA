@@ -77,6 +77,16 @@ class FitnessEvaluator:
         self.tf_ideal_min = int(tf_config.get('ideal_min', 10) * pair_scale)
         self.tf_ideal_max = int(tf_config.get('ideal_max', 50) * pair_scale)
         self.tf_moderate_excess = int(tf_config.get('moderate_excess', 100) * pair_scale)
+        self.tf_shape = tf_config.get('shape', 'gaussian')  # 'gaussian' or 'asymmetric'
+        
+        # Trade frequency per month hard penalty
+        self.min_trades_per_month = self.fitness_penalties.get('min_trades_per_month', 0)
+        self.min_tpm_penalty = self.fitness_penalties.get('min_trades_per_month_penalty', 0.0)
+        self.timerange_months = self._calculate_timerange_months(
+            self.backtest_config.get('timerange', ''))
+        if self.min_trades_per_month > 0:
+            logger.info(f"[FITNESS] Trade frequency floor: {self.min_trades_per_month} trades/month "
+                       f"(penalty={self.min_tpm_penalty}, timerange={self.timerange_months:.1f} months)")
         
         # Validate walk-forward config if enabled
         if self.walk_forward_config.get('enabled', False):
@@ -1069,22 +1079,54 @@ class FitnessEvaluator:
         # Ensure non-negative
         return max(0, penalized_fitness)
     
+    @staticmethod
+    def _calculate_timerange_months(timerange_str: str) -> float:
+        """Parse FreqTrade timerange string (YYYYMMDD-YYYYMMDD) and return duration in months."""
+        if not timerange_str or '-' not in timerange_str:
+            return 0.0
+        try:
+            parts = timerange_str.split('-')
+            start_str, end_str = parts[0].strip(), parts[1].strip()
+            from datetime import datetime
+            start = datetime.strptime(start_str, '%Y%m%d')
+            end = datetime.strptime(end_str, '%Y%m%d')
+            days = (end - start).days
+            return days / 30.44  # average days per month
+        except (ValueError, IndexError):
+            return 0.0
+
     def _normalize_trade_frequency(self, num_trades: int) -> float:
         """
-        Normalize trade frequency to 0-1 range using a smooth bell curve.
+        Normalize trade frequency to 0-1 range.
         
-        Uses a Gaussian centred on the ideal trade range.  This replaces the
-        piecewise step function to provide continuous gradients for the GA.
+        Supports two modes:
+        - 'gaussian': Symmetric bell curve centred on ideal range (original)
+        - 'asymmetric': Strong penalty below ideal_min, gentle falloff above ideal_max.
+          Better for experiments that want to encourage high trade counts.
         """
         if num_trades <= 0:
             return 0.0
         
         ideal_mean = (self.tf_ideal_min + self.tf_ideal_max) / 2.0
-        # σ chosen so ideal_min..ideal_max spans ~2σ (95% of peak)
         sigma = max((self.tf_ideal_max - self.tf_ideal_min) / 2.0, 1.0)
         
-        z = (num_trades - ideal_mean) / sigma
-        score = math.exp(-z * z / 2.0)
+        if self.tf_shape == 'asymmetric':
+            # Asymmetric: steep penalty below ideal_min, gentle above ideal_max
+            if num_trades < self.tf_ideal_min:
+                # Below minimum: steep Gaussian penalty (same as symmetric)
+                z = (num_trades - self.tf_ideal_min) / sigma
+                score = math.exp(-z * z / 2.0)
+            elif num_trades <= self.tf_ideal_max:
+                # In ideal range: perfect score
+                score = 1.0
+            else:
+                # Above maximum: gentle linear decay, floor at 0.5
+                excess = num_trades - self.tf_ideal_max
+                score = max(0.5, 1.0 - excess / (self.tf_ideal_max * 3))
+        else:
+            # Original symmetric Gaussian
+            z = (num_trades - ideal_mean) / sigma
+            score = math.exp(-z * z / 2.0)
         
         return max(0.15, min(1.0, score))
     
@@ -1125,6 +1167,18 @@ class FitnessEvaluator:
                 # Floor at 5% to avoid near-zero for strategies with very few trades
                 trade_penalty = max(0.05, trade_penalty)
                 fitness *= trade_penalty
+        
+        # Hard penalty for minimum trades per month
+        # Unlike the S-curve above, this enforces a strict floor on trade frequency.
+        # When min_trades_per_month_penalty=0.0, strategies below threshold get zero fitness.
+        if self.min_trades_per_month > 0 and self.timerange_months > 0:
+            actual_tpm = num_trades / self.timerange_months
+            if actual_tpm < self.min_trades_per_month:
+                fitness *= self.min_tpm_penalty  # 0.0 = hard kill
+                if self.min_tpm_penalty == 0.0:
+                    logger.debug(f"[FITNESS] Hard penalty: {actual_tpm:.1f} trades/month "
+                               f"< {self.min_trades_per_month} minimum → fitness=0")
+                    return 0.0  # Early return, skip remaining penalties
         
         # Smooth penalty for excessive drawdown (sigmoid onset around threshold).
         # Gives a gentle signal even slightly below threshold instead of a hard gate.

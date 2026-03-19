@@ -1342,6 +1342,7 @@ class GenericIslandModelEvolution:
             serialized = json.dumps(gene_dict, sort_keys=True, default=str)
             return hashlib.md5(serialized.encode()).hexdigest()
         except Exception:
+            logger.warning(f"[ISLAND] Gene hashing failed for individual {getattr(ind, 'id', '?')}", exc_info=True)
             return str(id(ind))
 
     # ------------------------------------------------------------------

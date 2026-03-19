@@ -127,14 +127,14 @@ def _mutate_condition_threshold(condition, ind_config, is_entry, i, mutations_ap
     _DEFAULT_RANGES = {
         'RSI':   ([20, 40], [60, 80]),
         'CCI':   ([-200, -100], [100, 200]),
-        'STOCH': ([15, 30], [70, 85]),
+        'STOCH': ([15, 35], [65, 85]),
         'WILLR': ([-90, -70], [-30, -10]),
         'MFI':   ([15, 35], [65, 85]),
         'ADX':   ([20, 35], [20, 35]),       # same for entry/exit (trend strength)
         'AROON': ([60, 80], [60, 80]),
         'ROC':   ([-5, 0], [0, 5]),
         'VROC':  ([-200, -50], [50, 200]),
-        'CMF':   ([-0.2, -0.05], [0.05, 0.2]),
+        'CMF':   ([0.05, 0.2], [-0.2, -0.05]),  # entry=positive(bullish), exit=negative(bearish)
         'ATR':   ([0.005, 0.02], [0.005, 0.02]),  # volatility ratio of close price
     }
 
@@ -455,7 +455,7 @@ def mutate_conditions(individual: Individual, mutation_rate: float,
             # Set default ranges based on indicator type
             defaults = {
                 'RSI': ([20, 40], [60, 80]),
-                'STOCH': ([20, 40], [60, 80]),
+                'STOCH': ([15, 35], [65, 85]),
                 'CCI': ([-200, -100], [100, 200])
             }
             
@@ -533,7 +533,7 @@ def _create_random_condition(indicator_type: str, is_entry: bool,
     config_map = {
         'RSI': ('cross_below', 'cross_above', 'buy_threshold', 'sell_threshold', [20, 40], [60, 80]),
         'MACD': ('cross_above', 'cross_below', None, None, None, None),
-        'STOCH': ('<', '>', 'k_threshold', 'd_threshold', [20, 40], [60, 80]),
+        'STOCH': ('<', '>', 'k_threshold', 'd_threshold', [15, 35], [65, 85]),
         'CCI': ('<', '>', 'buy_threshold', 'sell_threshold', [-200, -100], [100, 200]),
         'ADX': ('>', '>', 'threshold', 'threshold', [20, 40], [20, 40]),
         'BBANDS': ('cross_below', 'cross_above', None, None, None, None),
@@ -548,6 +548,12 @@ def _create_random_condition(indicator_type: str, is_entry: bool,
         'VWAP': ('cross_above', 'cross_below', None, None, None, None),
         'CMF': ('>', '<', 'buy_threshold', 'sell_threshold', [0.05, 0.2], [-0.2, -0.05]),
         'VROC': ('>', '<', 'threshold', 'threshold', [50, 200], [50, 200]),
+        'AROON': ('>', '<', 'threshold', 'threshold', [60, 80], [60, 80]),
+        'MFI': ('cross_below', 'cross_above', 'buy_threshold', 'sell_threshold', [15, 35], [65, 85]),
+        'WILLR': ('<', '>', 'buy_threshold', 'sell_threshold', [-90, -70], [-30, -10]),
+        'ROC': ('>', '<', 'threshold', 'threshold', [-5, 0], [0, 5]),
+        'TEMA': ('cross_above', 'cross_below', None, None, None, None),
+        'KAMA': ('cross_above', 'cross_below', None, None, None, None),
     }
     
     # Candlestick patterns: create threshold-based conditions
