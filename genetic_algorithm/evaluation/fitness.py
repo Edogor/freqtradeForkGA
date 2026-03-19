@@ -250,7 +250,8 @@ class FitnessEvaluator:
         weight_val = pv.get('weight_val', 0.4)
         min_val_fitness = pv.get('min_val_fitness', 0.0)
         
-        generated_name = strategy_name or f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
+        # Always use GAStrategy_ prefix to match the class name in generated code
+        generated_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
         
         try:
             strategy_code = self.strategy_generator.generate_strategy_code(strategy_gene)
@@ -330,6 +331,7 @@ class FitnessEvaluator:
             return composite_fitness, metrics
             
         except Exception as e:
+            generated_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
             logger.error(f"[PAIR-SPLIT] Error evaluating {generated_name}: {e}", exc_info=True)
             return 0.0, {
                 'profit': 0.0, 'num_trades': 0,
