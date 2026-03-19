@@ -143,6 +143,12 @@ def classify_overfitting(
         win_rate=metrics.get('win_rate', None),
     )
     
+    # Zero-trade strategies cannot be validated — classify as WARNING immediately
+    if metrics.get('no_trades') or metrics.get('num_trades', 0) == 0:
+        assessment.overall_label = LABEL_WARNING
+        assessment.composite_score = 0.5
+        return assessment
+    
     # Strategy complexity from gene
     if strategy_gene is not None:
         assessment.indicator_count = len(getattr(strategy_gene, 'indicators', []))

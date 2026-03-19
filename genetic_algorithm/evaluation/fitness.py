@@ -52,6 +52,10 @@ class FitnessEvaluator:
         self.walk_forward_config = config.get('walk_forward', {})
         self.monte_carlo_config = config.get('monte_carlo', {})
         
+        # Pair-split validation config (train on some pairs, validate on others)
+        self.pair_validation_config = config.get('pair_validation', {})
+        self.pair_validation_enabled = self.pair_validation_config.get('enabled', False)
+        
         # Fitness bounds for clamping extreme values
         fitness_bounds = config.get('fitness_bounds', {})
         self.profit_min = fitness_bounds.get('profit_min', -50)
@@ -98,8 +102,10 @@ class FitnessEvaluator:
         """
         Evaluate a strategy's fitness through backtesting.
         
-        If walk-forward optimization is enabled in config, uses walk-forward validation.
-        Otherwise, uses standard single-period backtesting.
+        Routing priority:
+        1. Walk-forward optimization (if enabled)
+        2. Pair-split validation (if enabled) — train on some pairs, validate on others
+        3. Standard single-period backtesting
         
         Args:
             strategy_gene: Strategy to evaluate
@@ -111,6 +117,10 @@ class FitnessEvaluator:
         # Check if walk-forward is enabled
         if self.walk_forward_config.get('enabled', False):
             return self.evaluate_walk_forward(strategy_gene, strategy_name)
+        
+        # Check if pair-split validation is enabled
+        if self.pair_validation_enabled:
+            return self.evaluate_pair_split(strategy_gene, strategy_name)
         
         # Standard single-period evaluation
         return self._evaluate_standard(strategy_gene, strategy_name)
@@ -157,6 +167,11 @@ class FitnessEvaluator:
             # Convert backtest result to metrics dictionary
             metrics = self._backtest_result_to_metrics(backtest_result)
             
+            # Flag zero-trade results so classification can detect them
+            if backtest_result.total_trades == 0:
+                metrics['no_trades'] = True
+                logger.warning(f"{generated_name}: zero trades — strategy produces no signal")
+            
             # Add complexity to metrics
             metrics['complexity'] = strategy_gene.calculate_complexity()
             
@@ -199,6 +214,125 @@ class FitnessEvaluator:
                 'max_drawdown': 1.0,
                 'win_rate': 0.0,
                 'num_trades': 0,
+                'complexity': strategy_gene.calculate_complexity(),
+                'error': str(e)
+            }
+    
+    def evaluate_pair_split(self, strategy_gene: StrategyGene, strategy_name: str = None) -> Tuple[float, Dict[str, float]]:
+        """
+        Evaluate a strategy using pair-split validation.
+        
+        Runs the same strategy on training pairs and validation pairs separately,
+        then blends the fitnesses with configurable weights. This measures
+        overfitting by checking how well a strategy generalizes to unseen pairs
+        *without* walk-forward or holdout time splits.
+        
+        Config:
+            pair_validation:
+              enabled: true
+              training_pairs: ["BTC/USDT", "BNB/USDT", "XRP/USDT"]
+              validation_pairs: ["ETH/USDT", "SOL/USDT"]
+              weight_train: 0.6
+              weight_val: 0.4
+              min_val_fitness: 0.0
+        
+        Args:
+            strategy_gene: Strategy to evaluate
+            strategy_name: Optional name for the strategy
+            
+        Returns:
+            Tuple of (composite_fitness, metrics_dict)
+        """
+        pv = self.pair_validation_config
+        training_pairs = pv.get('training_pairs', [])
+        validation_pairs = pv.get('validation_pairs', [])
+        weight_train = pv.get('weight_train', 0.6)
+        weight_val = pv.get('weight_val', 0.4)
+        min_val_fitness = pv.get('min_val_fitness', 0.0)
+        
+        generated_name = strategy_name or f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
+        
+        try:
+            strategy_code = self.strategy_generator.generate_strategy_code(strategy_gene)
+            
+            # === Training pairs backtest ===
+            train_result = self.backtester.backtest_strategy(
+                strategy_code, generated_name,
+                strategy_max_open_trades=strategy_gene.max_open_trades,
+                pairs_override=training_pairs,
+            )
+            
+            if not train_result.success:
+                logger.warning(f"[PAIR-SPLIT] {generated_name}: training backtest failed")
+                return 0.0, {'profit': 0.0, 'num_trades': 0, 'error': 'train_backtest_failed'}
+            
+            train_metrics = self._backtest_result_to_metrics(train_result)
+            train_metrics['complexity'] = strategy_gene.calculate_complexity()
+            train_fitness = self.calculate_fitness(train_metrics, strategy_gene)
+            
+            # === Validation pairs backtest ===
+            val_result = self.backtester.backtest_strategy(
+                strategy_code, generated_name,
+                strategy_max_open_trades=strategy_gene.max_open_trades,
+                pairs_override=validation_pairs,
+            )
+            
+            if not val_result.success:
+                logger.warning(f"[PAIR-SPLIT] {generated_name}: validation backtest failed")
+                return 0.0, {'profit': 0.0, 'num_trades': 0, 'error': 'val_backtest_failed'}
+            
+            val_metrics = self._backtest_result_to_metrics(val_result)
+            val_metrics['complexity'] = strategy_gene.calculate_complexity()
+            val_fitness = self.calculate_fitness(val_metrics, strategy_gene)
+            
+            # === Composite fitness ===
+            composite_fitness = train_fitness * weight_train + val_fitness * weight_val
+            
+            # Generalization ratio: how well does validation fitness track training
+            gen_ratio = val_fitness / (train_fitness + 1e-8)
+            
+            # Flag poor validation performance
+            if val_fitness < min_val_fitness:
+                logger.warning(f"[PAIR-SPLIT] {generated_name}: val_fitness={val_fitness:.4f} below "
+                             f"threshold {min_val_fitness}")
+            
+            # Build combined metrics
+            metrics = {
+                # Use training metrics as the primary display values
+                'profit': train_metrics.get('profit', 0.0),
+                'sharpe_ratio': train_metrics.get('sharpe_ratio', 0.0),
+                'sortino_ratio': train_metrics.get('sortino_ratio', 0.0),
+                'max_drawdown': train_metrics.get('max_drawdown', 1.0),
+                'win_rate': train_metrics.get('win_rate', 0.0),
+                'num_trades': train_metrics.get('num_trades', 0),
+                'profit_factor': train_metrics.get('profit_factor', 0.0),
+                'complexity': train_metrics.get('complexity', 0),
+                # Pair-split specific metrics
+                'train_fitness': train_fitness,
+                'val_fitness': val_fitness,
+                'pair_generalization_ratio': gen_ratio,
+                'val_profit': val_metrics.get('profit', 0.0),
+                'val_sharpe': val_metrics.get('sharpe_ratio', 0.0),
+                'val_trades': val_metrics.get('num_trades', 0),
+                'val_max_drawdown': val_metrics.get('max_drawdown', 1.0),
+                'val_win_rate': val_metrics.get('win_rate', 0.0),
+                'training_pairs': ','.join(training_pairs),
+                'validation_pairs': ','.join(validation_pairs),
+            }
+            
+            # Flag zero-trade results
+            if train_result.total_trades == 0 or val_result.total_trades == 0:
+                metrics['no_trades'] = True
+            
+            logger.info(f"[PAIR-SPLIT] {generated_name}: train={train_fitness:.4f} val={val_fitness:.4f} "
+                       f"composite={composite_fitness:.4f} gen_ratio={gen_ratio:.2f}")
+            
+            return composite_fitness, metrics
+            
+        except Exception as e:
+            logger.error(f"[PAIR-SPLIT] Error evaluating {generated_name}: {e}", exc_info=True)
+            return 0.0, {
+                'profit': 0.0, 'num_trades': 0,
                 'complexity': strategy_gene.calculate_complexity(),
                 'error': str(e)
             }

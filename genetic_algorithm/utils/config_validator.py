@@ -120,6 +120,21 @@ def validate_ga_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     if isinstance(max_ind, int) and isinstance(min_ind, int) and min_ind > max_ind:
         errors.append(f"indicators.min_per_strategy ({min_ind}) > max_per_strategy ({max_ind})")
     
+    # --- pair_validation section ---
+    pv = config.get('pair_validation', {})
+    if pv.get('enabled', False):
+        tp = pv.get('training_pairs', [])
+        vp = pv.get('validation_pairs', [])
+        if not isinstance(tp, list) or not tp:
+            errors.append("pair_validation.training_pairs must be a non-empty list")
+        if not isinstance(vp, list) or not vp:
+            errors.append("pair_validation.validation_pairs must be a non-empty list")
+        wt = pv.get('weight_train', 0.6)
+        wv = pv.get('weight_val', 0.4)
+        if isinstance(wt, (int, float)) and isinstance(wv, (int, float)):
+            if abs((wt + wv) - 1.0) > 0.05:
+                warnings.append(f"pair_validation weights sum to {wt + wv:.2f} (expected ~1.0)")
+    
     return errors, warnings
 
 
@@ -166,3 +181,109 @@ def validate_and_log(config: Dict[str, Any]) -> bool:
     
     logger.info(f"[CONFIG] Validation passed ({len(warnings)} warnings)")
     return True
+
+
+def preflight_check(config: Dict[str, Any], data_root: str = None) -> Tuple[List[str], List[str]]:
+    """
+    Pre-launch preflight check for experiment configs.
+    
+    Validates:
+      - No incompatible feature combinations (island+WF, island+MC, NSGA-II+fitness_sharing)
+      - Backtest timeout adequate for timerange length
+      - Data files exist for all configured pairs/timeframes
+      - Pair-split validation pairs don't overlap with training pairs
+    
+    Args:
+        config: Full GA config dict
+        data_root: Optional path to data directory (auto-detected if None)
+    
+    Returns:
+        Tuple of (errors, warnings)
+    """
+    from pathlib import Path
+
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    # --- Incompatible feature combos ---
+    island_cfg = config.get('island_model', {})
+    generic_island_cfg = config.get('generic_island_model', {})
+    island_enabled = island_cfg.get('enabled', False) or generic_island_cfg.get('enabled', False)
+    wf_enabled = config.get('walk_forward', {}).get('enabled', False)
+    mc_enabled = config.get('monte_carlo', {}).get('enabled', False)
+
+    if island_enabled and wf_enabled:
+        errors.append("Island model and walk-forward are incompatible (regime segmentation conflicts "
+                       "with temporal WF splits). Disable one of them.")
+    if island_enabled and mc_enabled:
+        warnings.append("Monte Carlo is silently ignored when island model is active. "
+                         "Set monte_carlo.enabled: false to avoid confusion.")
+
+    ga = config.get('genetic_algorithm', {})
+    if ga.get('mode') == 'nsga2' and ga.get('fitness_sharing', False):
+        errors.append("NSGA-II + fitness_sharing is incompatible (crowding distance conflicts "
+                       "with fitness sharing). Disable fitness_sharing for NSGA-II.")
+
+    # --- Island elite size check ---
+    if island_enabled:
+        island_pop = (island_cfg.get('islands', [{}])[0].get('population_size', 6)
+                      if island_cfg.get('enabled') else generic_island_cfg.get('population_per_island', 6))
+        island_elite = ga.get('elite_size', 1)
+        if island_elite > 1 and island_pop <= 6:
+            warnings.append(f"Island elite_size={island_elite} with pop={island_pop} reduces effective "
+                           f"diversity. Recommended: elite_size=1 for island pop <= 6 (AP-1).")
+
+    # --- Backtest timeout check ---
+    bt = config.get('backtesting', {})
+    timeout = bt.get('timeout', 120)
+    timerange = bt.get('timerange', '')
+    if timerange and '-' in timerange:
+        try:
+            start_str, end_str = timerange.split('-')
+            from datetime import datetime
+            start = datetime.strptime(start_str, '%Y%m%d')
+            end = datetime.strptime(end_str, '%Y%m%d')
+            days = (end - start).days
+            if days > 365 and timeout < 120:
+                warnings.append(f"Backtest timeout={timeout}s may be too low for {days}-day timerange. "
+                               f"Recommended: timeout >= 120 for >1yr data.")
+            if days > 1095 and timeout < 180:
+                warnings.append(f"Backtest timeout={timeout}s may be too low for {days}-day timerange. "
+                               f"Recommended: timeout >= 180 for >3yr data.")
+        except (ValueError, IndexError):
+            pass
+
+    # --- Data availability check ---
+    pairs = bt.get('pairs', [])
+    exchange = bt.get('exchange', 'binance')
+    if data_root:
+        data_dir = Path(data_root)
+    else:
+        data_dir = Path(__file__).parent.parent.parent / 'user_data' / 'data' / exchange
+
+    if pairs and data_dir.exists():
+        for pair in pairs:
+            pair_file_base = pair.replace('/', '_')
+            # Check for common data formats (feather, json)
+            has_data = any(data_dir.glob(f"{pair_file_base}-*"))
+            if not has_data:
+                errors.append(f"No data files found for {pair} in {data_dir}. "
+                             f"Download with: freqtrade download-data --pairs {pair}")
+    elif pairs and not data_dir.exists():
+        warnings.append(f"Data directory {data_dir} does not exist. Verify data is available.")
+
+    # --- Pair-split validation check ---
+    pv = config.get('pair_validation', {})
+    if pv.get('enabled', False):
+        train_pairs = set(pv.get('training_pairs', []))
+        val_pairs = set(pv.get('validation_pairs', []))
+        overlap = train_pairs & val_pairs
+        if overlap:
+            errors.append(f"pair_validation: training and validation pairs overlap: {overlap}. "
+                         f"They must be disjoint for valid overfitting measurement.")
+        if not train_pairs:
+            errors.append("pair_validation.training_pairs is empty.")
+        if not val_pairs:
+            errors.append("pair_validation.validation_pairs is empty.")
+
+    return errors, warnings

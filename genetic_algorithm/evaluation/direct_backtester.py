@@ -13,7 +13,7 @@ import time
 import hashlib
 import concurrent.futures
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from unittest.mock import MagicMock, PropertyMock, patch
 from dataclasses import dataclass
 
@@ -567,7 +567,8 @@ class DirectBacktester:
                          strategy_name: str,
                          max_retries: int = 2,
                          strategy_max_open_trades: Optional[int] = None,
-                         timerange_override: Optional[str] = None) -> BacktestResult:
+                         timerange_override: Optional[str] = None,
+                         pairs_override: Optional[List[str]] = None) -> BacktestResult:
         """
         Run backtest for a strategy using direct Python API.
         
@@ -575,15 +576,18 @@ class DirectBacktester:
             strategy_code: Python code for strategy
             strategy_name: Name of the strategy
             max_retries: Maximum number of retries on failure
+            strategy_max_open_trades: Optional per-strategy max open trades
+            timerange_override: Optional timerange override
+            pairs_override: Optional list of pairs to use instead of config pairs
             
         Returns:
             BacktestResult object
         """
         start_time = time.time()
         
-        # Check cache first (skip cache when timerange is overridden —
+        # Check cache first (skip cache when timerange or pairs are overridden —
         # the cache key uses self.backtest_config which doesn't reflect the override)
-        if self.cache and not timerange_override:
+        if self.cache and not timerange_override and not pairs_override:
             cached_result = self.cache.get(strategy_code, self.backtest_config)
             if cached_result:
                 logger.debug(f"Using cached result for {strategy_name}")
@@ -602,12 +606,13 @@ class DirectBacktester:
                     strategy_name,
                     strategy_max_open_trades,
                     timerange_override=timerange_override,
+                    pairs_override=pairs_override,
                 )
                 
                 result.execution_time = time.time() - start_time
                 
-                # Cache successful result (skip when timerange overridden)
-                if result.success and self.cache and not timerange_override:
+                # Cache successful result (skip when timerange or pairs overridden)
+                if result.success and self.cache and not timerange_override and not pairs_override:
                     self.cache.put(strategy_code, self.backtest_config, result)
                 
                 return result
@@ -627,7 +632,7 @@ class DirectBacktester:
             execution_time=execution_time
         )
     
-    def _run_backtest_direct(self, strategy_code: str, strategy_name: str, strategy_max_open_trades: Optional[int] = None, collect_trades: bool = False, timerange_override: Optional[str] = None) -> BacktestResult:
+    def _run_backtest_direct(self, strategy_code: str, strategy_name: str, strategy_max_open_trades: Optional[int] = None, collect_trades: bool = False, timerange_override: Optional[str] = None, pairs_override: Optional[List[str]] = None) -> BacktestResult:
         """
         Run backtest using FreqTrade Python API with mocked exchange.
         
@@ -726,6 +731,7 @@ class DirectBacktester:
             config_dict = self._create_backtest_config(
                 strategy_name, strategy_max_open_trades,
                 timerange_override=timerange_override,
+                pairs_override=pairs_override,
             )
             
             # Suppress FreqTrade's verbose output by redirecting stdout
@@ -977,7 +983,7 @@ class DirectBacktester:
                 error_message=f"Execution error: {str(e)}"
             )
     
-    def _create_backtest_config(self, strategy_name: str, strategy_max_open_trades: Optional[int] = None, timerange_override: Optional[str] = None) -> Dict[str, Any]:
+    def _create_backtest_config(self, strategy_name: str, strategy_max_open_trades: Optional[int] = None, timerange_override: Optional[str] = None, pairs_override: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Create FreqTrade config for backtesting from GA config.
         
@@ -993,7 +999,7 @@ class DirectBacktester:
         ga_cfg = self.backtest_config
         
         # Extract values from GA config
-        pairs = ga_cfg.get('pairs', ['UNITTEST/BTC'])
+        pairs = pairs_override if pairs_override else ga_cfg.get('pairs', ['UNITTEST/BTC'])
         timerange = ga_cfg.get('timerange', '')
         stake_amount = ga_cfg.get('stake_amount', 0.05)
         # Use strategy-specific max_open_trades if provided, otherwise use global config

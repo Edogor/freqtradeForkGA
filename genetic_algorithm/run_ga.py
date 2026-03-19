@@ -767,6 +767,20 @@ def main():
     except Exception as e:
         logger.debug(f"Extended config validation skipped: {e}")
     
+    # Run preflight checks (incompatible features, data availability)
+    try:
+        from genetic_algorithm.utils.config_validator import preflight_check
+        pf_errors, pf_warnings = preflight_check(config)
+        for w in pf_warnings:
+            logger.warning(f"[PREFLIGHT] {w}")
+        for e in pf_errors:
+            logger.error(f"[PREFLIGHT] {e}")
+        if pf_errors:
+            print(f"❌ Preflight check found {len(pf_errors)} error(s). Fix before launching.")
+            return 1
+    except Exception as e:
+        logger.debug(f"Preflight check skipped: {e}")
+    
     if args.validate_only:
         print("✅ Config validation passed!")
         return 0

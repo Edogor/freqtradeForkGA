@@ -2471,13 +2471,19 @@ class GeneticAlgorithm:
             if stats.genetic_diversity is not None:
                 summary_parts.append(f"Diversity: {stats.genetic_diversity:.4f}")
             
-            # Memory tracking — log RSS for long-running server deployments
+            # Resource tracking — log RSS + CPU% for long-running server deployments
             try:
                 from genetic_algorithm.evaluation.parallel import ParallelEvaluator
                 mem_mb = ParallelEvaluator.get_memory_usage_mb()
                 if mem_mb > 0:
                     summary_parts.append(f"RSS: {mem_mb:.0f}MB")
                     stats.memory_mb = mem_mb  # Attach to stats for CSV export
+            except Exception:
+                pass
+            try:
+                import psutil
+                cpu_pct = psutil.Process().cpu_percent(interval=0)
+                summary_parts.append(f"CPU: {cpu_pct:.0f}%")
             except Exception:
                 pass
             
