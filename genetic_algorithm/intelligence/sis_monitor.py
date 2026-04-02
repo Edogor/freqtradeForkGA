@@ -63,6 +63,13 @@ class RunState:
 # Log parsers
 # ---------------------------------------------------------------------------
 
+# Regex for island model SUMMARY lines:
+# "[SUMMARY] Gen 1/15 (550.5s): island_0_trend=0.3355, ..., island_3=0.4335 | migrations=0"
+_RE_SUMMARY = re.compile(
+    r"\[SUMMARY\]\s+Gen\s+(\d+)/\d+[^:]*:\s+(.*?)\s*\|", re.IGNORECASE
+)
+_RE_ISLAND_VAL = re.compile(r"[\w_]+=(\d+\.\d+)")
+
 # Regex patterns tried in order (case-insensitive)
 _PATTERNS: List[Tuple[str, str]] = [
     # "Gen 3 | best=0.712 | mean=0.634"  or  "Gen 3/15 | best=0.712 mean=0.634"
@@ -113,6 +120,16 @@ def _try_parse_line(
     compiled: List[Tuple[str, re.Pattern]],
 ) -> None:
     """Attempt to extract generation/fitness info from a single log line."""
+
+    # Try the island model [SUMMARY] format first
+    sm = _RE_SUMMARY.search(line)
+    if sm:
+        gen = int(sm.group(1))
+        island_vals_str = sm.group(2)
+        vals = [float(v) for v in _RE_ISLAND_VAL.findall(island_vals_str)]
+        if vals:
+            state.upsert(gen, best=max(vals), mean=sum(vals) / len(vals))
+        return
 
     for pat_name, pat in compiled:
         m = pat.search(line)
