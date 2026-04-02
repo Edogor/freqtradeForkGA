@@ -54,6 +54,8 @@ class ArchetypeClassifier:
         self._scaler = None
         self._clusterer = None
         self._reducer = None  # For 2D visualization
+        self._centroids: Dict[int, np.ndarray] = {}  # cluster_id -> centroid vector
+        self._centroid_thresholds: Dict[int, float] = {}  # cluster_id -> max assign distance
         self.labels_: Optional[np.ndarray] = None
         self.archetype_stats: Dict[int, Dict[str, Any]] = {}
         self.archetype_labels: Dict[int, str] = {}
@@ -103,6 +105,20 @@ class ArchetypeClassifier:
 
         # Compute per-archetype statistics
         self.archetype_stats = self._compute_stats(df)
+
+        # Compute cluster centroids and distance thresholds for predict()
+        self._centroids = {}
+        self._centroid_thresholds = {}
+        for cid in set(self.labels_):
+            if cid == -1:
+                continue
+            mask = self.labels_ == cid
+            members = X_scaled[mask]
+            centroid = members.mean(axis=0)
+            self._centroids[cid] = centroid
+            # Threshold: 2x mean intra-cluster distance
+            dists = np.linalg.norm(members - centroid, axis=1)
+            self._centroid_thresholds[cid] = float(dists.mean() * 2.0)
 
         # 2D embedding for visualization (PCA — always available, no extra deps)
         from sklearn.decomposition import PCA
@@ -206,6 +222,8 @@ class ArchetypeClassifier:
                 "clusterer": self._clusterer,
                 "reducer": self._reducer,
                 "labels": self.labels_,
+                "centroids": self._centroids,
+                "centroid_thresholds": self._centroid_thresholds,
                 "archetype_labels": self.archetype_labels,
                 "archetype_stats": self.archetype_stats,
                 "feature_columns": self._feature_columns,
@@ -230,6 +248,8 @@ class ArchetypeClassifier:
         self._clusterer = data["clusterer"]
         self._reducer = data.get("reducer")
         self.labels_ = data.get("labels")
+        self._centroids = data.get("centroids", {})
+        self._centroid_thresholds = data.get("centroid_thresholds", {})
         self.archetype_labels = data.get("archetype_labels", {})
         self.archetype_stats = data.get("archetype_stats", {})
         self._feature_columns = data.get("feature_columns", _get_feature_columns())
@@ -322,10 +342,23 @@ class ArchetypeClassifier:
 
     def _nearest_centroid_predict(self, X_scaled: np.ndarray) -> np.ndarray:
         """Fallback prediction via nearest centroid distance."""
-        if self.labels_ is None:
+        if self.labels_ is None or not self._centroids:
             return np.full(len(X_scaled), -1)
 
-        # Compute cluster centroids from training data
-        # (We don't have access to training X here, so return noise label)
-        logger.warning("[ARCHETYPES] approximate_predict unavailable, returning noise labels")
-        return np.full(len(X_scaled), -1)
+        cluster_ids = sorted(self._centroids.keys())
+        centroids = np.array([self._centroids[cid] for cid in cluster_ids])
+        thresholds = np.array([self._centroid_thresholds[cid] for cid in cluster_ids])
+
+        # Compute distances from each point to each centroid
+        # X_scaled: (n, d), centroids: (k, d) -> dists: (n, k)
+        dists = np.linalg.norm(X_scaled[:, np.newaxis, :] - centroids[np.newaxis, :, :], axis=2)
+
+        nearest_idx = dists.argmin(axis=1)
+        nearest_dist = dists[np.arange(len(X_scaled)), nearest_idx]
+
+        labels = np.full(len(X_scaled), -1, dtype=int)
+        for i, (idx, dist) in enumerate(zip(nearest_idx, nearest_dist)):
+            if dist <= thresholds[idx]:
+                labels[i] = cluster_ids[idx]
+
+        return labels

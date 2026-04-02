@@ -156,6 +156,7 @@ class GeneticAlgorithm:
         # External strategy injection
         self._external_immigrants: List[Individual] = []
         self._immigrant_provider: Optional[Callable[['GeneticAlgorithm', int], List[Individual]]] = None
+        self._sis_integrator = None  # Set by _setup_sis() if sis.enabled=true
 
         # Graceful shutdown flag
         self._shutdown_requested = False
@@ -168,6 +169,7 @@ class GeneticAlgorithm:
         self._setup_hall_of_fame()
         self._setup_holdout()
         self._setup_llm()
+        self._setup_sis()
         self._setup_diagnostics()
 
         # --- Adaptive Operator Selection (AOS) ---
@@ -397,6 +399,19 @@ class GeneticAlgorithm:
             self.logger.info("Progress bar enabled")
         elif progress_config.get('enabled', False) and not TQDM_AVAILABLE:
             self.logger.warning("Progress bar requested but tqdm not installed. Run: pip install tqdm")
+
+    def _setup_sis(self):
+        """Initialize SIS integrator if configured."""
+        sis_config = self.config.get('sis', {})
+        if not sis_config.get('enabled', False):
+            return
+        try:
+            from genetic_algorithm.intelligence.sis_integrator import SISIntegrator
+            self._sis_integrator = SISIntegrator(self.config, self.logger)
+            self.set_immigrant_provider(self._sis_integrator.immigrant_provider)
+            self.logger.info("[SIS] Strategy Intelligence System initialized")
+        except Exception as e:
+            self.logger.warning(f"[SIS] Failed to initialize: {e}")
 
     def _setup_diagnostics(self):
         """Initialise run diagnostics and terminal monitor."""
@@ -1075,6 +1090,14 @@ class GeneticAlgorithm:
             population.add_individual(individual)
         
         self.logger.info(f"Population initialized: {hof_injected} hall-of-fame + {seed_count} seeded + {llm_count} LLM + {random_remaining} random")
+
+        # SIS seed quality filtering
+        if self._sis_integrator is not None:
+            try:
+                self._sis_integrator.filter_population(population, self)
+            except Exception as e:
+                self.logger.warning(f"[SIS] Seed filtering failed: {e}")
+
         return population
     
     def evaluate_population(self, population: Population):
@@ -2825,6 +2848,10 @@ class GeneticAlgorithm:
                     self.config['_indicator_weights'] = indicator_weights
                     self.logger.debug(f"[FEATURE-IMPORTANCE] Updated indicator weights: "
                                     f"{len(indicator_weights)} indicators")
+                    # Merge SIS enrichment weights
+                    if self._sis_integrator is not None:
+                        sis_weights = self._sis_integrator.get_indicator_weights(indicator_weights)
+                        self.config['_indicator_weights'] = sis_weights
             except Exception as e:
                 self.logger.warning(f"Feature importance update failed: {e}")
                 self.monitor.on_error(f"Feature importance update failed: {e}")

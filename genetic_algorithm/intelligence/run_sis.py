@@ -54,6 +54,18 @@ def cmd_corpus(args) -> pd.DataFrame:
         print("  ERROR: No strategies found!")
         return df
 
+    # Enrich with monthly/per-pair data from backtest ZIPs
+    results_dir_arg = getattr(args, "results_dir", None)
+    results_dir = Path(results_dir_arg) if results_dir_arg else None
+    skip = getattr(args, "skip_enrichment", False)
+    if not skip:
+        print("\n  Enriching with backtest trade-level data...")
+        before = df["monthly_profit_mean"].notna().sum()
+        df = builder.enrich_from_backtest_results(df, results_dir=results_dir)
+        after = df["monthly_profit_mean"].notna().sum()
+        print(f"  Enriched {after - before} strategies "
+              f"({after}/{len(df)} now have monthly/per-pair data)")
+
     # Summary
     print(f"\n  Strategies collected: {len(df)}")
     print(f"  Features per strategy: {len(df.columns)}")
@@ -238,6 +250,10 @@ def main():
 
     # corpus
     sub = subparsers.add_parser("corpus", help="Build strategy corpus")
+    sub.add_argument("--results-dir", default=None,
+                     help="Backtest results directory (default: user_data/backtest_results)")
+    sub.add_argument("--skip-enrichment", action="store_true",
+                     help="Skip enrichment from backtest ZIP files")
 
     # predict
     sub = subparsers.add_parser("predict", help="Train prediction models")
@@ -261,6 +277,10 @@ def main():
     sub.add_argument("--min-cluster-size", type=int, default=10)
     sub.add_argument("--min-samples", type=int, default=5)
     sub.add_argument("--top-n", type=int, default=20)
+    sub.add_argument("--results-dir", default=None,
+                     help="Backtest results directory (default: user_data/backtest_results)")
+    sub.add_argument("--skip-enrichment", action="store_true",
+                     help="Skip enrichment from backtest ZIP files")
 
     args = parser.parse_args()
     if not args.command:

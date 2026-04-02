@@ -439,7 +439,12 @@ def mutate_conditions(individual: Individual, mutation_rate: float,
                 else:
                     valid_ops = ['<', '>', 'cross_above', 'cross_below',
                                  'increasing', 'decreasing', 'between', 'value_above_ago']
-            condition.operator = random.choice(valid_ops)
+            op_weights_map = config.get('_operator_weights', {}) if config else {}
+            if op_weights_map:
+                weights = [op_weights_map.get(op, 1.0) for op in valid_ops]
+                condition.operator = random.choices(valid_ops, weights=weights, k=1)[0]
+            else:
+                condition.operator = random.choice(valid_ops)
             # Set sane defaults for new operators
             if condition.operator == 'between':
                 # Set a reasonable upper threshold

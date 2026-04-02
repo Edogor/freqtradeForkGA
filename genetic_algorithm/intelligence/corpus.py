@@ -20,8 +20,11 @@ Usage:
 import hashlib
 import json
 import logging
+import re
+import zipfile
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -421,3 +424,358 @@ class CorpusBuilder:
         if parent.startswith("hall_of_fame_"):
             return parent.replace("hall_of_fame_", "")
         return parent
+
+    # ── Backtest ZIP enrichment ──────────────────────────────────
+
+    def enrich_from_backtest_results(
+        self,
+        df: pd.DataFrame,
+        results_dir: Optional[Path] = None,
+        max_zips: int = 0,
+    ) -> pd.DataFrame:
+        """Enrich corpus DataFrame with monthly profits and per-pair profit
+        data extracted from backtest result ZIP files.
+
+        The ZIP files produced by ``DirectBacktester`` contain full trade-level
+        data and ``results_per_pair`` breakdowns that are not preserved in
+        generation snapshots or hall-of-fame entries.  This method scans those
+        ZIPs, computes monthly profit series and per-pair profit maps, and
+        merges the enrichment back into *df* by matching on
+        ``(generation, individual_id, num_trades)``.
+
+        Args:
+            df: Corpus DataFrame (output of :meth:`build`).
+            results_dir: Directory containing ``backtest-result-*.zip`` files.
+                Defaults to ``user_data/backtest_results``.
+            max_zips: Maximum number of ZIP files to process (0 = unlimited).
+                Useful for testing or when the results directory is very large.
+
+        Returns:
+            Enriched copy of *df* with ``monthly_profit_*`` and
+            ``per_pair_profit_*`` columns filled in where matches were found.
+        """
+        if df.empty:
+            return df
+
+        results_dir = Path(results_dir) if results_dir else Path("user_data/backtest_results")
+        if not results_dir.exists():
+            logger.warning(f"[CORPUS] Backtest results directory not found: {results_dir}")
+            return df
+
+        # Step 1: Read meta files to build a fast index of available ZIPs
+        # keyed by (generation, individual_id).  Only index entries whose
+        # (gen, ind) appear in the corpus to avoid opening unnecessary ZIPs.
+        #
+        # Pre-compute corpus keys BEFORE indexing so we can filter early.
+        needs_enrichment = df["monthly_profit_mean"].isna()
+        corpus_keys = set()
+        for _, row in df[needs_enrichment].iterrows():
+            gen = int(row["generation"])
+            ind_raw = str(row["individual_id"])
+            ind_match = re.match(r"(?:Gen\d+_)?Ind(\d+)", ind_raw)
+            if ind_match:
+                corpus_keys.add((gen, int(ind_match.group(1))))
+            elif ind_raw.isdigit():
+                corpus_keys.add((gen, int(ind_raw)))
+
+        if not corpus_keys:
+            logger.info("[CORPUS] All corpus entries already have monthly/per-pair data")
+            return df
+
+        zip_index = self._index_backtest_metas(results_dir, max_zips, filter_keys=corpus_keys)
+        if not zip_index:
+            logger.info("[CORPUS] No backtest meta files found for enrichment")
+            return df
+
+        # Step 2: Open matching ZIPs and extract trade-level enrichment
+        enrichment = self._extract_enrichment_from_zips(
+            zip_index, corpus_keys, results_dir,
+        )
+        if not enrichment:
+            logger.info("[CORPUS] No matching backtest results found for enrichment")
+            return df
+
+        # Step 4: Merge enrichment into the DataFrame
+        enriched = self._merge_enrichment(df, enrichment)
+        n_filled = enriched["monthly_profit_mean"].notna().sum() - df["monthly_profit_mean"].notna().sum()
+        logger.info(f"[CORPUS] Enriched {n_filled} strategies with monthly/per-pair data "
+                     f"(from {len(enrichment)} backtest result groups)")
+        return enriched
+
+    # ── Private enrichment helpers ─────────────────────────────────
+
+    @staticmethod
+    def _parse_strategy_name(name: str) -> Optional[Tuple[int, int]]:
+        """Extract (generation, individual_id) from 'GAStrategy_Gen{N}_Ind{M}'."""
+        m = re.match(r"GAStrategy_Gen(\d+)_Ind(\d+)", name)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        return None
+
+    def _index_backtest_metas(
+        self,
+        results_dir: Path,
+        max_zips: int,
+        filter_keys: Optional[set] = None,
+    ) -> Dict[Tuple[int, int], List[Dict[str, Any]]]:
+        """Scan ``*.meta.json`` files and build index keyed by (gen, ind).
+
+        Each value is a list of dicts with ``zip_path``, ``strategy_name``,
+        ``backtest_start_time``, ``timerange_start``, ``timerange_end``.
+
+        Args:
+            results_dir: Directory to scan.
+            max_zips: Limit number of meta files (0 = unlimited).
+            filter_keys: If provided, only index entries whose (gen, ind)
+                is in this set.  Greatly reduces the index size when only
+                a subset of strategies need enrichment.
+        """
+        meta_files = sorted(results_dir.glob("backtest-result-*.meta.json"))
+        if max_zips > 0:
+            meta_files = meta_files[-max_zips:]  # prefer newest
+
+        index: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
+        scanned = 0
+        for mf in meta_files:
+            try:
+                with open(mf) as f:
+                    meta = json.load(f)
+                for strategy_name, info in meta.items():
+                    parsed = self._parse_strategy_name(strategy_name)
+                    if not parsed:
+                        continue
+                    if filter_keys is not None and parsed not in filter_keys:
+                        continue
+                    zip_name = mf.name.replace(".meta.json", ".zip")
+                    zip_path = results_dir / zip_name
+                    if not zip_path.exists():
+                        continue
+                    index[parsed].append({
+                        "zip_path": str(zip_path),
+                        "strategy_name": strategy_name,
+                        "backtest_start_time": info.get("backtest_start_time", 0),
+                        "timerange_start": info.get("backtest_start_ts", 0),
+                        "timerange_end": info.get("backtest_end_ts", 0),
+                    })
+            except (json.JSONDecodeError, OSError) as e:
+                logger.debug(f"[CORPUS] Skipping meta file {mf}: {e}")
+            scanned += 1
+            if scanned % 20000 == 0:
+                logger.info(f"[CORPUS] Scanned {scanned}/{len(meta_files)} meta files...")
+
+        logger.info(f"[CORPUS] Indexed {sum(len(v) for v in index.values())} backtest "
+                     f"ZIPs for {len(index)} unique (gen, ind) pairs "
+                     f"(scanned {scanned} meta files)")
+        return dict(index)
+
+    def _extract_enrichment_from_zips(
+        self,
+        zip_index: Dict[Tuple[int, int], List[Dict[str, Any]]],
+        corpus_keys: set,
+        results_dir: Path,
+    ) -> Dict[Tuple[int, int], List[Dict[str, Any]]]:
+        """Open matching ZIPs and extract trade-level enrichment data.
+
+        Groups ZIPs for the same (gen, ind) by evaluation batch
+        (backtest_start_time within 120 s) so walk-forward windows are
+        aggregated together.
+
+        Returns:
+            Dict mapping (gen, ind) to a list of enrichment dicts, one per
+            evaluation batch.  Each dict has keys: ``monthly_profits``,
+            ``per_pair_profit``, ``total_trades``.
+        """
+        enrichment: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
+        zips_opened = 0
+        keys_processed = 0
+        total_keys = sum(1 for key in zip_index if key in corpus_keys)
+
+        for key, entries in zip_index.items():
+            if key not in corpus_keys:
+                continue
+            keys_processed += 1
+
+            # Cluster entries by evaluation batch (within 120 s)
+            batches = self._cluster_by_time(entries, tolerance_s=120)
+
+            for batch in batches:
+                all_trades: List[Dict] = []
+                per_pair: Dict[str, float] = {}
+                batch_total_trades = 0
+
+                for entry in batch:
+                    try:
+                        trades, rpp = self._read_zip_trades(
+                            Path(entry["zip_path"]), entry["strategy_name"],
+                        )
+                        all_trades.extend(trades)
+                        # Merge per-pair profits (sum across WF windows)
+                        for pair_rec in rpp:
+                            pair_key = pair_rec.get("key", "")
+                            if pair_key and pair_key != "TOTAL":
+                                per_pair[pair_key] = (
+                                    per_pair.get(pair_key, 0.0)
+                                    + pair_rec.get("profit_total_abs", 0.0)
+                                )
+                        batch_total_trades += len(trades)
+                        zips_opened += 1
+                    except Exception as e:
+                        logger.debug(f"[CORPUS] Error reading {entry['zip_path']}: {e}")
+
+                if not all_trades and not per_pair:
+                    continue
+
+                monthly = self._compute_monthly_profits(all_trades)
+                enrichment[key].append({
+                    "monthly_profits": monthly,
+                    "per_pair_profit": per_pair,
+                    "total_trades": batch_total_trades,
+                })
+
+            if keys_processed % 100 == 0:
+                logger.info(f"[CORPUS] Processed {keys_processed}/{total_keys} strategy groups "
+                             f"({zips_opened} ZIPs opened)...")
+
+        logger.info(f"[CORPUS] Extracted enrichment from {zips_opened} ZIP files")
+        return dict(enrichment)
+
+    @staticmethod
+    def _cluster_by_time(
+        entries: List[Dict[str, Any]], tolerance_s: int = 120,
+    ) -> List[List[Dict[str, Any]]]:
+        """Group entries into clusters where consecutive start times differ
+        by at most *tolerance_s* seconds."""
+        if not entries:
+            return []
+        sorted_entries = sorted(entries, key=lambda e: e["backtest_start_time"])
+        clusters: List[List[Dict[str, Any]]] = [[sorted_entries[0]]]
+        for e in sorted_entries[1:]:
+            if e["backtest_start_time"] - clusters[-1][-1]["backtest_start_time"] <= tolerance_s:
+                clusters[-1].append(e)
+            else:
+                clusters.append([e])
+        return clusters
+
+    @staticmethod
+    def _read_zip_trades(
+        zip_path: Path, strategy_name: str,
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """Read trades and results_per_pair from a backtest ZIP.
+
+        Returns:
+            (trades_list, results_per_pair_list)
+        """
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            # Find the result JSON (not config, not .py, not .feather)
+            json_names = [
+                n for n in zf.namelist()
+                if n.endswith(".json") and "config" not in n
+            ]
+            if not json_names:
+                return [], []
+
+            data = json.loads(zf.read(json_names[0]))
+            strategy_data = data.get("strategy", {})
+            if isinstance(strategy_data, str):
+                # Older format where 'strategy' is just the name string
+                return [], []
+
+            sdata = strategy_data.get(strategy_name, {})
+            trades = sdata.get("trades", [])
+            rpp = sdata.get("results_per_pair", [])
+            return trades, rpp
+
+    @staticmethod
+    def _compute_monthly_profits(trades: List[Dict]) -> List[float]:
+        """Compute monthly profit series from a list of trade dicts.
+
+        Groups trades by year-month of ``close_date`` and sums
+        ``profit_abs`` within each month.
+
+        Returns:
+            List of monthly profit values (in absolute terms), ordered
+            chronologically.  Empty list if no valid trades.
+        """
+        if not trades:
+            return []
+
+        monthly: Dict[str, float] = {}
+        for t in trades:
+            close_date = t.get("close_date", "")
+            profit = t.get("profit_abs", 0.0)
+            if not close_date or profit is None:
+                continue
+            # Extract YYYY-MM from date string like '2025-03-06 01:00:00+00:00'
+            ym = close_date[:7]  # 'YYYY-MM'
+            if len(ym) == 7 and ym[4] == "-":
+                monthly[ym] = monthly.get(ym, 0.0) + profit
+
+        if not monthly:
+            return []
+
+        # Return sorted chronologically
+        return [monthly[k] for k in sorted(monthly.keys())]
+
+    def _merge_enrichment(
+        self,
+        df: pd.DataFrame,
+        enrichment: Dict[Tuple[int, int], List[Dict[str, Any]]],
+    ) -> pd.DataFrame:
+        """Merge enrichment data into the corpus DataFrame.
+
+        Matches corpus rows to enrichment entries by (generation,
+        individual_id).  When multiple enrichment batches exist for the
+        same (gen, ind), picks the one whose ``total_trades`` is closest
+        to the corpus entry's ``num_trades``.
+        """
+        df = df.copy()
+
+        for idx, row in df.iterrows():
+            # Skip rows that already have enrichment data
+            if pd.notna(row.get("monthly_profit_mean")):
+                continue
+
+            gen = int(row["generation"])
+            ind_raw = str(row["individual_id"])
+
+            # Parse individual_id: could be 'Gen6_Ind12' or just '12' or '0'
+            ind_match = re.match(r"(?:Gen\d+_)?Ind(\d+)", ind_raw)
+            if ind_match:
+                ind = int(ind_match.group(1))
+            elif ind_raw.isdigit():
+                ind = int(ind_raw)
+            else:
+                continue
+
+            key = (gen, ind)
+            batches = enrichment.get(key)
+            if not batches:
+                continue
+
+            # Pick best batch by closest total_trades
+            corpus_trades = row.get("num_trades", 0) or 0
+            best = min(batches, key=lambda b: abs(b["total_trades"] - corpus_trades))
+
+            # Fill monthly profit stats
+            monthly = best["monthly_profits"]
+            if monthly:
+                df.at[idx, "monthly_profit_mean"] = np.mean(monthly)
+                df.at[idx, "monthly_profit_std"] = np.std(monthly)
+                df.at[idx, "monthly_profit_min"] = np.min(monthly)
+                df.at[idx, "monthly_profit_max"] = np.max(monthly)
+                df.at[idx, "n_positive_months"] = sum(1 for m in monthly if m > 0)
+                df.at[idx, "n_negative_months"] = sum(1 for m in monthly if m < 0)
+                df.at[idx, "n_months_total"] = len(monthly)
+
+            # Fill per-pair profit stats
+            per_pair = best["per_pair_profit"]
+            if per_pair:
+                vals = list(per_pair.values())
+                df.at[idx, "per_pair_profit_mean"] = np.mean(vals)
+                df.at[idx, "per_pair_profit_std"] = np.std(vals)
+                df.at[idx, "per_pair_profit_min"] = np.min(vals)
+                df.at[idx, "per_pair_profit_max"] = np.max(vals)
+                df.at[idx, "n_profitable_pairs"] = sum(1 for v in vals if v > 0)
+                df.at[idx, "n_pairs"] = len(vals)
+
+        return df
