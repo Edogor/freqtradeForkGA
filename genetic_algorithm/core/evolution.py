@@ -2225,8 +2225,12 @@ class GeneticAlgorithm:
                 # If crossover fails, use clones of parents instead
                 self.logger.debug(f"[CROSSOVER] Failed: {e}")
                 crossover_failures += 1
-                child1 = create_child(parent1.strategy_gene, child1_id)
-                child2 = create_child(parent2.strategy_gene, child2_id)
+                try:
+                    child1 = create_child(parent1.strategy_gene, child1_id)
+                    child2 = create_child(parent2.strategy_gene, child2_id)
+                except (ValueError, KeyError, AttributeError, TypeError) as e2:
+                    self.logger.debug(f"[CROSSOVER] Fallback clone also failed: {e2}")
+                    continue
             
             # Mutation - call unconditionally, mutate() handles internal probability checks
             for child in [child1, child2]:

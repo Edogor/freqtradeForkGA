@@ -199,6 +199,27 @@ def _enforce_min_entry_conditions(gene: StrategyGene, config: dict) -> None:
         _top_up_conditions(gene, min_entry - len(gene.entry_conditions), 
                           is_entry=True, indicator_config=indicator_config)
     
+    # Last-resort fallback: if entry conditions are STILL empty after top-up,
+    # add a guaranteed volume-based condition to prevent downstream crashes
+    if not gene.entry_conditions:
+        from genetic_algorithm.core.strategy_gene import ConditionGene
+        import logging
+        logging.getLogger(__name__).warning(
+            "[ENFORCE] Entry conditions still empty after top-up — injecting volume fallback"
+        )
+        fallback_ref = 'volume'
+        # Try to reference the first available non-CDL indicator instead
+        for ind in gene.indicators:
+            if not ind.type.startswith('CDL_'):
+                fallback_ref = ind.instance_id or ind.type
+                break
+        gene.entry_conditions.append(ConditionGene(
+            indicator=fallback_ref,
+            operator='>',
+            threshold=0.0,
+            logic='AND',
+        ))
+    
     # Enforce exit conditions
     if len(gene.exit_conditions) < min_exit:
         _top_up_conditions(gene, min_exit - len(gene.exit_conditions),

@@ -384,7 +384,8 @@ class StrategyGene:
     
     def copy(self) -> 'StrategyGene':
         """Create a deep copy of this strategy gene."""
-        clone = StrategyGene.from_dict(self.to_dict())
+        import copy as _copy
+        clone = _copy.deepcopy(self)
         clone.assign_instance_ids()
         return clone
     
