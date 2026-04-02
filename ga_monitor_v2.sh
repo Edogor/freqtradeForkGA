@@ -274,14 +274,11 @@ get_metrics() {
     if [[ -n "$v" ]]; then
         avg="$v"
     else
-        # Island model format: mean of per-island avg= values (last gen block)
-        v=$(echo "$buf" | grep -oP '(?<=\] )best=[0-9.]+ avg=\K[0-9.]+' \
-            | tail -20 \
-            | LC_NUMERIC=C awk '{s+=$1; c++} END {if(c>0) printf "%.4f", s/c}' || true)
-        # Fall back to full log for completed runs where tail-300 has no stats
-        [[ -z "$v" ]] && v=$(grep -oP '(?<=\] )best=[0-9.]+ avg=\K[0-9.]+' "$log" \
-            | tail -20 \
-            | LC_NUMERIC=C awk '{s+=$1; c++} END {if(c>0) printf "%.4f", s/c}' || true)
+        # Island model format: mean of each island's LATEST avg= value.
+        # Extract all per-island avg values, keep last per island via awk, then average.
+        v=$(grep -oP '\[island_\w+\s*\] best=[0-9.]+ avg=\K[0-9.]+' "$log" \
+            | tail -40 \
+            | LC_NUMERIC=C awk '{vals[NR]=$1} END {if(NR>0){s=0;for(i=1;i<=NR;i++)s+=vals[i]; printf "%.4f",s/NR}}' || true)
         [[ -n "$v" ]] && avg="$v"
     fi
 
@@ -291,14 +288,10 @@ get_metrics() {
     if [[ -n "$v" ]]; then
         div="$v"
     else
-        # Island model format: mean of per-island diversity= values (last gen block)
-        v=$(echo "$buf" | grep -oP 'diversity=\K[0-9.]+' \
-            | tail -20 \
-            | LC_NUMERIC=C awk '{s+=$1; c++} END {if(c>0) printf "%.4f", s/c}' || true)
-        # Fall back to full log for completed runs
-        [[ -z "$v" ]] && v=$(grep -oP 'diversity=\K[0-9.]+' "$log" \
-            | tail -20 \
-            | LC_NUMERIC=C awk '{s+=$1; c++} END {if(c>0) printf "%.4f", s/c}' || true)
+        # Island model format: mean of each island's LATEST diversity= value.
+        v=$(grep -oP '\[island_\w+\s*\] best=[0-9.]+ avg=[0-9.]+ diversity=\K[0-9.]+' "$log" \
+            | tail -40 \
+            | LC_NUMERIC=C awk '{vals[NR]=$1} END {if(NR>0){s=0;for(i=1;i<=NR;i++)s+=vals[i]; printf "%.4f",s/NR}}' || true)
         [[ -n "$v" ]] && div="$v"
     fi
 
@@ -383,25 +376,26 @@ get_metrics() {
         eta="<1m"
     fi
 
-    # ── Completion results ──
-    local results="—"
-    local _log_for_results="$log"
-    if grep -qE 'GA RUN COMPLETE|EVOLUTION COMPLETE|ISLAND MODEL EVOLUTION FINISHED' "$log" 2>/dev/null; then
-        if ! grep -q 'SAFE:' "$log" 2>/dev/null; then
-            local _bn _exp_name _qlog
-            _bn=$(basename "$log" .log)
-            _exp_name="${_bn#*_}"
-            _qlog=$(ls -t "${LOG_DIR}"/queue_*"${_exp_name}"*.log 2>/dev/null | head -1)
-            [[ -n "$_qlog" && -f "$_qlog" ]] && _log_for_results="$_qlog"
+    # ── Best strategy trades + W/L ratio ──
+    # Extract trades and win_rate from the NEW BEST line with the highest fitness
+    local best_trades="—" best_wl="—"
+    local _best_line
+    _best_line=$(grep -oP 'NEW BEST: fitness=\K[0-9.]+ profit=-?[0-9.]+% trades=\d+ win_rate=[0-9.]+' "$log" 2>/dev/null \
+        | LC_NUMERIC=C awk -F'[ =]' 'BEGIN{best=-1} {f=$1+0; if(f>best){best=f; line=$0}} END{print line}' || true)
+    if [[ -n "$_best_line" ]]; then
+        local _t _w
+        _t=$(echo "$_best_line" | grep -oP 'trades=\K\d+' || true)
+        _w=$(echo "$_best_line" | grep -oP 'win_rate=\K[0-9.]+' || true)
+        if [[ -n "$_t" ]]; then
+            best_trades="$_t"
         fi
-        local sa wa ov sc
-        sa=$(grep -oP 'SAFE: \K\d+' "$_log_for_results" 2>/dev/null | tail -1)
-        wa=$(grep -oP 'WARNING: \K\d+' "$_log_for_results" 2>/dev/null | tail -1)
-        ov=$(grep -oP 'OVERFIT: \K\d+' "$_log_for_results" 2>/dev/null | tail -1)
-        sc=$(grep -oP 'Avg composite score: \K[0-9.]+' "$_log_for_results" 2>/dev/null | tail -1)
-        if [[ -n "$sa" || -n "$wa" || -n "$ov" ]]; then
-            results="${sa:-0}S/${wa:-0}W/${ov:-0}O"
-            [[ -n "$sc" ]] && results+=" sc=${sc}"
+        if [[ -n "$_w" ]]; then
+            # Convert win_rate (0.0–1.0) to W/L ratio; avoid division by zero
+            best_wl=$(LC_NUMERIC=C awk -v w="$_w" 'BEGIN{
+                l=1-w+0;
+                if(l<=0){print "∞"}
+                else{printf "%.2f", w/l}
+            }')
         fi
     fi
 
@@ -429,7 +423,7 @@ get_metrics() {
         gen="${gen} [${evp}]"
     fi
 
-    echo "${gen}|${best}|${avg}|${div}|${errs}|${elapsed}|${eta}|${results}|${profit}|${status}"
+    echo "${gen}|${best}|${avg}|${div}|${errs}|${elapsed}|${eta}|${best_trades}|${best_wl}|${profit}|${status}"
 }
 
 # ── Print queue section ──
@@ -538,7 +532,7 @@ print_dashboard() {
         for lf in "${logs[@]}"; do
             local raw
             raw=$(get_metrics "$lf")
-            IFS='|' read -r gen best avg div errs elapsed eta results profit status <<< "$raw"
+            IFS='|' read -r gen best avg div errs elapsed eta best_trades best_wl profit status <<< "$raw"
             ((total++))
             case "$status" in
                 RUNNING) ((n_run++)) ;;
@@ -597,7 +591,8 @@ print_dashboard() {
         apad "${BOLD}ERR${NC}"        5; echo -n " "
         apad "${BOLD}TIME${NC}"       9; echo -n " "
         apad "${BOLD}ETA${NC}"        9; echo -n " "
-        apad "${BOLD}RESULT${NC}"     22; echo -n " "
+        apad "${BOLD}TRADES${NC}"     8; echo -n " "
+        apad "${BOLD}W/L${NC}"        7; echo -n " "
         echo -e "${BOLD}STATUS${NC}"
         echo -e "  ${DIM}───── ───────────────────────────── ───────────────── ───────── ───────── ─────── ───────── ───── ───────── ───────── ────────────────────── ──────────${NC}"
     else
@@ -612,7 +607,8 @@ print_dashboard() {
         apad "${BOLD}ERR${NC}"        5; echo -n " "
         apad "${BOLD}TIME${NC}"       9; echo -n " "
         apad "${BOLD}ETA${NC}"        9; echo -n " "
-        apad "${BOLD}RESULT${NC}"     22; echo -n " "
+        apad "${BOLD}TRADES${NC}"     8; echo -n " "
+        apad "${BOLD}W/L${NC}"        7; echo -n " "
         echo -e "${BOLD}STATUS${NC}"
         echo -e "  ${DIM}───── ───────────────────────────── ───────────────── ───────── ───────── ─────── ───────── ───── ───────── ───────── ────────────────────── ──────────${NC}"
     fi
@@ -627,9 +623,7 @@ print_dashboard() {
 
         local raw
         raw=$(get_metrics "$lf")
-        IFS='|' read -r gen best avg div errs elapsed eta results profit status <<< "$raw"
-
-        # Verify RUNNING with actual PID
+        IFS='|' read -r gen best avg div errs elapsed eta best_trades best_wl profit status <<< "$raw"
         if [[ "$status" == "RUNNING" ]]; then
             local pid
             pid=$(find_pid_for "$exp" "$wave" 2>/dev/null || true)
@@ -687,7 +681,7 @@ print_dashboard() {
         prev_wave="$wave"
 
         # ── Colorize ──
-        local c_best c_err c_results c_status c_eta c_profit
+        local c_best c_err c_trades c_wl c_status c_eta c_profit
 
         if [[ "$best" == "—" ]]; then
             c_best="${DIM}—${NC}"
@@ -729,22 +723,20 @@ print_dashboard() {
             *)       c_status="${DIM}${status}${NC}" ;;
         esac
 
-        if [[ "$results" == "—" ]]; then
-            c_results="${DIM}—${NC}"
+        if [[ "$best_trades" == "—" ]]; then
+            c_trades="${DIM}—${NC}"
         else
-            local sc_val
-            sc_val=$(echo "$results" | grep -oP 'sc=\K[0-9.]+' || true)
-            if [[ -n "$sc_val" ]]; then
-                if awk "BEGIN{exit(!($sc_val < 0.15))}" 2>/dev/null; then
-                    c_results="${GREEN}${results}${NC}"
-                elif awk "BEGIN{exit(!($sc_val < 0.25))}" 2>/dev/null; then
-                    c_results="${YELLOW}${results}${NC}"
-                else
-                    c_results="${RED}${results}${NC}"
-                fi
-            else
-                c_results="$results"
-            fi
+            c_trades="${CYAN}${best_trades}${NC}"
+        fi
+
+        if [[ "$best_wl" == "—" ]]; then
+            c_wl="${DIM}—${NC}"
+        elif awk "BEGIN{exit(!($best_wl >= 1.5))}" 2>/dev/null; then
+            c_wl="${GREEN}${best_wl}${NC}"
+        elif awk "BEGIN{exit(!($best_wl >= 1.0))}" 2>/dev/null; then
+            c_wl="${YELLOW}${best_wl}${NC}"
+        else
+            c_wl="${RED}${best_wl}${NC}"
         fi
 
         # ── Print row ──
@@ -770,7 +762,8 @@ print_dashboard() {
             apad "$c_err"      4; echo -n "  "
             apad "${elapsed}"  8; echo -n "  "
             apad "$c_eta"      8; echo -n "  "
-            apad "$c_results"  21; echo -n "  "
+            apad "$c_trades"   7; echo -n "  "
+            apad "$c_wl"       6; echo -n "  "
             echo -e "$c_status"
         else
             apad "$wave"       5; echo -n "  "
@@ -783,7 +776,8 @@ print_dashboard() {
             apad "$c_err"      4; echo -n "  "
             apad "${elapsed}"  8; echo -n "  "
             apad "$c_eta"      8; echo -n "  "
-            apad "$c_results"  21; echo -n "  "
+            apad "$c_trades"   7; echo -n "  "
+            apad "$c_wl"       6; echo -n "  "
             echo -e "$c_status"
         fi
     done
