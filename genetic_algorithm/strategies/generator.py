@@ -14,7 +14,7 @@ from genetic_algorithm.core.strategy_gene import (
 )
 from genetic_algorithm.utils.indicator_factory import create_random_indicator
 from genetic_algorithm.strategies.operator_registry import (
-    is_valid_operator, resolve_indicator_type, get_valid_operators,
+    is_valid_operator, resolve_indicator_type,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,12 @@ class StrategyGenerator:
         
         # Short selling config
         self.short_selling_config = config.get('short_selling', {})
-    
+
+        # Strategy code cache: fingerprint → (template_code, startup_candle_count)
+        # Template code uses a placeholder class name that callers replace.
+        self._code_cache: Dict[str, str] = {}
+        self._code_cache_hits = 0
+        self._code_cache_misses = 0    
     def generate_random_strategy(self, generation: int, individual_id: int) -> StrategyGene:
         """
         Generate a random trading strategy.
@@ -67,6 +72,9 @@ class StrategyGenerator:
         max_indicators = self.indicator_config.get('max_per_strategy', 5)
         num_indicators = random.randint(min_indicators, max_indicators)
         
+        # Select timeframe FIRST — indicators need it for TF-adaptive parameter scaling
+        timeframe = random.choice(self.available_timeframes)
+
         # Generate random indicators
         indicators = []
         # Guard against num_indicators > len(available_indicators)
@@ -74,7 +82,7 @@ class StrategyGenerator:
         selected_types = random.sample(self.available_indicators, num_indicators)
         
         for ind_type in selected_types:
-            indicator = self._generate_random_indicator(ind_type)
+            indicator = self._generate_random_indicator(ind_type, timeframe=timeframe)
             indicators.append(indicator)
         
         # Generate entry conditions
@@ -83,20 +91,26 @@ class StrategyGenerator:
         # Generate exit conditions
         exit_conditions = self._generate_random_conditions(indicators, is_entry=False)
         
-        # Generate risk parameters
+        # Generate risk parameters — adapt ranges based on timeframe
         stoploss_range = self.strategy_constraints.get('stoploss_range', [-0.20, -0.05])
         stoploss = random.uniform(*stoploss_range)
         
+        # Timeframe already selected above for indicator scaling
+        
         # Generate ROI (keys must be strings for FreqTrade config validation)
+        # ROI time-keys scale with timeframe: shorter TFs use shorter hold periods
         roi_range = self.strategy_constraints.get('roi_range', [0.01, 0.10])
+        _tf_minutes = {'1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+                       '1h': 60, '2h': 120, '4h': 240, '6h': 360, '1d': 1440}
+        candle_min = _tf_minutes.get(timeframe, 60)
+        # ROI checkpoints at ~3, ~6, ~12 candles (in minutes)
+        roi_t1 = max(1, candle_min * random.randint(2, 4))
+        roi_t2 = max(roi_t1 + 1, candle_min * random.randint(5, 8))
         minimal_roi = {
             "0": random.uniform(roi_range[0] * 2, roi_range[1]),
-            "30": random.uniform(roi_range[0] * 1.5, roi_range[1] * 0.7),
-            "60": random.uniform(roi_range[0], roi_range[1] * 0.5),
+            str(roi_t1): random.uniform(roi_range[0] * 1.5, roi_range[1] * 0.7),
+            str(roi_t2): random.uniform(roi_range[0], roi_range[1] * 0.5),
         }
-        
-        # Random timeframe
-        timeframe = random.choice(self.available_timeframes)
         
         # Random max_open_trades
         max_open_trades_range = self.strategy_constraints.get('max_open_trades_range', [1, 10])
@@ -109,8 +123,14 @@ class StrategyGenerator:
             max_tfs = self.multi_tf_config.get('max_timeframes', 2)
             # Filter to only higher TFs than base
             valid_itfs = [tf for tf in available_itfs if is_higher_timeframe(tf, timeframe)]
-            if valid_itfs and random.random() < 0.7:  # 70% chance to add informative TFs
-                num_itfs = random.randint(1, min(max_tfs, len(valid_itfs)))
+            # Short base TFs benefit more from multi-TF context → higher probability
+            from genetic_algorithm.core.strategy_gene import timeframe_to_minutes
+            _base_min = timeframe_to_minutes(timeframe) or 60
+            _mtf_prob = min(0.95, 0.7 + max(0, (15 - _base_min)) * 0.02)
+            if valid_itfs and random.random() < _mtf_prob:
+                # Allow more informative TFs for very short base timeframes
+                _eff_max = max_tfs + (1 if _base_min <= 5 else 0)
+                num_itfs = random.randint(1, min(_eff_max, len(valid_itfs)))
                 informative_timeframes = random.sample(valid_itfs, num_itfs)
                 # Add informative indicators
                 htf_pref = self.multi_tf_config.get('higher_timeframe_preference', [])
@@ -123,6 +143,16 @@ class StrategyGenerator:
                         itf_cond.logic = 'AND'  # Higher TF acts as a filter
                         entry_conditions.append(itf_cond)
         
+        # Generate trailing stop parameters when enabled
+        trailing_stop = random.choice([True, False])
+        trailing_stop_positive = None
+        trailing_stop_positive_offset = None
+        if trailing_stop:
+            ts_pos_range = self.strategy_constraints.get('trailing_stop_positive_range', [0.01, 0.03])
+            ts_offset_add_range = self.strategy_constraints.get('trailing_stop_offset_addition_range', [0.01, 0.03])
+            trailing_stop_positive = random.uniform(*ts_pos_range)
+            trailing_stop_positive_offset = trailing_stop_positive + random.uniform(*ts_offset_add_range)
+        
         strategy = StrategyGene(
             generation=generation,
             individual_id=individual_id,
@@ -134,9 +164,18 @@ class StrategyGenerator:
             minimal_roi=minimal_roi,
             max_open_trades=max_open_trades,
             informative_timeframes=informative_timeframes,
-            trailing_stop=random.choice([True, False]),
+            trailing_stop=trailing_stop,
+            trailing_stop_positive=trailing_stop_positive,
+            trailing_stop_positive_offset=trailing_stop_positive_offset,
             can_short=self.short_selling_config.get('enabled', False) and random.random() < self.short_selling_config.get('probability', 0.5),
         )
+        
+        # Initialize self-adaptive mutation rate for new random individuals
+        sa_config = self.config.get('self_adaptive', {})
+        if sa_config.get('enabled', False):
+            base_rate = self.config.get('mutation_rate', 0.18)
+            strategy.self_mutation_rate = base_rate
+            strategy.self_crossover_pref = None
         
         # Generate independent short conditions when configured
         if strategy.can_short and self.short_selling_config.get('independent_conditions', False):
@@ -200,13 +239,15 @@ class StrategyGenerator:
         else:
             ind_type = random.choice(self.available_indicators)
         
-        indicator = create_random_indicator(ind_type, self.indicator_config)
+        indicator = create_random_indicator(ind_type, self.indicator_config, timeframe=timeframe)
         indicator.timeframe = timeframe
         return indicator
     
-    def _generate_random_indicator(self, indicator_type: str) -> IndicatorGene:
+    def _generate_random_indicator(self, indicator_type: str,
+                                   timeframe: str = None) -> IndicatorGene:
         """Generate a random indicator with appropriate parameters."""
-        return create_random_indicator(indicator_type, self.indicator_config)
+        return create_random_indicator(indicator_type, self.indicator_config,
+                                       timeframe=timeframe)
     
     def _generate_random_conditions(self, indicators: List[IndicatorGene], 
                                    is_entry: bool) -> List[ConditionGene]:
@@ -546,7 +587,7 @@ class StrategyGenerator:
             elif ind.type == 'ICHIMOKU':
                 period = max(params.get('tenkan_period', 9),
                              params.get('kijun_period', 26),
-                             params.get('senkou_b_period', 52)) + params.get('kijun_period', 26)
+                             params.get('senkou_b_period', 52) + params.get('kijun_period', 26))
             elif ind.type == 'VWAP':
                 period = params.get('period', 20)
             elif ind.type == 'CMF':
@@ -566,8 +607,12 @@ class StrategyGenerator:
 
             max_lookback = max(max_lookback, period)
 
-        # Add a safety buffer (10%) and floor at 30
-        return max(30, int(max_lookback * 1.1) + 5)
+        # Add a safety buffer (10%) and a timeframe-aware floor.
+        # Short base TFs need many more candles for indicator warmup:
+        # 1m → 400 (≈6.7 h), 3m → 200 (≈10 h), 5m → 120 (≈10 h)
+        _tf_floors = {'1m': 400, '3m': 200, '5m': 120, '15m': 60}
+        floor = _tf_floors.get(strategy_gene.timeframe, 100)
+        return max(floor, int(max_lookback * 1.1) + 5)
 
     def generate_strategy_code(self, strategy_gene: StrategyGene) -> str:
         """
@@ -587,6 +632,14 @@ class StrategyGenerator:
         strategy_gene.assign_instance_ids()
         
         strategy_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
+
+        # Check code cache (fingerprint excludes identity fields)
+        fingerprint = strategy_gene.strategy_fingerprint()
+        cached = self._code_cache.get(fingerprint)
+        if cached is not None:
+            self._code_cache_hits += 1
+            # Replace the placeholder name with the actual strategy name
+            return cached.replace('__GA_CACHED_STRATEGY__', strategy_name)
         
         # Compute startup candle count from indicator lookback periods
         startup_candle_count = self._compute_startup_candle_count(strategy_gene)
@@ -599,7 +652,6 @@ class StrategyGenerator:
         indicator_code = self._generate_indicator_code(base_indicators)
         
         # Generate informative pairs code
-        informative_pairs_code = self._generate_informative_pairs_code(strategy_gene)
         informative_indicator_code = self._generate_informative_indicator_code(
             informative_indicators, strategy_gene.timeframe
         )
@@ -794,6 +846,17 @@ class {strategy_name}(IStrategy):
             # instead of crashing the evaluator
             code = self._generate_fallback_strategy(strategy_gene)
         
+        # Store in cache with placeholder name for future reuse
+        self._code_cache_misses += 1
+        template = code.replace(strategy_name, '__GA_CACHED_STRATEGY__')
+        self._code_cache[fingerprint] = template
+        # Evict oldest entries beyond 5000 to bound memory
+        if len(self._code_cache) > 5000:
+            excess = len(self._code_cache) - 4000
+            keys = list(self._code_cache.keys())[:excess]
+            for k in keys:
+                del self._code_cache[k]
+
         return code
     
     def _generate_fallback_strategy(self, strategy_gene: StrategyGene) -> str:
@@ -883,7 +946,6 @@ class {name}(IStrategy):
             return ''
 
         regime_tfs = regime_gene.regime_timeframes or ['4h', '1d']
-        combination = regime_gene.combination or 'weighted_voting'
 
         # Default weights: higher TF gets higher weight (configurable via regime.timeframe_weights)
         default_tf_weights = {'30m': 0.5, '1h': 1.0, '4h': 2.0, '1d': 3.0}
@@ -931,6 +993,28 @@ class {name}(IStrategy):
             lines.append(f"                dataframe['regime_trend_{tf}'] = 0.0")
             lines.append(f"                dataframe['regime_vol_{tf}'] = 0.5")
 
+        # Micro-regime: fast regime detection on base timeframe (no informative pair needed)
+        micro_regime = getattr(regime_gene, 'micro_regime', False)
+        micro_w = 0.0
+        if micro_regime:
+            micro_w = tf_weights.get('micro', 1.5)
+            lines.append("")
+            lines.append("        # --- Micro-regime: fast regime on base timeframe ---")
+            lines.append("        _micro_plus_dm = dataframe['high'].diff()")
+            lines.append("        _micro_minus_dm = -dataframe['low'].diff()")
+            lines.append("        _micro_plus_dm = _micro_plus_dm.where((_micro_plus_dm > _micro_minus_dm) & (_micro_plus_dm > 0), 0)")
+            lines.append("        _micro_minus_dm = _micro_minus_dm.where((_micro_minus_dm > _micro_plus_dm) & (_micro_minus_dm > 0), 0)")
+            lines.append("        _micro_tr = pd.concat([dataframe['high'] - dataframe['low'], abs(dataframe['high'] - dataframe['close'].shift(1)), abs(dataframe['low'] - dataframe['close'].shift(1))], axis=1).max(axis=1)")
+            lines.append("        _micro_atr = _micro_tr.ewm(alpha=1/7, adjust=False).mean()")
+            lines.append("        _micro_pdi = 100 * _micro_plus_dm.ewm(alpha=1/7, adjust=False).mean() / _micro_atr")
+            lines.append("        _micro_mdi = 100 * _micro_minus_dm.ewm(alpha=1/7, adjust=False).mean() / _micro_atr")
+            lines.append("        _micro_di_sum = (_micro_pdi + _micro_mdi).replace(0, np.nan)")
+            lines.append("        _micro_dx = 100 * abs(_micro_pdi - _micro_mdi) / _micro_di_sum")
+            lines.append("        _micro_adx = _micro_dx.ewm(alpha=1/7, adjust=False).mean()")
+            lines.append("        _micro_dir = (_micro_pdi - _micro_mdi) / _micro_di_sum")
+            lines.append("        _micro_str = (_micro_adx / 50.0).clip(0, 1)")
+            lines.append("        dataframe['regime_trend_micro'] = (_micro_dir * _micro_str).clip(-1, 1)")
+
         # Composite score: weighted average of per-TF scores
         lines.append("")
         lines.append("        # --- Composite regime score ---")
@@ -941,6 +1025,10 @@ class {name}(IStrategy):
             total_w += w
             # After merge_informative_pair, columns are suffixed with _{tf}
             weight_parts.append(f"dataframe['regime_trend_{tf}'].fillna(0) * {w}")
+
+        if micro_regime:
+            total_w += micro_w
+            weight_parts.append(f"dataframe['regime_trend_micro'].fillna(0) * {micro_w}")
 
         if weight_parts:
             composite_expr = " + ".join(weight_parts)
@@ -1408,6 +1496,13 @@ class {name}(IStrategy):
         # For entry signals, always require volume > 0 to avoid trading on bad data
         if is_entry:
             parts.append("(dataframe['volume'] > 0)")
+            # Optional volume gate: require volume above rolling average
+            if self.strategy_constraints.get('volume_gate', False):
+                vol_period = self.strategy_constraints.get('volume_gate_period', 20)
+                vol_factor = self.strategy_constraints.get('volume_gate_factor', 0.5)
+                parts.append(
+                    f"(dataframe['volume'] > dataframe['volume'].rolling({vol_period}).mean() * {vol_factor})"
+                )
         
         combined_condition = ' &\n            '.join(parts)
         
@@ -1581,9 +1676,9 @@ class {name}(IStrategy):
             macd_col = f"macd{tf_suffix}"
             signal_col = f"macdsignal{tf_suffix}"
             if condition.operator == 'cross_above':
-                return f"(dataframe['{macd_col}'] > dataframe['{signal_col}'])"
+                return f"(qtpylib.crossed_above(dataframe['{macd_col}'], dataframe['{signal_col}']))"
             elif condition.operator == 'cross_below':
-                return f"(dataframe['{macd_col}'] < dataframe['{signal_col}'])"
+                return f"(qtpylib.crossed_below(dataframe['{macd_col}'], dataframe['{signal_col}']))"
             elif condition.operator == '>':
                 return f"(dataframe['{macd_col}'] > {condition.threshold})"
             elif condition.operator == '<':
@@ -1597,9 +1692,9 @@ class {name}(IStrategy):
             elif condition.operator == '>':
                 return f"(dataframe['{slowk_col}'] > {condition.threshold})"
             elif condition.operator == 'cross_above':
-                return f"(dataframe['{slowk_col}'] > dataframe['{slowd_col}'])"
+                return f"(qtpylib.crossed_above(dataframe['{slowk_col}'], dataframe['{slowd_col}']))"
             elif condition.operator == 'cross_below':
-                return f"(dataframe['{slowk_col}'] < dataframe['{slowd_col}'])"
+                return f"(qtpylib.crossed_below(dataframe['{slowk_col}'], dataframe['{slowd_col}']))"
         
         elif indicator_type == 'CCI':
             # Use actual CCI period if available (try instance_id first, then type)
@@ -1679,84 +1774,86 @@ class {name}(IStrategy):
         elif indicator_type == 'SUPERTREND':
             close = f"close{tf_suffix}" if tf_suffix else "close"
             if condition.operator == 'cross_above':
-                return f"(dataframe['supertrend'] == True)"
+                return f"(dataframe['supertrend{tf_suffix}'] == True)"
             elif condition.operator == 'cross_below':
-                return f"(dataframe['supertrend'] == False)"
+                return f"(dataframe['supertrend{tf_suffix}'] == False)"
             elif condition.operator == '>':
-                return f"(dataframe['{close}'] > dataframe['supertrend_lower'])"
+                return f"(dataframe['{close}'] > dataframe['supertrend_lower{tf_suffix}'])"
             elif condition.operator == '<':
-                return f"(dataframe['{close}'] < dataframe['supertrend_upper'])"
+                return f"(dataframe['{close}'] < dataframe['supertrend_upper{tf_suffix}'])"
         
         elif indicator_type == 'ICHIMOKU':
             if condition.operator == 'cross_above':
-                return f"(dataframe['tenkan_sen'] > dataframe['kijun_sen'])"
+                return f"(dataframe['tenkan_sen{tf_suffix}'] > dataframe['kijun_sen{tf_suffix}'])"
             elif condition.operator == 'cross_below':
-                return f"(dataframe['tenkan_sen'] < dataframe['kijun_sen'])"
+                return f"(dataframe['tenkan_sen{tf_suffix}'] < dataframe['kijun_sen{tf_suffix}'])"
             elif condition.operator == '>':
-                return f"(dataframe['cloud_green'] == True)"
+                return f"(dataframe['cloud_green{tf_suffix}'] == True)"
             elif condition.operator == '<':
-                return f"(dataframe['cloud_green'] == False)"
+                return f"(dataframe['cloud_green{tf_suffix}'] == False)"
         
         elif indicator_type == 'DONCHIAN':
             close = f"close{tf_suffix}" if tf_suffix else "close"
             if condition.operator == 'cross_above':
-                return f"(dataframe['{close}'] > dataframe['donchian_upper'].shift(1))"
+                return f"(dataframe['{close}'] > dataframe['donchian_upper{tf_suffix}'].shift(1))"
             elif condition.operator == 'cross_below':
-                return f"(dataframe['{close}'] < dataframe['donchian_lower'].shift(1))"
+                return f"(dataframe['{close}'] < dataframe['donchian_lower{tf_suffix}'].shift(1))"
             elif condition.operator == '>':
-                return f"(dataframe['{close}'] > dataframe['donchian_mid'])"
+                return f"(dataframe['{close}'] > dataframe['donchian_mid{tf_suffix}'])"
             elif condition.operator == '<':
-                return f"(dataframe['{close}'] < dataframe['donchian_mid'])"
+                return f"(dataframe['{close}'] < dataframe['donchian_mid{tf_suffix}'])"
         
         elif indicator_type == 'VWAP':
             close = f"close{tf_suffix}" if tf_suffix else "close"
             if condition.operator == 'cross_above':
-                return f"(dataframe['{close}'] > dataframe['vwap'])"
+                return f"(dataframe['{close}'] > dataframe['vwap{tf_suffix}'])"
             elif condition.operator == 'cross_below':
-                return f"(dataframe['{close}'] < dataframe['vwap'])"
+                return f"(dataframe['{close}'] < dataframe['vwap{tf_suffix}'])"
             elif condition.operator == '>':
-                return f"(dataframe['{close}'] > dataframe['vwap'])"
+                return f"(dataframe['{close}'] > dataframe['vwap{tf_suffix}'])"
             elif condition.operator == '<':
-                return f"(dataframe['{close}'] < dataframe['vwap'])"
+                return f"(dataframe['{close}'] < dataframe['vwap{tf_suffix}'])"
         
         elif indicator_type == 'PSAR':
             close = f"close{tf_suffix}" if tf_suffix else "close"
             if condition.operator == 'cross_above':
-                return f"(dataframe['{close}'] > dataframe['psar'])"
+                return f"(dataframe['{close}'] > dataframe['psar{tf_suffix}'])"
             elif condition.operator == 'cross_below':
-                return f"(dataframe['{close}'] < dataframe['psar'])"
+                return f"(dataframe['{close}'] < dataframe['psar{tf_suffix}'])"
             elif condition.operator == '>':
-                return f"(dataframe['{close}'] > dataframe['psar'])"
+                return f"(dataframe['{close}'] > dataframe['psar{tf_suffix}'])"
             elif condition.operator == '<':
-                return f"(dataframe['{close}'] < dataframe['psar'])"
+                return f"(dataframe['{close}'] < dataframe['psar{tf_suffix}'])"
         
         elif indicator_type == 'CMF':
             threshold = condition.threshold if condition.threshold is not None else 0.1
             if condition.operator in ['>', 'cross_above']:
-                return f"(dataframe['cmf'] > {threshold})"
+                return f"(dataframe['cmf{tf_suffix}'] > {threshold})"
             elif condition.operator in ['<', 'cross_below']:
-                return f"(dataframe['cmf'] < {threshold})"
+                return f"(dataframe['cmf{tf_suffix}'] < {threshold})"
         
         elif indicator_type == 'VROC':
             threshold = condition.threshold if condition.threshold is not None else 100
             if condition.operator in ['>', 'cross_above']:
-                return f"(dataframe['vroc'] > {threshold})"
+                return f"(dataframe['vroc{tf_suffix}'] > {threshold})"
             elif condition.operator in ['<', 'cross_below']:
-                return f"(dataframe['vroc'] < -{abs(threshold)})"
+                return f"(dataframe['vroc{tf_suffix}'] < -{abs(threshold)})"
         
         elif indicator_type == 'AROON':
             # AROON oscillator: aroon_up (0-100) and aroon_down (0-100)
             # cross_above = bullish (aroon_up > aroon_down), cross_below = bearish
+            aroon_up_col = f"aroon_up{tf_suffix}"
+            aroon_down_col = f"aroon_down{tf_suffix}"
             if condition.operator == 'cross_above':
-                return "(dataframe['aroon_up'] > dataframe['aroon_down'])"
+                return f"(qtpylib.crossed_above(dataframe['{aroon_up_col}'], dataframe['{aroon_down_col}']))"
             elif condition.operator == 'cross_below':
-                return "(dataframe['aroon_up'] < dataframe['aroon_down'])"
+                return f"(qtpylib.crossed_below(dataframe['{aroon_up_col}'], dataframe['{aroon_down_col}']))"
             elif condition.operator == '>':
                 threshold = condition.threshold if condition.threshold is not None else 70
-                return f"(dataframe['aroon_up'] > {threshold})"
+                return f"(dataframe['{aroon_up_col}'] > {threshold})"
             elif condition.operator == '<':
                 threshold = condition.threshold if condition.threshold is not None else 30
-                return f"(dataframe['aroon_down'] > {threshold})"
+                return f"(dataframe['{aroon_down_col}'] > {threshold})"
         
         elif indicator_type == 'MFI':
             # Money Flow Index (0-100), like RSI but volume-weighted
@@ -1771,10 +1868,11 @@ class {name}(IStrategy):
         elif indicator_type == 'OBV':
             # On-Balance Volume: trend confirmation via volume flow
             # Compare OBV to its own moving average for signals
+            obv_col = f"obv{tf_suffix}"
             if condition.operator in ['cross_above', '>']:
-                return "(dataframe['obv'] > dataframe['obv'].rolling(20).mean())"
+                return f"(dataframe['{obv_col}'] > dataframe['{obv_col}'].rolling(20).mean())"
             elif condition.operator in ['cross_below', '<']:
-                return "(dataframe['obv'] < dataframe['obv'].rolling(20).mean())"
+                return f"(dataframe['{obv_col}'] < dataframe['{obv_col}'].rolling(20).mean())"
         
         elif indicator_type == 'WILLR':
             # Williams %R: range -100 to 0. Oversold < -80, overbought > -20

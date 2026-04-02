@@ -11,7 +11,7 @@ import os
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,9 @@ class LLMProvider(ABC):
         # Flag set by the router so 429s bubble up for failover
         self._used_by_router = False
         
+        # Timestamp of last 429 rate-limit response (used by designer cooldown)
+        self._last_rate_limit_time = 0.0
+        
         # API key: config value → env var → empty
         self.api_key = config.get('api_key', '') or ''
         if not self.api_key:
@@ -98,15 +101,18 @@ class LLMProvider(ABC):
 
         Checks ``Retry-After`` (seconds or date), then Groq-style
         ``x-ratelimit-reset-tokens`` (e.g. ``"23m2.4s"``), falling back
-        to exponential backoff.
+        to exponential backoff.  Capped at 30s to avoid long stalls when
+        multiple island GA processes share the same API key.
         """
         import re as _re
+
+        max_wait = 30.0  # cap to avoid 120s+ waits that stall evolution
 
         # Standard Retry-After header (seconds)
         retry_after = response.headers.get('retry-after', '')
         if retry_after:
             try:
-                return min(max(float(retry_after), 1.0), 120.0)
+                return min(max(float(retry_after), 1.0), max_wait)
             except ValueError:
                 pass
 
@@ -124,10 +130,10 @@ class LLMProvider(ABC):
             if ms:
                 total += int(ms.group(1)) / 1000
             if total > 0:
-                return min(total + 1.0, 120.0)  # cap at 2 minutes
+                return min(total + 1.0, max_wait)
 
         # Fallback: exponential backoff
-        return self.retry_delay * (2 ** attempt)
+        return min(self.retry_delay * (2 ** attempt), max_wait)
 
     @property
     def last_used_provider(self) -> str:
@@ -250,8 +256,13 @@ class OpenAICompatibleProvider(LLMProvider):
                     if self._used_by_router:
                         # Router will failover to the next provider
                         raise
-                    # Single provider — retry with backoff, respecting Retry-After
+                    # Record the 429 timestamp for cooldown logic
+                    self._last_rate_limit_time = time.time()
                     backoff = self._parse_retry_after(e.response, attempt)
+                    # On repeated 429s, fail fast: only do one short wait
+                    if attempt >= 1:
+                        logger.warning(f"Rate limited {attempt+1} times — giving up to avoid stalling evolution")
+                        break
                     logger.info(f"Rate limited, waiting {backoff:.1f}s before retry")
                     time.sleep(backoff)
                 elif e.response.status_code >= 500:
@@ -301,7 +312,7 @@ class AnthropicProvider(LLMProvider):
         if not self.base_url:
             self.base_url = 'https://api.anthropic.com/v1'
         if not self.model:
-            self.model = 'claude-sonnet-4-20250514'
+            self.model = 'claude-3-5-haiku-20241022'
     
     def generate(self, prompt: str, system_prompt: str = "") -> str:
         """Generate using Anthropic Messages API."""
@@ -339,6 +350,10 @@ class AnthropicProvider(LLMProvider):
                 logger.warning(f"HTTP {e.response.status_code} from Anthropic "
                              f"(attempt {attempt+1}/{self.max_retries})")
                 if e.response.status_code == 429:
+                    self._last_rate_limit_time = time.time()
+                    if attempt >= 1:
+                        logger.warning("Anthropic rate limited %d times — giving up to avoid stalling", attempt+1)
+                        break
                     time.sleep(self.retry_delay * (2 ** attempt))
                 elif e.response.status_code >= 500:
                     time.sleep(self.retry_delay)

@@ -19,11 +19,30 @@ from genetic_algorithm.strategies.operator_registry import (
 
 
 def _deduplicate_indicators(gene: StrategyGene) -> None:
-    """Remove duplicate indicators (same type + params) keeping the first."""
+    """Remove duplicate indicators keeping the first.
+    
+    For multi-output indicators that use fixed column names (MACD, STOCH,
+    BBANDS, etc.), dedup by (type, timeframe) to prevent column overwrites
+    when two instances have different parameters.
+    
+    For single-output indicators whose column names include the period
+    (RSI, EMA, SMA, etc.), dedup by (type, params, timeframe) to allow
+    multiple instances with different periods.
+    """
+    # Indicators whose generated columns do NOT include parameters in the name,
+    # so two instances with different params would overwrite each other.
+    _FIXED_COLUMN_TYPES = frozenset({
+        'MACD', 'STOCH', 'BBANDS', 'SUPERTREND', 'ICHIMOKU', 'DONCHIAN',
+        'AROON', 'OBV', 'CMF', 'VROC', 'VWAP', 'PSAR',
+    })
     seen = set()
     deduped = []
     for ind in gene.indicators:
-        key = (ind.type, str(sorted(ind.parameters.items())) if ind.parameters else '')
+        tf = ind.timeframe or ''
+        if ind.type in _FIXED_COLUMN_TYPES:
+            key = (ind.type, tf)
+        else:
+            key = (ind.type, str(sorted(ind.parameters.items())) if ind.parameters else '', tf)
         if key not in seen:
             seen.add(key)
             deduped.append(ind)
@@ -230,10 +249,9 @@ def single_point_crossover(parent1: Individual, parent2: Individual,
     
     Split both parents at a random point and swap the second parts.
     
-    Note: After crossover, `ensure_indicators_for_conditions()` is called to
-    ensure all conditions have their required indicators. This may ADD indicators
-    that were not present in either parent if conditions reference missing 
-    indicator types. This is intentional to maintain strategy validity.
+    Note: After crossover, `prune_orphaned_conditions()` is called to
+    remove conditions that reference indicators not present in the child.
+    This keeps the indicator set clean rather than adding random indicators.
     
     Args:
         parent1: First parent individual
@@ -282,6 +300,12 @@ def single_point_crossover(parent1: Individual, parent2: Individual,
             setattr(child1_gene, attr, getattr(parent2.strategy_gene, attr))
             setattr(child2_gene, attr, getattr(parent1.strategy_gene, attr))
     
+    # Swap trailing stop parameters as a unit
+    if random.random() < 0.5:
+        for attr in ['trailing_stop', 'trailing_stop_positive', 'trailing_stop_positive_offset']:
+            setattr(child1_gene, attr, getattr(parent2.strategy_gene, attr))
+            setattr(child2_gene, attr, getattr(parent1.strategy_gene, attr))
+    
     # Swap informative_timeframes along with timeframe for consistency
     if random.random() < 0.5:
         child1_gene.informative_timeframes = list(parent2.strategy_gene.informative_timeframes)
@@ -297,11 +321,9 @@ def single_point_crossover(parent1: Individual, parent2: Individual,
     child2_gene.generation = generation
     child2_gene.individual_id = ind_id + 1
     
-    # Ensure all indicators referenced in conditions are calculated
-    if config:
-        indicator_config = config.get('indicators', {})
-        child1_gene.ensure_indicators_for_conditions(indicator_config)
-        child2_gene.ensure_indicators_for_conditions(indicator_config)
+    # Remove conditions that reference indicators not in the child's gene
+    child1_gene.prune_orphaned_conditions()
+    child2_gene.prune_orphaned_conditions()
     
     # Reassign instance IDs after crossover to avoid ID conflicts
     child1_gene.assign_instance_ids()
@@ -409,7 +431,11 @@ def uniform_crossover(parent1: Individual, parent2: Individual,
     
     if random.random() < swap_prob:
         child1_gene.trailing_stop = parent2.strategy_gene.trailing_stop
+        child1_gene.trailing_stop_positive = parent2.strategy_gene.trailing_stop_positive
+        child1_gene.trailing_stop_positive_offset = parent2.strategy_gene.trailing_stop_positive_offset
         child2_gene.trailing_stop = parent1.strategy_gene.trailing_stop
+        child2_gene.trailing_stop_positive = parent1.strategy_gene.trailing_stop_positive
+        child2_gene.trailing_stop_positive_offset = parent1.strategy_gene.trailing_stop_positive_offset
     
     # Swap regime specialization fields (Phase 1B)
     if random.random() < swap_prob:
@@ -428,11 +454,9 @@ def uniform_crossover(parent1: Individual, parent2: Individual,
     child2_gene.generation = generation
     child2_gene.individual_id = ind_id + 1
     
-    # Ensure all indicators referenced in conditions are calculated
-    if config:
-        indicator_config = config.get('indicators', {})
-        child1_gene.ensure_indicators_for_conditions(indicator_config)
-        child2_gene.ensure_indicators_for_conditions(indicator_config)
+    # Remove conditions that reference indicators not in the child's gene
+    child1_gene.prune_orphaned_conditions()
+    child2_gene.prune_orphaned_conditions()
     
     # Reassign instance IDs after crossover to avoid ID conflicts
     child1_gene.assign_instance_ids()
@@ -498,10 +522,12 @@ def component_crossover(parent1: Individual, parent2: Individual,
         child1_gene.exit_conditions, child2_gene.exit_conditions = [copy.deepcopy(cond) for cond in parent2.strategy_gene.exit_conditions], [copy.deepcopy(cond) for cond in parent1.strategy_gene.exit_conditions]
     
     if swaps['risk']:
-        # Swap all risk parameters (stoploss, ROI, trailing stop)
+        # Swap all risk parameters (stoploss, ROI, trailing stop + params)
         child1_gene.stoploss = parent2.strategy_gene.stoploss
         child1_gene.minimal_roi = parent2.strategy_gene.minimal_roi.copy()
         child1_gene.trailing_stop = parent2.strategy_gene.trailing_stop
+        child1_gene.trailing_stop_positive = parent2.strategy_gene.trailing_stop_positive
+        child1_gene.trailing_stop_positive_offset = parent2.strategy_gene.trailing_stop_positive_offset
         # Include regime specialization in risk swap (Phase 1B)
         child1_gene.preferred_regime = parent2.strategy_gene.preferred_regime
         child1_gene.regime_mode = parent2.strategy_gene.regime_mode
@@ -509,6 +535,8 @@ def component_crossover(parent1: Individual, parent2: Individual,
         child2_gene.stoploss = parent1.strategy_gene.stoploss
         child2_gene.minimal_roi = parent1.strategy_gene.minimal_roi.copy()
         child2_gene.trailing_stop = parent1.strategy_gene.trailing_stop
+        child2_gene.trailing_stop_positive = parent1.strategy_gene.trailing_stop_positive
+        child2_gene.trailing_stop_positive_offset = parent1.strategy_gene.trailing_stop_positive_offset
         child2_gene.preferred_regime = parent1.strategy_gene.preferred_regime
         child2_gene.regime_mode = parent1.strategy_gene.regime_mode
     
@@ -518,11 +546,9 @@ def component_crossover(parent1: Individual, parent2: Individual,
     child2_gene.generation = generation
     child2_gene.individual_id = ind_id + 1
     
-    # Ensure all indicators referenced in conditions are calculated
-    if config:
-        indicator_config = config.get('indicators', {})
-        child1_gene.ensure_indicators_for_conditions(indicator_config)
-        child2_gene.ensure_indicators_for_conditions(indicator_config)
+    # Remove conditions that reference indicators not in the child's gene
+    child1_gene.prune_orphaned_conditions()
+    child2_gene.prune_orphaned_conditions()
     
     # Reassign instance IDs after crossover to avoid ID conflicts
     child1_gene.assign_instance_ids()

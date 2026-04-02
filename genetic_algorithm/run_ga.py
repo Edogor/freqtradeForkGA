@@ -11,6 +11,7 @@ Configuration can be adjusted in the USER CONFIGURATION section below.
 
 import sys
 import os
+import shutil
 import logging
 import argparse
 import json
@@ -23,6 +24,37 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from genetic_algorithm.core.evolution import GeneticAlgorithm
 from genetic_algorithm.strategies.generator import StrategyGenerator
 import yaml
+
+
+# ============================================================================
+# DISK SPACE PROTECTION
+# ============================================================================
+
+def check_disk_space(min_gb: float = 5.0, path: str = ".") -> bool:
+    """
+    Check if sufficient disk space is available before starting evolution.
+
+    Args:
+        min_gb: Minimum free disk space in GB required to proceed.
+        path: Filesystem path to check (uses its mount point).
+
+    Returns:
+        True if enough space is available, False otherwise.
+    """
+    try:
+        usage = shutil.disk_usage(path)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < min_gb:
+            print(f"❌ Insufficient disk space: {free_gb:.1f} GB free, "
+                  f"minimum {min_gb:.1f} GB required.")
+            print("   Free up space by cleaning old caches/checkpoints, "
+                  "then retry.")
+            return False
+        print(f"  ✓ Disk space OK: {free_gb:.1f} GB free (minimum: {min_gb:.1f} GB)")
+        return True
+    except OSError as e:
+        print(f"⚠️  Could not check disk space: {e}")
+        return True  # Don't block on check failure
 
 
 # ============================================================================
@@ -285,7 +317,7 @@ def save_summary_report(top_strategies: list, output_dir: Path, config: dict,
         generation_holdout_history: Optional list of GenerationHoldoutStats
     """
     from genetic_algorithm.utils.overfit_analysis import (
-        classify_overfitting, OverfitThresholds, OverfitAssessment,
+        classify_overfitting, OverfitThresholds,
         generate_detailed_results, save_detailed_results, print_overfit_summary,
     )
     
@@ -819,6 +851,11 @@ def main():
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Disk space pre-flight check ──
+    min_disk_gb = config.get('storage', {}).get('min_disk_gb', 5.0)
+    if not check_disk_space(min_gb=min_disk_gb, path=str(output_dir)):
+        return 1
+
     print("\n" + "=" * 80)
     print("STARTING EVOLUTION")
     print("=" * 80)
@@ -1298,7 +1335,6 @@ def _start_dashboard_only(args):
 
 def _start_with_dashboard(args):
     """Start evolution AND web dashboard simultaneously."""
-    import threading
 
     config_file = Path(args.config)
     if not config_file.exists():
@@ -1312,7 +1348,6 @@ def _start_with_dashboard(args):
     config.setdefault('terminal_monitor', {})['enabled'] = False
 
     setup_logging(monitor_active=False)
-    logger = logging.getLogger(__name__)
 
     if not validate_config(config):
         print("❌ Config validation failed.")

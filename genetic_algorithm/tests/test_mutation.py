@@ -209,10 +209,15 @@ class TestCreateRandomCondition:
         assert cond is not None
         assert cond.operator == '>'
     
-    def test_candlestick_bearish_entry(self):
-        cond = _create_random_condition('CDL_EVENINGSTAR', True, {})
+    def test_candlestick_bearish_exit(self):
+        cond = _create_random_condition('CDL_EVENINGSTAR', False, {})
         assert cond is not None
         assert cond.operator == '<'
+
+    def test_candlestick_bearish_entry_returns_none(self):
+        """Bearish-only patterns are not valid entry signals for long positions."""
+        cond = _create_random_condition('CDL_EVENINGSTAR', True, {})
+        assert cond is None
 
 
 # ============================================================================

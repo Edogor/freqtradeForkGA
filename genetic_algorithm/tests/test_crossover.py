@@ -27,18 +27,30 @@ from genetic_algorithm.core.strategy_gene import StrategyGene, IndicatorGene, Co
 # Fixtures / Helpers
 # ============================================================================
 
+# Real indicator types so _create_random_condition can generate valid conditions
+# after crossover pruning. Each prefix uses a distinct set to test cross-parent swaps.
+_INDICATOR_SETS = {
+    'A': ['RSI', 'MACD', 'EMA'],
+    'B': ['STOCH', 'BBANDS', 'SMA'],
+}
+
+
 def _make_gene(prefix='A', n_indicators=3, n_entry=3, n_exit=2, gen=0, ind_id=0):
     """Create a StrategyGene with identifiable components."""
+    ind_types = _INDICATOR_SETS.get(prefix, [f'{prefix}_IND_{i}' for i in range(n_indicators)])
     indicators = [
-        IndicatorGene(type=f'{prefix}_IND_{i}', parameters={'period': 14 + i})
+        IndicatorGene(type=ind_types[i % len(ind_types)], parameters={'period': 14 + i},
+                      instance_id=f'{ind_types[i % len(ind_types)]}_{i}')
         for i in range(n_indicators)
     ]
     entry_conditions = [
-        ConditionGene(indicator=f'{prefix}_IND_{i % n_indicators}', operator='<', threshold=30 + i)
+        ConditionGene(indicator=indicators[i % n_indicators].instance_id,
+                      operator='<', threshold=30 + i)
         for i in range(n_entry)
     ]
     exit_conditions = [
-        ConditionGene(indicator=f'{prefix}_IND_{i % n_indicators}', operator='>', threshold=70 + i)
+        ConditionGene(indicator=indicators[i % n_indicators].instance_id,
+                      operator='>', threshold=70 + i)
         for i in range(n_exit)
     ]
     return StrategyGene(
@@ -64,6 +76,16 @@ def _make_parent(prefix='A', gen=0, ind_id=0, n_indicators=3, n_entry=3, n_exit=
 def _make_parents():
     """Create two distinct parents."""
     return _make_parent('A', ind_id=0), _make_parent('B', ind_id=1)
+
+
+# Minimal config so _enforce_min_entry_conditions can add conditions
+# when orphaned conditions are pruned post-crossover.
+_MINIMAL_CONFIG = {
+    'indicators': {
+        'min_entry_conditions': 1,
+        'min_exit_conditions': 1,
+    }
+}
 
 
 # ============================================================================
@@ -262,7 +284,8 @@ class TestComponentCrossover:
     def test_offspring_have_valid_structure(self):
         random.seed(42)
         p1, p2 = _make_parents()
-        c1, c2 = component_crossover(p1, p2, generation=1, ind_id=0)
+        c1, c2 = component_crossover(p1, p2, generation=1, ind_id=0,
+                                      config=_MINIMAL_CONFIG)
         assert len(c1.strategy_gene.indicators) >= 1
         assert len(c1.strategy_gene.entry_conditions) >= 1
         assert len(c2.strategy_gene.indicators) >= 1
@@ -334,7 +357,8 @@ class TestEdgeCases:
         random.seed(42)
         p1, p2 = _make_parents()
         for method in ['single_point', 'uniform', 'component']:
-            c1, c2 = crossover(p1, p2, generation=1, ind_id=0, method=method)
+            c1, c2 = crossover(p1, p2, generation=1, ind_id=0, method=method,
+                               config=_MINIMAL_CONFIG)
             assert len(c1.strategy_gene.indicators) >= 1
             assert len(c1.strategy_gene.entry_conditions) >= 1
             assert len(c2.strategy_gene.indicators) >= 1

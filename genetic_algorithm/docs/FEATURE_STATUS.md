@@ -1,7 +1,7 @@
 # Feature Status & Configuration Guide
 
 > **Living reference** — update after each validation run.  
-> Last updated: 2026-03-02 (post valRunRegimeTest analysis)
+> Last updated: 2026-04-02 (post wave28/wave29 analysis)
 
 ---
 
@@ -22,10 +22,14 @@
 | Parallel Evaluation | ✅ WORKING | USE | 3-5x speedup; walk-forward disabled in workers |
 | LLM Seeding | ⚠️ PARTIAL | OPTIONAL | Generates valid seeds; quality varies by provider |
 | Hall of Fame | ✅ WORKING | USE | Persists best strategies across runs |
-| NSGA-II Multi-Objective | 🔬 UNTESTED | SKIP FOR NOW | Implemented; needs validation run |
+| NSGA-II Multi-Objective | 🔬 UNTESTED | SKIP FOR NOW | Near-zero fitness bug (AP-7); do not use |
 | Feature Importance Tracking | ✅ WORKING | USE | Tracks which indicators contribute to fitness |
 | Adaptive Mutation | ✅ WORKING | USE | Auto-increases mutation when stuck |
 | Trade Visualization | ✅ WORKING | OPTIONAL | Generates charts per generation or on improvement |
+| **Generic Island Model** | ✅ WORKING | USE | Shared process pool; OOM-safe; ring/fc/random topologies |
+| **Pair-Split Island Model** | ✅ WORKING | USE | Each island evolves a dedicated pair; improves specialisation |
+| **Config Validator** | ✅ WORKING | ALWAYS ON | Pre-flight AP-1–AP-20 checks; blocks misconfigured runs |
+| **Trade Frequency Penalties** | ✅ WORKING | USE | Fitness penalty for <N trades/period; prevents overfit scalpers |
 
 Status key: ✅ WORKING = tested & reliable, ⚠️ PARTIAL = works but has known issues, 🔬 UNTESTED = implemented but not validated, ❌ BROKEN = do not use
 

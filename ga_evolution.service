@@ -26,8 +26,8 @@ RestartSec=30
 KillSignal=SIGINT
 TimeoutStopSec=60
 
-# Resource limits
-MemoryMax=14G
+# Resource limits (reduced from 14G to 10G — reserves ~6GB for paper trading bots + OS)
+MemoryMax=10G
 CPUQuota=540%
 
 # Logging

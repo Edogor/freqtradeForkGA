@@ -71,6 +71,15 @@ def init_db(db_url: str) -> None:
                 "connect_args": {"check_same_thread": False},
             }
         )
+    # Increase pool size to handle concurrent API requests from monitoring UIs
+    if "poolclass" not in kwargs:
+        kwargs.update(
+            {
+                "pool_size": 10,
+                "max_overflow": 20,
+                "pool_timeout": 60,
+            }
+        )
 
     try:
         engine = create_engine(db_url, future=True, **kwargs)

@@ -85,6 +85,21 @@ def validate_ga_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         for key, val in fw.items():
             if isinstance(val, (int, float)) and val < 0:
                 errors.append(f"fitness_weights.{key}={val} is negative (must be >= 0)")
+
+        # Validate fitness weight keys against known valid keys
+        from genetic_algorithm.evaluation.fitness import (
+            VALID_FITNESS_WEIGHT_KEYS, FITNESS_WEIGHT_KEY_ALIASES,
+        )
+        for key in fw:
+            if key in FITNESS_WEIGHT_KEY_ALIASES:
+                canonical = FITNESS_WEIGHT_KEY_ALIASES[key]
+                warnings.append(
+                    f"fitness_weights.{key} is deprecated — use '{canonical}' instead "
+                    f"(auto-resolved at runtime)")
+            elif key not in VALID_FITNESS_WEIGHT_KEYS:
+                errors.append(
+                    f"fitness_weights.{key} is not a recognized key and will be ignored. "
+                    f"Valid keys: {', '.join(sorted(VALID_FITNESS_WEIGHT_KEYS))}")
     
     # --- walk_forward section ---
     wf = config.get('walk_forward', {})
@@ -135,7 +150,122 @@ def validate_ga_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             if abs((wt + wv) - 1.0) > 0.05:
                 warnings.append(f"pair_validation weights sum to {wt + wv:.2f} (expected ~1.0)")
     
+    # --- Anti-pattern warnings (validated across 79+ experiments) ---
+    _check_experiment_anti_patterns(config, warnings)
+    
     return errors, warnings
+
+
+def _check_experiment_anti_patterns(config: Dict[str, Any], warnings: List[str]) -> None:
+    """
+    Check for configuration anti-patterns validated across 79+ GA experiments.
+    
+    These are soft warnings — advanced users may intentionally test edge cases,
+    but these patterns have been shown to consistently produce poor results.
+    """
+    ga = config.get('genetic_algorithm', {})
+    bt = config.get('backtesting', {})
+    mc = config.get('monte_carlo', {})
+    adv = config.get('advanced', {})
+    island_cfg = ga.get('island_model', {})
+    llm_cfg = adv.get('llm', {})
+
+    pop_size = ga.get('population_size', 0)
+    elite_size = ga.get('elite_size', 0)
+    selection = ga.get('selection_method', 'tournament')
+    crossover_method = ga.get('crossover_method', 'uniform')
+    patience = ga.get('early_stopping', {}).get('patience', 999)
+    island_enabled = island_cfg.get('enabled', False)
+    llm_enabled = llm_cfg.get('enabled', False)
+    pairs = bt.get('pairs', [])
+
+    # AP-1: Standard GA population > 15 leads to overfitting (E19: 59-65% degradation)
+    if not island_enabled and isinstance(pop_size, int) and pop_size > 15:
+        warnings.append(
+            f"[ANTI-PATTERN] population_size={pop_size} > 15: "
+            f"standard GA runs with pop > 15 show 59-65% holdout degradation "
+            f"(validated in E19, E30). Recommended: 10-15."
+        )
+
+    # AP-2: Island model population > 6 leads to extreme overfitting (E24: 62-100% degradation)
+    if island_enabled:
+        island_pop = island_cfg.get('population_per_island', pop_size)
+        if isinstance(island_pop, int) and island_pop > 6:
+            warnings.append(
+                f"[ANTI-PATTERN] island population_per_island={island_pop} > 6: "
+                f"island model with pop > 6 shows 62-100% holdout degradation "
+                f"(validated in E24). Sacred limit: 6."
+            )
+
+    # AP-3: LLM + rank selection is harmful (E44: loses 0.2065 vs tournament)
+    if llm_enabled and selection == 'rank':
+        warnings.append(
+            "[ANTI-PATTERN] LLM enabled with rank selection: "
+            "this combination loses ~0.2065 fitness vs tournament selection "
+            "(validated in E44). Use tournament selection with LLM."
+        )
+
+    # AP-4: Component crossover + island model causes 33-53% degradation (E18)
+    if island_enabled and crossover_method == 'component':
+        warnings.append(
+            "[ANTI-PATTERN] island_model + component crossover: "
+            "shows 33-53% holdout degradation (validated in E18). "
+            "Use uniform crossover with island model."
+        )
+
+    # AP-5: Low patience + low elite causes premature stopping (E45: stopped at gen 8)
+    if isinstance(patience, int) and isinstance(elite_size, int):
+        if patience <= 4 and elite_size < 3:
+            warnings.append(
+                f"[ANTI-PATTERN] patience={patience} with elite_size={elite_size}: "
+                f"low patience + low elite causes premature early stopping "
+                f"(E45 stopped at gen 8). Use patience >= 6 with elite < 3, "
+                f"or elite >= 3 with patience >= 4."
+            )
+
+    # AP-6: Monte Carlo permutations > 15 causes early stopping (E26)
+    if mc.get('enabled', False):
+        num_perms = mc.get('num_permutations', 100)
+        if isinstance(num_perms, int) and num_perms > 15:
+            warnings.append(
+                f"[ANTI-PATTERN] monte_carlo.num_permutations={num_perms} > 15: "
+                f"high MC permutations slow evaluation and trigger early stopping "
+                f"(validated in E26). Recommended: 10-15."
+            )
+
+    # AP-7: 3+ trading pairs fails to generalize (E32: 0 SAFE / 5 WARNING)
+    if isinstance(pairs, list) and len(pairs) > 2:
+        warnings.append(
+            f"[ANTI-PATTERN] {len(pairs)} trading pairs: "
+            f"3+ pairs consistently fail to generalize "
+            f"(E32: 0 SAFE / 5 WARNING vs E21 with 2 pairs: all SAFE). "
+            f"Recommended: 1-2 pairs."
+        )
+
+    # AP-8: NSGA-II with fitness_sharing enabled (NSGA-II has its own diversity mechanism)
+    if ga.get('mode') == 'nsga2' and ga.get('fitness_sharing', False):
+        warnings.append(
+            "[ANTI-PATTERN] NSGA-II with fitness_sharing enabled: "
+            "NSGA-II uses crowding distance for diversity — fitness_sharing "
+            "is redundant and may interfere. Set fitness_sharing: false."
+        )
+
+    # AP-9: Island model + walk-forward (incompatible, WF silently disabled)
+    wf = config.get('walk_forward', {})
+    if island_enabled and wf.get('enabled', False):
+        warnings.append(
+            "[ANTI-PATTERN] island_model + walk_forward both enabled: "
+            "these are incompatible (island splits by regime, WF splits temporally). "
+            "Walk-forward will be silently disabled. Choose one."
+        )
+
+    # AP-10: Island model + Monte Carlo / CPCV (incompatible)
+    if island_enabled and mc.get('enabled', False):
+        warnings.append(
+            "[ANTI-PATTERN] island_model + monte_carlo both enabled: "
+            "Monte Carlo requires full temporal data but island model uses "
+            "regime segments. MC will be silently ignored."
+        )
 
 
 def _validate_int_range(section: Dict, key: str, min_val: int, max_val: int, 
@@ -285,5 +415,136 @@ def preflight_check(config: Dict[str, Any], data_root: str = None) -> Tuple[List
             errors.append("pair_validation.training_pairs is empty.")
         if not val_pairs:
             errors.append("pair_validation.validation_pairs is empty.")
+
+    # =========================================================================
+    # Anti-pattern checks (AP-1 through AP-20, from GA_FIXES_AND_IMPROVEMENTS.md)
+    # Each check is backed by experimental evidence from 150+ experiments.
+    # =========================================================================
+    ga = config.get('genetic_algorithm', {})
+    ps = ga.get('population_size', 15)
+    es = ga.get('elite_size', 3)
+    mr = ga.get('mutation_rate', 0.15)
+    sel = ga.get('selection_method', 'tournament')
+    cx = ga.get('crossover_method', 'uniform')
+    patience = ga.get('convergence_patience', ga.get('patience', 6))
+    mode = ga.get('mode', 'single_objective')
+
+    llm_cfg = config.get('llm', config.get('llm_guidance', {}))
+    llm_enabled = llm_cfg.get('enabled', False)
+    mc_cfg = config.get('monte_carlo', {})
+    sc = config.get('strategy_constraints', {})
+    parsimony = config.get('parsimony', {})
+    strict_constraints = (parsimony.get('enabled', False)
+                          or sc.get('max_indicators', 99) <= 4)
+    wf_cfg = config.get('walk_forward', {})
+    short_cfg = config.get('short_selling', {})
+
+    # AP-7: NSGA-II is broken (produces near-zero fitness 0.0008)
+    if mode == 'nsga2':
+        warnings.append(
+            "[AP-7] NSGA-II mode produces degenerate near-zero fitness (E2=0.0008). "
+            "The Pareto objective formulation needs fixing before NSGA-II is usable. "
+            "Use mode='single_objective' instead.")
+
+    # AP-8/AP-13: Population > 15 in standard GA causes overfitting
+    if not island_enabled and isinstance(ps, int) and ps > 15:
+        warnings.append(
+            f"[AP-8] population_size={ps} exceeds proven safe ceiling of 15 for standard GA. "
+            f"E19 (pop=20)=59-65% holdout degradation, E30 (pop=18)=all WARNING. "
+            f"Recommended: population_size <= 15.")
+
+    # AP-6: Island population > 6 causes severe overfitting
+    if island_enabled:
+        gim = config.get('generic_island_model', {})
+        island_pop = gim.get('population_per_island', 6)
+        if isinstance(island_pop, int) and island_pop > 6:
+            warnings.append(
+                f"[AP-6] Island population_per_island={island_pop} exceeds safe limit of 6. "
+                f"E24 (pop=8)=62-100% holdout degradation (EXTREME OVERFIT). "
+                f"Recommended: population_per_island <= 6.")
+
+    # AP-3/AP-9: Component crossover harmful with island model or strict constraints
+    if cx == 'component':
+        if island_enabled:
+            warnings.append(
+                "[AP-3] crossover_method='component' on island model causes overfitting. "
+                "E18: 0S/4W/1O, 33-53% degradation. Use crossover_method='uniform'.")
+        if strict_constraints:
+            warnings.append(
+                "[AP-9] crossover_method='component' with strict parsimony/constraints causes "
+                "overfitting. E20: 52-61% degradation. Use crossover_method='uniform'.")
+
+    # AP-17: patience >= 8 with elite < 3 causes holdout degradation
+    if isinstance(patience, int) and patience >= 8 and isinstance(es, int) and es < 3:
+        warnings.append(
+            f"[AP-17] convergence_patience={patience} with elite_size={es} risks premature "
+            f"holdout degradation. E50 (patience=8, elite=2)=55.6% degradation. "
+            f"Recommended: elite_size >= 3 when patience >= 8.")
+
+    # AP-14: patience <= 4 with elite == 2 causes premature early stop
+    if isinstance(patience, int) and patience <= 4 and isinstance(es, int) and es == 2:
+        warnings.append(
+            f"[AP-14] convergence_patience={patience} with elite_size={es} risks premature "
+            f"early stop. E45 stopped at Gen 8 with 37.9% degradation. "
+            f"Use patience >= 6 with elite_size=2, or increase elite to 3.")
+
+    # AP-15: LLM + rank selection = negative synergy
+    if llm_enabled and sel == 'rank':
+        warnings.append(
+            "[AP-15] LLM guidance with rank selection produces negative synergy. "
+            "E44 (rank+LLM)=0.4285 vs E43 (tournament+LLM)=0.6350. "
+            "Use selection_method='tournament' with LLM.")
+
+    # AP-5: LLM + high mutation = all WARNING
+    if llm_enabled and isinstance(mr, (int, float)) and mr > 0.20:
+        warnings.append(
+            f"[AP-5] LLM guidance with mutation_rate={mr:.2f} (>0.20) is too aggressive. "
+            f"E12 (LLM+mut=0.40)=0S/5W/0O, all WARNING. "
+            f"Recommended: mutation_rate <= 0.20 with LLM.")
+
+    # AP-20: mutation >= 0.18 + tournament + elite <= 2 causes holdout early stop
+    if (isinstance(mr, (int, float)) and mr >= 0.18
+            and sel == 'tournament'
+            and isinstance(es, int) and es <= 2):
+        warnings.append(
+            f"[AP-20] mutation_rate={mr:.2f} + tournament + elite_size={es} triggers "
+            f"holdout early stop. E77 stopped at Gen 8, only 4/5 SAFE. "
+            f"Use elite_size >= 3 with mutation >= 0.18.")
+
+    # AP-4: Walk-forward train_days > 150 degrades results
+    if wf_cfg.get('enabled'):
+        td = wf_cfg.get('train_days', 120)
+        if isinstance(td, (int, float)) and td > 150:
+            warnings.append(
+                f"[AP-4] walk_forward.train_days={td} exceeds optimal range. "
+                f"E13 (180d)=score 0.503 vs E7 (120d)=score 0.136. "
+                f"Recommended: train_days=120 (sweet spot).")
+
+    # AP-11: Monte Carlo permutations > 20 causes premature convergence
+    if mc_cfg.get('enabled'):
+        nperms = mc_cfg.get('num_permutations', 15)
+        if isinstance(nperms, int) and nperms > 20:
+            warnings.append(
+                f"[AP-11] monte_carlo.num_permutations={nperms} (>20) causes premature "
+                f"convergence. E26 (MC=30) early stopped Gen 8, E8 (MC=15) ran full 12 gens. "
+                f"Recommended: num_permutations <= 15.")
+
+    # AP-12: More than 2 pairs in standard GA degrades generalization
+    bt_pairs = config.get('backtesting', {}).get('pairs', [])
+    if not island_enabled and len(bt_pairs) > 2:
+        # Only warn for standard GA without pair_validation (pair-split handles >2 intentionally)
+        pv_check = config.get('pair_validation', {})
+        if not pv_check.get('enabled', False):
+            warnings.append(
+                f"[AP-12] {len(bt_pairs)} pairs in standard GA (no pair-split) degrades "
+                f"generalization. E32 (3 pairs)=0S/5W, all MC=0.0 OVERFIT. "
+                f"Use pair_validation for >2 pairs, or stick to 2 pairs.")
+
+    # AP-10: Short selling with small population doubles search space
+    if short_cfg.get('enabled', False) and isinstance(ps, int) and ps < 25:
+        warnings.append(
+            f"[AP-10] short_selling enabled with population_size={ps} (<25). "
+            f"Shorts double the search space. E25: only 1 HoF from 180 strategies. "
+            f"Recommended: population_size >= 25 or generations >= 20 for shorts.")
 
     return errors, warnings

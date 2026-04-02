@@ -7,7 +7,6 @@ Each strategy is encoded as a set of genes that can be mutated and crossed over.
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
-import random
 
 
 # Timeframe ordering for comparison (lower index = shorter timeframe)
@@ -70,6 +69,7 @@ class RegimeGene:
     entry_trend_max: float = 1.0
     exit_on_regime_change: bool = False
     combination: str = 'weighted_voting'
+    micro_regime: bool = False  # Fast regime detection on base timeframe
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -79,6 +79,7 @@ class RegimeGene:
             'entry_trend_max': self.entry_trend_max,
             'exit_on_regime_change': self.exit_on_regime_change,
             'combination': self.combination,
+            'micro_regime': self.micro_regime,
         }
 
     @classmethod
@@ -92,6 +93,7 @@ class RegimeGene:
             entry_trend_max=data.get('entry_trend_max', 1.0),
             exit_on_regime_change=data.get('exit_on_regime_change', False),
             combination=data.get('combination', 'weighted_voting'),
+            micro_regime=data.get('micro_regime', False),
         )
 
 
@@ -163,6 +165,11 @@ class StrategyGene:
     # and uses them to filter entries/exits.
     regime_gene: Optional[RegimeGene] = None
     
+    # Self-adaptive GA parameters (evolved per-individual)
+    # When self_adaptive is enabled in config, these are used instead of global rates
+    self_mutation_rate: Optional[float] = None   # Individual's own mutation rate
+    self_crossover_pref: Optional[str] = None    # Preferred crossover operator
+    
     def __post_init__(self):
         """Validate strategy gene after initialization."""
         if not self.indicators:
@@ -186,7 +193,23 @@ class StrategyGene:
             curr_val = self.minimal_roi[sorted_keys[i]]
             if curr_val > prev_val:
                 self.minimal_roi[sorted_keys[i]] = prev_val
-    
+
+    def strategy_fingerprint(self) -> str:
+        """Return a stable hash of the gene's strategy-affecting fields.
+
+        Excludes generation and individual_id so that two genes with
+        identical indicators/conditions/parameters produce the same
+        fingerprint even if they belong to different individuals.
+        """
+        import hashlib, json
+        d = self.to_dict()
+        d.pop('generation', None)
+        d.pop('individual_id', None)
+        d.pop('self_mutation_rate', None)
+        d.pop('self_crossover_pref', None)
+        raw = json.dumps(d, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert strategy gene to dictionary for storage."""
         return {
@@ -254,6 +277,8 @@ class StrategyGene:
             'preferred_regime': self.preferred_regime,
             'regime_mode': self.regime_mode,
             'regime_gene': self.regime_gene.to_dict() if self.regime_gene else None,
+            'self_mutation_rate': self.self_mutation_rate,
+            'self_crossover_pref': self.self_crossover_pref,
         }
     
     @classmethod
@@ -353,6 +378,8 @@ class StrategyGene:
             preferred_regime=data.get('preferred_regime'),
             regime_mode=data.get('regime_mode', 'generalist'),
             regime_gene=RegimeGene.from_dict(data['regime_gene']) if data.get('regime_gene') else None,
+            self_mutation_rate=data.get('self_mutation_rate'),
+            self_crossover_pref=data.get('self_crossover_pref'),
         )
     
     def copy(self) -> 'StrategyGene':
@@ -385,6 +412,37 @@ class StrategyGene:
         missing_refs = referenced_refs - present_refs
         return list(missing_refs)
     
+    def prune_orphaned_conditions(self) -> int:
+        """
+        Remove conditions that reference indicators not present in the gene.
+        
+        This is the inverse of ensure_indicators_for_conditions: instead of
+        adding random indicators to satisfy orphaned conditions, we remove
+        the orphaned conditions to keep the indicator set clean.
+        
+        Returns:
+            Number of conditions pruned
+        """
+        present_refs = set()
+        for ind in self.indicators:
+            if ind.instance_id:
+                present_refs.add(ind.instance_id)
+            present_refs.add(ind.type)
+        
+        pruned = 0
+        for attr in ('entry_conditions', 'exit_conditions'):
+            original = getattr(self, attr)
+            kept = [c for c in original if c.indicator in present_refs]
+            pruned += len(original) - len(kept)
+            setattr(self, attr, kept)
+        
+        if pruned:
+            import logging
+            logging.getLogger(__name__).debug(
+                f"Pruned {pruned} orphaned condition(s)")
+        
+        return pruned
+    
     def ensure_indicators_for_conditions(self, indicator_config: Dict[str, Any]) -> None:
         """
         Ensure all indicators referenced in conditions are present in indicators list.
@@ -411,7 +469,8 @@ class StrategyGene:
                     base_type = ind_ref
             else:
                 base_type = ind_ref
-            new_indicator = create_random_indicator(base_type, indicator_config)
+            new_indicator = create_random_indicator(base_type, indicator_config,
+                                                       timeframe=self.timeframe)
             self.indicators.append(new_indicator)
     
     @staticmethod
@@ -491,12 +550,14 @@ class StrategyGene:
                 ind.instance_id = f"{ind.type}_{type_tf_counts[key]}"
             type_tf_counts[key] += 1
         
-        # Create mapping from type to instance IDs
+        # Create mapping from type to sorted instance IDs (sorted for determinism)
         type_to_instances: Dict[str, List[str]] = {}
         for ind in self.indicators:
             if ind.type not in type_to_instances:
                 type_to_instances[ind.type] = []
             type_to_instances[ind.type].append(ind.instance_id)
+        for key in type_to_instances:
+            type_to_instances[key].sort()
         
         # Update condition references: if a condition references a type name
         # and there's only one instance of that type, update it to use the instance_id

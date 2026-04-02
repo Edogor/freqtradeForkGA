@@ -8,15 +8,18 @@ import gc
 import json
 import logging
 import os
+import signal
 import sys
 import tempfile
 import time
 import hashlib
-import concurrent.futures
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from unittest.mock import MagicMock, PropertyMock, patch
 from dataclasses import dataclass
+
+from genetic_algorithm.core.strategy_gene import timeframe_to_minutes as _timeframe_to_minutes_util
 
 logger = logging.getLogger(__name__)
 
@@ -97,19 +100,22 @@ class BacktestResult:
 
 class BacktestCache:
     """
-    Simple cache for backtest results to avoid re-testing identical strategies.
+    Cache for backtest results with LRU disk eviction to prevent unbounded growth.
     """
     
-    def __init__(self, cache_dir: Optional[Path] = None):
+    def __init__(self, cache_dir: Optional[Path] = None, max_disk_mb: int = 5000):
         """
         Initialize cache.
         
         Args:
             cache_dir: Directory to store cache files
+            max_disk_mb: Maximum disk cache size in MB (default 5 GB).
+                         When exceeded, oldest files are evicted.
         """
         self.cache_dir = cache_dir or Path("genetic_algorithm/data/cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache: Dict[str, BacktestResult] = {}
+        self.max_disk_bytes = max_disk_mb * 1024 * 1024
         
     def _get_cache_key(self, strategy_code: str, config: Dict[str, Any]) -> str:
         """
@@ -193,6 +199,32 @@ class BacktestCache:
         except Exception as e:
             logger.warning(f"Failed to save cache file: {e}")
 
+        # Evict oldest files if disk cache exceeds budget
+        self._maybe_evict()
+
+    def _maybe_evict(self):
+        """Remove oldest cache files when total size exceeds max_disk_bytes."""
+        try:
+            cache_files = sorted(
+                self.cache_dir.glob("*.json"),
+                key=lambda p: p.stat().st_mtime,
+            )
+            total_size = sum(f.stat().st_size for f in cache_files)
+            removed = 0
+            while total_size > self.max_disk_bytes and cache_files:
+                oldest = cache_files.pop(0)
+                fsize = oldest.stat().st_size
+                oldest.unlink()
+                total_size -= fsize
+                removed += 1
+            if removed:
+                logger.info(
+                    f"[CACHE] Evicted {removed} old cache files "
+                    f"(limit: {self.max_disk_bytes / (1024**2):.0f} MB)"
+                )
+        except Exception as e:
+            logger.debug(f"Cache eviction skipped: {e}")
+
 
 
 class DirectBacktester:
@@ -220,10 +252,26 @@ class DirectBacktester:
         self.strategy_dir = self.freqtrade_root / "user_data" / "strategies" / "ga_generated"
         self.strategy_dir.mkdir(parents=True, exist_ok=True)
         
+        # Per-backtest timeout (seconds). Defence-in-depth for non-parallel paths.
+        # The parallel evaluator also wraps each call with its own future timeout,
+        # so this is a safety net that fires only if the parallel timeout misses.
+        self.backtest_timeout = self.backtest_config.get('backtest_timeout', 300)
+        
         # Initialize cache if enabled
         self.cache = None
         if self.backtest_config.get('enable_cache', True):
-            self.cache = BacktestCache()
+            max_cache_mb = config.get('storage', {}).get('max_cache_disk_mb', 5000)
+            self.cache = BacktestCache(max_disk_mb=max_cache_mb)
+
+        # Persistent Backtesting instance cache: reuse the heavy Backtesting
+        # object (exchange mock, OHLCV data, pairlists) across evaluations
+        # when config hasn't changed.  Key = (pairs_tuple, timerange, timeframe).
+        self._bt_instance_cache: Dict[tuple, Any] = {}
+        # LRU-capped OHLCV data cache: max 3 entries to bound memory.
+        # Shared-memory-backed entries (from SharedDataManager) count as ~0 MB;
+        # disk-loaded entries are ~300-500 MB each.
+        self._bt_data_cache: OrderedDict[tuple, tuple] = OrderedDict()  # key → (data_dict, timerange_obj)
+        self._bt_data_cache_max = 3
         
         # Log backtester initialization summary
         logger.info("[INIT] DirectBacktester initialized")
@@ -723,16 +771,21 @@ class DirectBacktester:
         
         try:
             # Import FreqTrade modules
-            from freqtrade.configuration import Configuration
             from freqtrade.optimize.backtesting import Backtesting
             from freqtrade.exchange.exchange import Exchange
             import io
             
+            # Extract timeframe from strategy code for dynamic slippage
+            import re as _re_module
+            _tf_match = _re_module.search(r"timeframe\s*=\s*['\"](\w+)['\"]", strategy_code)
+            _strategy_tf = _tf_match.group(1) if _tf_match else None
+
             # Create configuration
             config_dict = self._create_backtest_config(
                 strategy_name, strategy_max_open_trades,
                 timerange_override=timerange_override,
                 pairs_override=pairs_override,
+                strategy_timeframe=_strategy_tf,
             )
             
             # Suppress FreqTrade's verbose output by redirecting stdout
@@ -782,8 +835,67 @@ class DirectBacktester:
                     # and the parallel workers corrupt each other's .meta files
                     backtesting.load_prior_backtest = lambda: None
                     
-                    # Run backtest
-                    backtesting.start()
+                    # --- OHLCV data caching: load once, reuse across evaluations ---
+                    _cache_key = (
+                        tuple(sorted(config_dict.get('exchange', {}).get('pair_whitelist', []))),
+                        config_dict.get('timerange', ''),
+                        config_dict.get('timeframe', '5m'),
+                        timerange_override or '',
+                        tuple(sorted(pairs_override)) if pairs_override else (),
+                    )
+                    cached = self._bt_data_cache.get(_cache_key)
+                    if cached is not None:
+                        # Move to end (most-recently-used) for LRU ordering
+                        self._bt_data_cache.move_to_end(_cache_key)
+                        raw_data, timerange_obj = cached
+                        # Shallow-copy each DataFrame so indicator columns
+                        # from previous strategies don't leak across runs
+                        data = {pair: df.copy() for pair, df in raw_data.items()}
+                        # Restore timerange and required fields on the instance
+                        backtesting.timerange = timerange_obj
+                    else:
+                        data, timerange_obj = backtesting.load_bt_data()
+                        # Cache the raw data (before any indicator additions)
+                        self._bt_data_cache[_cache_key] = (
+                            {pair: df.copy() for pair, df in data.items()},
+                            timerange_obj,
+                        )
+                        # Evict oldest entry if cache exceeds max size
+                        while len(self._bt_data_cache) > self._bt_data_cache_max:
+                            evicted_key, _ = self._bt_data_cache.popitem(last=False)
+                            logger.debug(f"[CACHE] Evicted LRU data cache entry: {evicted_key[:2]}…")
+                    
+                    # Run backtest with timeout safety net
+                    def _timeout_handler(signum, frame):
+                        raise TimeoutError(f"Backtest exceeded {self.backtest_timeout}s timeout")
+                    
+                    old_handler = None
+                    if self.backtest_timeout > 0 and hasattr(signal, 'SIGALRM'):
+                        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                        signal.alarm(self.backtest_timeout)
+                    try:
+                        strat = backtesting.strategylist[0]
+                        min_date, max_date = backtesting.backtest_one_strategy(
+                            strat, data, timerange_obj,
+                        )
+                        # Generate results
+                        from freqtrade.optimize.optimize_reports import generate_backtest_stats
+                        if backtesting.all_bt_content:
+                            backtesting.results = generate_backtest_stats(
+                                data, backtesting.all_bt_content,
+                                min_date=min_date, max_date=max_date,
+                            )
+                    except TimeoutError:
+                        logger.warning(f"[TIMEOUT] Backtest for {strategy_name} timed out after {self.backtest_timeout}s")
+                        return BacktestResult(
+                            success=False,
+                            strategy_name=strategy_name,
+                            error_message=f"Backtest timed out after {self.backtest_timeout}s"
+                        )
+                    finally:
+                        if old_handler is not None:
+                            signal.alarm(0)
+                            signal.signal(signal.SIGALRM, old_handler)
                     
                     # Get results from the backtest results
                     logger.debug(f"Backtest results structure: {backtesting.results.keys() if backtesting.results else 'None'}")
@@ -830,8 +942,8 @@ class DirectBacktester:
                         if trades_df is not None and hasattr(trades_df, 'groupby') and len(trades_df) > 0:
                             per_pair = {}
                             for pair, group in trades_df.groupby('pair'):
-                                # profit_ratio is per-trade profit as a ratio
-                                pair_profit = group['profit_ratio'].mean() * 100 if 'profit_ratio' in group.columns else 0.0
+                                # Total return per pair over the full backtest period (sum of per-trade profit ratios)
+                                pair_profit = group['profit_ratio'].sum() * 100 if 'profit_ratio' in group.columns else 0.0
                                 per_pair[pair] = pair_profit
                             result.per_pair_profit = per_pair
                             logger.debug(f"Per-pair profits: {per_pair}")
@@ -984,7 +1096,7 @@ class DirectBacktester:
                 error_message=f"Execution error: {str(e)}"
             )
     
-    def _create_backtest_config(self, strategy_name: str, strategy_max_open_trades: Optional[int] = None, timerange_override: Optional[str] = None, pairs_override: Optional[List[str]] = None) -> Dict[str, Any]:
+    def _create_backtest_config(self, strategy_name: str, strategy_max_open_trades: Optional[int] = None, timerange_override: Optional[str] = None, pairs_override: Optional[List[str]] = None, strategy_timeframe: Optional[str] = None) -> Dict[str, Any]:
         """
         Create FreqTrade config for backtesting from GA config.
         
@@ -1014,6 +1126,15 @@ class DirectBacktester:
         # Slippage accounts for spread, market impact, and execution delays
         slippage_pct = ga_cfg.get('slippage_pct', 0.0)
         if slippage_pct > 0:
+            # Dynamic slippage: scale based on timeframe (shorter TF = higher slippage)
+            if ga_cfg.get('dynamic_slippage', False) and strategy_timeframe:
+                tf_minutes = _timeframe_to_minutes_util(strategy_timeframe)
+                # Base slippage is calibrated for 1h; scale inversely with sqrt of TF
+                # 5m → 3.46x, 15m → 2x, 30m → 1.41x, 1h → 1x, 4h → 0.5x
+                slippage_scale = (60.0 / max(tf_minutes, 1)) ** 0.5
+                slippage_pct = slippage_pct * slippage_scale
+                logger.debug(f"Dynamic slippage: TF={strategy_timeframe}, scale={slippage_scale:.2f}, "
+                            f"slippage={slippage_pct:.6f}")
             fee = fee + slippage_pct
             logger.debug(f"Fee adjusted with slippage: base={ga_cfg.get('fee', 0.001)}, "
                         f"slippage={slippage_pct}, total={fee}")

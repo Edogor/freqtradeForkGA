@@ -76,6 +76,7 @@ def _kill_pool_processes(executor: ProcessPoolExecutor):
                 proc.kill()
                 proc.join(timeout=5)
                 killed += 1
+                
         except Exception:
             # Process may have already exited
             logger.debug("[PARALLEL] Exception during worker cleanup", exc_info=True)
@@ -105,6 +106,19 @@ def _init_worker(config: Dict[str, Any]):
     """
     global _worker_evaluator, _worker_config
     
+    # ── Deterministic RNG seeding per worker ──
+    # After fork, all workers share the parent's PRNG state.
+    # Seed each independently using PID to ensure diverse randomness.
+    import os as _os
+    _worker_seed = config.get('_worker_base_seed', 42) + _os.getpid()
+    import random as _random
+    _random.seed(_worker_seed)
+    try:
+        import numpy as _np
+        _np.random.seed(_worker_seed % (2**32))
+    except ImportError:
+        pass
+    
     # ── Silence worker logging FIRST (before any imports trigger log calls) ──
     # Strip ALL console StreamHandlers inherited from the parent process (fork)
     # and set levels so init messages from DirectBacktester etc.
@@ -132,6 +146,69 @@ def _init_worker(config: Dict[str, Any]):
     
     _worker_config = worker_config
     _worker_evaluator = FitnessEvaluator(worker_config)
+
+    # ── Shared OHLCV data: attach to shared memory from main process ──
+    shared_meta = config.get('_shared_data_metadata')
+    if shared_meta:
+        try:
+            from genetic_algorithm.evaluation.shared_data import attach_shared_data
+            shared_dfs = attach_shared_data(shared_meta)
+            if shared_dfs and hasattr(_worker_evaluator, 'backtester'):
+                from freqtrade.configuration import TimeRange
+                bt_cfg = worker_config.get('backtesting', {})
+                tr_str = bt_cfg.get('timerange', '')
+                tr_obj = TimeRange.parse_timerange(tr_str)
+                all_pairs = tuple(sorted(shared_dfs.keys()))
+
+                # Determine all timeframes the GA may produce so we pre-populate
+                # cache entries for each.  Falls back to ['5m'] if not configured.
+                sc = worker_config.get('strategy_constraints', {})
+                timeframes = sc.get('timeframes', ['5m'])
+                if not timeframes:
+                    timeframes = ['5m']
+
+                # Build all cache key variants that _run_backtest_direct will
+                # look up.  Key structure:
+                #   (pair_whitelist, timerange, timeframe, override_tr, override_pairs)
+                #
+                # Without pair_validation: whitelist=all, override=()
+                # With pair_validation:    whitelist=subset, override=subset
+                cache_keys_and_data = []
+
+                for tf in timeframes:
+                    # 1) Full pair set (no override) — used when pair_validation off
+                    cache_keys_and_data.append((
+                        (all_pairs, tr_str, tf, '', ()),
+                        shared_dfs,
+                    ))
+
+                    # 2) Pair validation subsets — training and validation
+                    pv_cfg = worker_config.get('pair_validation', {})
+                    if pv_cfg.get('enabled', False):
+                        for subset_key in ('training_pairs', 'validation_pairs'):
+                            subset = pv_cfg.get(subset_key, [])
+                            if subset:
+                                subset_sorted = tuple(sorted(subset))
+                                subset_data = {p: shared_dfs[p] for p in subset if p in shared_dfs}
+                                if subset_data:
+                                    cache_keys_and_data.append((
+                                        (subset_sorted, tr_str, tf, '', subset_sorted),
+                                        subset_data,
+                                    ))
+
+                bt_cache = _worker_evaluator.backtester._bt_data_cache
+                for key, data in cache_keys_and_data:
+                    bt_cache[key] = (data, tr_obj)
+
+                logging.getLogger(__name__).info(
+                    f"[PARALLEL-WORKER] Pre-populated _bt_data_cache with "
+                    f"{len(cache_keys_and_data)} key(s) from shared memory "
+                    f"({len(shared_dfs)} pairs)"
+                )
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"[PARALLEL-WORKER] Failed to attach shared data: {e}"
+            )
 
 
 def _evaluate_strategy_in_worker(
@@ -398,6 +475,12 @@ def parallel_walk_forward_validation(
     """
     Run walk-forward validation on candidate individuals in parallel.
     
+    .. deprecated::
+        This function creates an EPHEMERAL pool (expensive).  It is no longer
+        called from the main evolution loop — ``parallel_walk_forward_flat``
+        (which reuses the persistent pool) is used instead.  Kept for
+        backwards-compatibility and manual / test invocations.
+    
     Spawns WF-enabled workers to evaluate multiple candidates concurrently,
     replacing the old sequential loop. Updates individuals in-place.
     
@@ -410,6 +493,13 @@ def parallel_walk_forward_validation(
     Returns:
         Number of successfully validated candidates
     """
+    import warnings
+    warnings.warn(
+        "parallel_walk_forward_validation() uses an ephemeral pool. "
+        "Prefer parallel_walk_forward_flat() which reuses the persistent pool.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if not candidates:
         return 0
     
@@ -1148,6 +1238,9 @@ class ParallelEvaluator:
         # Persistent pool — created lazily on first evaluate_batch()
         self._executor: Optional[ProcessPoolExecutor] = None
         self._pool_generation_count = 0  # How many batches this pool has served
+
+        # Shared OHLCV data manager — created with the pool, cleaned up on shutdown
+        self._shared_data_manager = None
         
         logger.info(f"[PARALLEL] Initialized with {self.num_workers} workers, "
                     f"timeout={self.backtest_timeout}s per backtest")
@@ -1255,10 +1348,30 @@ class ParallelEvaluator:
         """
         if self._executor is None:
             logger.info(f"[PARALLEL] Creating persistent worker pool ({self.num_workers} workers)...")
+            # Inject base seed so workers can derive unique per-worker seeds
+            import random as _rng
+            worker_config = dict(self.config)
+            worker_config['_worker_base_seed'] = _rng.randint(0, 2**31)
+
+            # ── Load shared OHLCV data before spawning workers ──
+            # Workers will attach to the same shared memory blocks (zero-copy).
+            try:
+                from genetic_algorithm.evaluation.shared_data import SharedDataManager
+                sdm = SharedDataManager()
+                loaded = sdm.load_and_share(self.config)
+                if loaded:
+                    self._shared_data_manager = sdm
+                    worker_config['_shared_data_metadata'] = sdm.get_metadata()
+                    logger.info("[PARALLEL] Shared OHLCV data loaded — workers will use zero-copy views")
+                else:
+                    logger.info("[PARALLEL] Shared data loading returned empty — workers will load from disk")
+            except Exception as e:
+                logger.warning(f"[PARALLEL] Shared data loading failed ({e}) — workers will load from disk")
+
             self._executor = ProcessPoolExecutor(
                 max_workers=self.num_workers,
                 initializer=_init_worker,
-                initargs=(self.config,),
+                initargs=(worker_config,),
             )
             _active_executors.append(self._executor)
             logger.info("[PARALLEL] Worker pool created — workers will persist across generations")
@@ -1303,6 +1416,15 @@ class ParallelEvaluator:
             self._executor = None
             _reap_zombies()
             logger.info("[PARALLEL] Worker pool shut down")
+
+        # Clean up shared memory after workers are gone
+        if self._shared_data_manager is not None:
+            try:
+                self._shared_data_manager.cleanup()
+                logger.info("[PARALLEL] Shared OHLCV memory cleaned up")
+            except Exception as e:
+                logger.debug(f"[PARALLEL] Shared memory cleanup error: {e}")
+            self._shared_data_manager = None
     
     def shutdown(self):
         """Explicitly shutdown any active executors."""
@@ -1326,7 +1448,7 @@ class ParallelEvaluator:
     
     def evaluate_batch(
         self, 
-        individuals: List['Individual'],
+        individuals: List['Individual'],  # noqa: F821
         progress_callback: Optional[callable] = None
     ) -> ParallelEvaluationResult:
         """
@@ -1339,8 +1461,6 @@ class ParallelEvaluator:
         Returns:
             ParallelEvaluationResult with statistics
         """
-        from genetic_algorithm.core.individual import Individual
-        from genetic_algorithm.core.nsga2 import extract_objectives_from_metrics
         
         if not individuals:
             return ParallelEvaluationResult(
@@ -1367,10 +1487,14 @@ class ParallelEvaluator:
         logger.info(f"[PARALLEL] Evaluating {len(tasks)} strategies with {self.num_workers} workers "
                     f"(pool batch #{self._pool_generation_count})...")
         
-        # Health-check the persistent pool (recycles if broken)
-        self._check_pool_health()
+        # Health-check the persistent pool every 10 batches (not every batch)
+        # First batch always checks to catch early failures.
+        if self._pool_generation_count <= 1 or self._pool_generation_count % 10 == 0:
+            self._check_pool_health()
         executor = self._get_executor()
         
+        completed = 0
+        timed_out = 0
         try:
             # Submit all tasks
             futures = {
@@ -1385,8 +1509,6 @@ class ParallelEvaluator:
             }
             
             # Collect results as they complete (with per-future timeout)
-            completed = 0
-            timed_out = 0
             for future in as_completed(futures, timeout=self.backtest_timeout * len(tasks) if self.backtest_timeout else None):
                 try:
                     result = future.result(timeout=self.backtest_timeout if self.backtest_timeout else None)
@@ -1443,10 +1565,11 @@ class ParallelEvaluator:
                     timed_out += 1
             logger.warning(f"[PARALLEL] Batch timeout reached, {timed_out} strategies cancelled")
         except BrokenProcessPool:
-            # Pool died — recycle it for next generation
+            # Pool died — recycle it for next generation.
+            # Don't increment `failed` here; the cleanup loop below
+            # handles unevaluated individuals and avoids double-counting.
             logger.error("[PARALLEL] Worker pool crashed! Will recycle for next batch.")
             self._shutdown_executor()
-            failed += len(tasks) - completed
         # NOTE: No executor.shutdown() here — pool is persistent!
         
         # Set fitness for any individuals that never got results (timed out)
