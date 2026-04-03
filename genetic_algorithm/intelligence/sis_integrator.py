@@ -122,15 +122,47 @@ class SISIntegrator:
         self._n_filtered_last: int = 0
         self._n_immigrants_last: int = 0
 
-        # ── SIS JSONL log ────────────────────────────────────────────────────
-        output_dir = Path(
-            config.get('output', {}).get(
-                'dir',
-                config.get('output', {}).get('directory', 'genetic_algorithm/output'),
+        # ── SIS JSONL log — reads configured path or falls back to output dir ──
+        log_file = self._sis_config.get('log_file')
+        if log_file:
+            self._log_path = Path(log_file)
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            output_dir = Path(
+                config.get('output', {}).get(
+                    'dir',
+                    config.get('output', {}).get('directory', 'genetic_algorithm/output'),
+                )
             )
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        self._log_path = output_dir / "sis_log.jsonl"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            self._log_path = output_dir / "sis_log.jsonl"
+
+        # ── PatternMiner auto-load (overrides hardcoded enrichment constants) ──
+        self._pattern_enrichment: Dict[str, float] = {}
+        self._pattern_operator_weights: Dict[str, float] = {}
+        try:
+            from genetic_algorithm.intelligence.pattern_mining import PatternMiner
+            miner = PatternMiner.load(models_dir)
+            if miner is not None and miner.indicator_enrichment is not None:
+                enrich_df = miner.indicator_enrichment
+                self._pattern_enrichment = dict(
+                    zip(enrich_df['indicator'], enrich_df['enrichment'])
+                )
+                self.logger.info(
+                    f"[SIS] Loaded PatternMiner enrichment for "
+                    f"{len(self._pattern_enrichment)} indicators"
+                )
+            if miner is not None and miner.operator_patterns is not None:
+                entry_ops = miner.operator_patterns.get('entry_operators', {})
+                self._pattern_operator_weights = {
+                    op: max(0.1, v.get('top_mean', 1.0) / (v.get('global_mean', 1.0) + 0.01))
+                    for op, v in entry_ops.items()
+                    if v.get('global_mean', 0) > 0.01  # skip near-zero usage operators
+                }
+        except Exception as e:
+            self.logger.debug(
+                f"[SIS] PatternMiner load skipped, using hardcoded weights: {e}"
+            )
 
         self.logger.info(
             f"[SIS] Initialized — classifier_ready={self._classifier_ready}, "
@@ -181,7 +213,7 @@ class SISIntegrator:
         if not self._predictor_ready:
             return
 
-        filter_fraction: float = self._sis_config.get('filter_fraction', 0.3)
+        filter_fraction: float = self._sis_config.get('filter_fraction', 0.15)
 
         # Identify "random" individuals: unevaluated, no origin set
         random_indices: List[int] = []
@@ -327,7 +359,7 @@ class SISIntegrator:
         if not target_archetypes:
             return immigrants
 
-        n_immigrants: int = self._sis_config.get('n_immigrants_per_gen', 2)
+        n_immigrants: int = self._sis_config.get('immigrants_per_gen', 2)
 
         for arch_id in target_archetypes[:n_immigrants]:
             try:
@@ -397,6 +429,10 @@ class SISIntegrator:
     def get_indicator_weights(self, base_weights: Optional[Dict[str, float]] = None) -> Dict[str, float]:
         """Return merged indicator weights from SIS enrichment + optional base weights.
 
+        Prefers live PatternMiner enrichment over hardcoded constants when available.
+        Applies ``indicator_weight_scale`` by amplifying deviations from the mean
+        (scale=1.0 is a no-op; scale=2.0 doubles the spread above/below 1.0).
+
         Args:
             base_weights: Optional weights from FeatureImportanceTracker. When
                           provided, SIS and base weights are multiplied together.
@@ -406,28 +442,52 @@ class SISIntegrator:
         """
         scale: float = self._sis_config.get('indicator_weight_scale', 1.5)
 
+        # Prefer live PatternMiner enrichment; fall back to hardcoded constants
+        enrichment_source = self._pattern_enrichment if self._pattern_enrichment \
+            else SIS_INDICATOR_ENRICHMENT
+
         if base_weights:
-            all_keys = set(SIS_INDICATOR_ENRICHMENT.keys()) | set(base_weights.keys())
-            merged = {
-                ind: SIS_INDICATOR_ENRICHMENT.get(ind, 1.0)
-                * base_weights.get(ind, 1.0)
-                * scale
+            all_keys = set(enrichment_source.keys()) | set(base_weights.keys())
+            raw = {
+                ind: enrichment_source.get(ind, 1.0) * base_weights.get(ind, 1.0)
                 for ind in all_keys
             }
         else:
-            merged = {ind: w * scale for ind, w in SIS_INDICATOR_ENRICHMENT.items()}
+            raw = dict(enrichment_source)
 
-        # Normalize: mean weight = 1.0
-        if merged:
-            mean_w = float(np.mean(list(merged.values())))
+        # Step 1: normalize to mean = 1.0
+        if raw:
+            mean_w = float(np.mean(list(raw.values())))
             if mean_w > 0:
-                merged = {ind: w / mean_w for ind, w in merged.items()}
+                normalized = {ind: w / mean_w for ind, w in raw.items()}
+            else:
+                normalized = raw
+        else:
+            return {}
 
-        return merged
+        # Step 2: amplify deviations from 1.0 by scale (scale=1.0 → identity)
+        return {ind: max(0.1, 1.0 + (w - 1.0) * scale) for ind, w in normalized.items()}
 
     def get_operator_weights(self) -> Dict[str, float]:
-        """Return operator -> weight dict derived from SIS pattern analysis."""
-        return dict(SIS_OPERATOR_ENRICHMENT)
+        """Return operator -> weight dict, optionally scaled by operator_weight_scale.
+
+        Prefers live PatternMiner operator patterns; falls back to hardcoded constants.
+        Applies ``operator_weight_scale`` as a deviation amplifier (scale=1.0 is no-op).
+        """
+        scale: float = self._sis_config.get('operator_weight_scale', 1.0)
+
+        # Prefer live PatternMiner operator weights; fall back to hardcoded constants
+        source = self._pattern_operator_weights if self._pattern_operator_weights \
+            else SIS_OPERATOR_ENRICHMENT
+
+        if scale == 1.0:
+            return dict(source)
+
+        mean_w = float(np.mean(list(source.values()))) if source else 1.0
+        if mean_w <= 0:
+            return dict(source)
+        normalized = {op: w / mean_w for op, w in source.items()}
+        return {op: max(0.1, 1.0 + (w - 1.0) * scale) for op, w in normalized.items()}
 
     # ── Generation logging ────────────────────────────────────────────────────
 

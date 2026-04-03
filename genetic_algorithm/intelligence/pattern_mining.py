@@ -297,3 +297,42 @@ class PatternMiner:
             lines.append("")
 
         return "\n".join(lines)
+
+    # ── Persistence ──────────────────────────────────────────────────────────
+
+    def save(self, models_dir=None) -> None:
+        """Persist mining results so SISIntegrator can auto-load live weights."""
+        import pickle
+        from pathlib import Path
+        out_dir = Path(models_dir) if models_dir else Path("genetic_algorithm/ml/models")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "indicator_enrichment": self.indicator_enrichment,
+            "indicator_synergies": self.indicator_synergies,
+            "operator_patterns": self.operator_patterns,
+            "risk_param_analysis": self.risk_param_analysis,
+        }
+        with open(out_dir / "pattern_miner.pkl", "wb") as f:
+            pickle.dump(payload, f)
+        logger.info(f"[PATTERNS] Saved mining results to {out_dir}/pattern_miner.pkl")
+
+    @classmethod
+    def load(cls, models_dir=None):
+        """Load a previously saved PatternMiner. Returns None if not found."""
+        import pickle
+        from pathlib import Path
+        pkl_path = Path(models_dir) / "pattern_miner.pkl" if models_dir else \
+            Path("genetic_algorithm/ml/models/pattern_miner.pkl")
+        if not pkl_path.exists():
+            return None
+        with open(pkl_path, "rb") as f:
+            data = pickle.load(f)
+        obj = cls.__new__(cls)
+        obj.df = None
+        obj.top_pct = 0.2
+        obj.bottom_pct = 0.2
+        obj.indicator_enrichment = data.get("indicator_enrichment")
+        obj.indicator_synergies = data.get("indicator_synergies")
+        obj.operator_patterns = data.get("operator_patterns")
+        obj.risk_param_analysis = data.get("risk_param_analysis")
+        return obj

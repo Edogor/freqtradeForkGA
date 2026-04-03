@@ -185,6 +185,8 @@ def cmd_patterns(args) -> None:
     summary = miner.mine()
 
     print(miner.report())
+    miner.save()
+    print("  Pattern mining results saved to genetic_algorithm/ml/models/pattern_miner.pkl")
 
 
 def cmd_all(args) -> None:

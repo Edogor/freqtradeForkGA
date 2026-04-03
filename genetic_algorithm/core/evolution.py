@@ -1905,14 +1905,16 @@ class GeneticAlgorithm:
     def create_next_generation(self, population: Population) -> Population:
         """
         Create next generation through selection, crossover, and mutation.
-        
+
         Args:
             population: Current population
-            
+
         Returns:
             Next generation population
         """
         self.logger.info(f"[STEP] Creating generation {self.current_generation + 1}")
+        # Expose current population on self so immigrant_provider/SIS hooks can read it
+        self.population = population
         
         # Track GA operator usage
         crossover_count = 0

@@ -247,7 +247,7 @@ sis:
   enabled: true
   corpus_path: "genetic_algorithm/data/strategy_corpus.parquet"
   models_dir: "genetic_algorithm/ml/models"
-  seed_filter_candidates: 3
+  filter_fraction: 0.15
   immigrants_per_gen: 2
   indicator_weight_scale: 2.0
   operator_weight_scale: 1.5

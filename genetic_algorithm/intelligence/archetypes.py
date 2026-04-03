@@ -324,11 +324,13 @@ class ArchetypeClassifier:
                         s[f"{metric}_max"] = float(vals.max())
                         s[f"{metric}_min"] = float(vals.min())
 
-            # Top indicators in this cluster
-            cluster_ind_means = cluster_df[ind_cols].mean().sort_values(ascending=False)
+            # Top indicators: ranked by enrichment vs global mean (not absolute prevalence)
+            # This ensures archetype immigrants carry truly distinctive indicators.
+            global_ind_means = df[ind_cols].mean()
+            enrichment_ratio = (cluster_ind_means / (global_ind_means + 0.01)).sort_values(ascending=False)
             s["top_indicators"] = [
-                col.replace("ind_", "") for col in cluster_ind_means.head(5).index
-                if cluster_ind_means[col] > 0.3  # present in >30% of cluster members
+                col.replace("ind_", "") for col in enrichment_ratio.head(8).index
+                if enrichment_ratio[col] > 1.5  # ≥50% more common in this cluster than globally
             ]
 
             # Dominant timeframe
