@@ -1,0 +1,152 @@
+# ============================================================================
+# WAVE 20 — E162: 15m Ring + Soft 50 trades/month (Extreme Frequency)
+# ============================================================================
+# Purpose: Push trade frequency to the extreme — 50 tpm (~1.7 trades/day).
+#          Soft penalty counterpart to E156 (hard kill 50tpm). Tests if
+#          evolution can find profitable strategies at very high activity.
+#          Slightly relaxed win_rate (0.28) to allow more exploratory trades.
+#
+# Base: E157 (ring, 10x8, pair-split, soft penalty)
+# Key changes: min_trades_per_month=50, ideal_min=600, trade_freq weight=0.22
+# ============================================================================
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 8
+  generations: 12
+  mutation_rate: 0.20
+  crossover_rate: 0.7
+  elite_size: 1
+  tournament_size: 3
+  selection_method: 'tournament'
+  convergence_patience: 8
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.1
+  fitness_sharing: false
+  allow_self_crossover: false
+  random_immigrants: 1
+  mode: 'single_objective'
+
+generic_island_model:
+  enabled: true
+  num_islands: 10
+  population_per_island: 8
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.5
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+    merge_rounds: false
+
+fitness_weights:
+  profit: 0.16
+  sharpe_ratio: 0.14
+  sortino_ratio: 0.09
+  profit_factor: 0.07
+  drawdown: 0.12
+  win_rate: 0.06
+  trade_frequency: 0.24
+  consistency: 0.06
+  exposure_time: 0.06
+
+trade_frequency_thresholds:
+  very_few: 100
+  few: 300
+  ideal_min: 600
+  ideal_max: 2000
+  moderate_excess: 4000
+  shape: 'asymmetric'
+
+fitness_penalties:
+  min_trades: 250
+  min_trades_per_month: 50
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.28
+  min_win_rate: 0.28
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210301-20260301"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+  max_open_trades: 5
+  fee: 0.001
+  exchange: "binance"
+  auto_download_data: true
+  enable_cache: true
+  timeout: 180
+
+walk_forward:
+  enabled: false
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "SOL/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 250
+  max_drawdown: 0.28
+  min_win_rate: 0.28
+  timeframes: ["15m"]
+  stoploss_range: [-0.06, -0.015]
+  roi_range: [0.003, 0.03]
+  max_open_trades_range: [2, 5]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'DONCHIAN'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'WILLR'
+    - 'ROC'
+    - 'AROON'
+    - 'TEMA'
+    - 'KAMA'
+  min_per_strategy: 2
+  max_per_strategy: 5
+
+island_model:
+  enabled: false
+
+llm:
+  enabled: false
+
+terminal_monitor:
+  enabled: true

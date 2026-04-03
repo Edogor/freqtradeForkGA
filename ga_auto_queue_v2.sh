@@ -126,6 +126,22 @@ log() {
 
 # ── Auto-detect next wave number ──
 detect_next_wave() {
+    # First priority: detect wave name from queued configs (experiment_name field)
+    local queue_wave=""
+    for f in "${QUEUE_DIR}"/*.yaml; do
+        [[ -f "$f" ]] || continue
+        local exp_name
+        exp_name=$(grep -m1 'experiment_name:' "$f" 2>/dev/null | sed "s/.*experiment_name: *['\"]*//" | sed "s/['\"].*//")
+        if [[ "$exp_name" =~ ^(wave[0-9]+)_ ]]; then
+            queue_wave="${BASH_REMATCH[1]}"
+            break
+        fi
+    done
+    if [[ -n "$queue_wave" ]]; then
+        echo "$queue_wave"
+        return
+    fi
+    # Fallback: increment from highest output dir (legacy behavior)
     local max_wave=0
     for d in "${OUTPUT_BASE}"/wave*; do
         [[ -d "$d" ]] || continue
@@ -405,9 +421,25 @@ check_completed() {
                 duration="${hours}h${mins}m"
             fi
 
-            # Get exit code
+            # Get exit code — use log-based success detection to guard against
+            # bash exit-127 on re-imported PIDs (non-children of this shell).
             wait "$pid" 2>/dev/null
             local exit_code=$?
+
+            # Determine success: trust log over exit code.
+            # 'wait' returns 127 when the PID is not a child of this shell
+            # (e.g. PIDs re-imported after a daemon restart). In that case
+            # the process ran fine but bash cannot inspect its exit status.
+            local success=false
+            if [[ -n "$exp_log" && -f "$exp_log" ]]; then
+                if grep -q "GA RUN COMPLETE\|EVOLUTION COMPLETE" "$exp_log" 2>/dev/null; then
+                    success=true
+                fi
+            fi
+            # Also trust exit code 0 from true child processes
+            if [[ $exit_code -eq 0 ]]; then
+                success=true
+            fi
 
             # Extract summary from log
             local best_fitness="?" profit="?" result_tag=""
@@ -424,7 +456,7 @@ check_completed() {
                 fi
             fi
 
-            if [[ $exit_code -eq 0 ]]; then
+            if [[ "$success" == true ]]; then
                 log "INFO" "COMPLETED: ${name} (${duration}, fitness=${best_fitness})${result_tag}"
                 ((COMPLETED_COUNT++))
             else

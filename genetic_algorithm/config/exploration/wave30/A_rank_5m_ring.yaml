@@ -1,21 +1,23 @@
 # ============================================================================
-# WAVE26 — V7: 3m Rank + Wide Multi-TF (5m/15m/1h/4h)
+# WAVE30 — A: Classic Rank 5m (Ring Topology)
 # ============================================================================
-# 3m base with 4 informative TFs — maximum multi-TF context
-# Rank selection + high diversity pressure for broad exploration
-# Tests whether more TF context compensates for added complexity
+# Hypothesis: Rank selection + ring topology = best robustness (E33 pattern)
+# 8 islands × 15 pop = 120 individuals, ring topology
+# Single 5m TF — proven simpler search space
+# Pair validation: 2 train + 2 val, no walk-forward
+# Sequential per island (no parallel workers)
 # ============================================================================
 
-experiment_name: wave26_V7_3m_wide_mtf_rank
+experiment_name: wave30_A_rank_5m_ring
 
 genetic_algorithm:
   random_seed: null
-  population_size: 30
-  generations: 50
-  mutation_rate: 0.20
+  population_size: 15
+  generations: 25
+  mutation_rate: 0.18
   crossover_rate: 0.7
   elite_size: 3
-  tournament_size: 4
+  tournament_size: 3
   selection_method: 'rank'
   convergence_patience: 15
   adaptive_mutation: true
@@ -24,94 +26,90 @@ genetic_algorithm:
   mutation_cooldown_factor: 0.5
   fitness_sharing: true
   sharing_radius: 0.22
-  diversity_threshold: 0.14
+  diversity_threshold: 0.12
   allow_self_crossover: false
-  random_immigrants: 4
+  random_immigrants: 2
   mode: 'single_objective'
 
 surrogate:
   enabled: true
   min_training_samples: 80
-  filter_percentile: 55
+  filter_percentile: 70
   retrain_interval: 3
-  model: "random_forest"
+  model: "gradient_boosting"
   mutate_skipped: true
 
 generic_island_model:
   enabled: true
-  num_islands: 10
-  population_per_island: 30
+  num_islands: 8
+  population_per_island: 15
   parallel_islands: false
   specialization:
     rotate_seeds: true
     indicator_pools: true
-    indicator_overlap: 0.5
+    indicator_overlap: 0.4
     pair_rotation: false
   migration:
     topology: 'ring'
-    interval: 4
+    interval: 3
     count: 2
     merge_rounds: false
 
+# ── Fitness Weights (balanced scalping) ───────────────────────────────────
 fitness_weights:
-  profit: 0.14
-  sharpe_ratio: 0.16
+  profit: 0.12
+  sharpe_ratio: 0.18
   sortino_ratio: 0.10
-  profit_factor: 0.10
-  drawdown: 0.12
-  win_rate: 0.08
-  trade_frequency: 0.22
-  consistency: 0.04
-  exposure_time: 0.04
+  profit_factor: 0.08
+  drawdown: 0.14
+  win_rate: 0.12
+  trade_frequency: 0.18
+  monthly_stability: 0.04
+  cross_pair: 0.04
 
 trade_frequency_thresholds:
   auto_scale_by_timeframe: true
-  shape: 'asymmetric'
+  shape: 'gaussian'
 
 fitness_penalties:
-  min_trades: 350
-  min_trades_per_month: 60
+  min_trades: 120
+  min_trades_per_month: 20
   min_trades_per_month_penalty: 0.05
   max_drawdown: 0.20
-  min_win_rate: 0.34
-  complexity_weight: 0.012
+  min_win_rate: 0.35
+  complexity_weight: 0.01
 
 backtesting:
-  timerange: "20240101-20260327"
+  timerange: "20210101-20260331"
   stake_amount: 100
   pairs:
     - "BTC/USDT"
-    - "ETH/USDT"
     - "SOL/USDT"
+    - "ETH/USDT"
     - "BNB/USDT"
-    - "XRP/USDT"
-    - "PEPE/USDT"
   max_open_trades: 3
   fee: 0.001
   slippage_pct: 0.0005
   exchange: "binance"
   auto_download_data: false
   enable_cache: true
-  timeout: 480
+  timeout: 300
 
 pair_validation:
   enabled: true
   training_pairs:
     - "BTC/USDT"
     - "SOL/USDT"
-    - "BNB/USDT"
   validation_pairs:
     - "ETH/USDT"
-    - "XRP/USDT"
-    - "PEPE/USDT"
+    - "BNB/USDT"
   weight_train: 0.6
   weight_val: 0.4
   min_val_fitness: 0.0
-  validate_top_n_only: 5
+  validate_top_n_only: 8
 
 walk_forward:
   enabled: false
-  preset: scalping
 
 holdout_validation:
   enabled: false
@@ -123,26 +121,15 @@ monte_carlo:
   enabled: false
 
 strategy_constraints:
-  min_trades: 350
+  min_trades: 120
   max_drawdown: 0.20
-  min_win_rate: 0.34
-  timeframes: ["3m"]
+  min_win_rate: 0.35
+  timeframes: ["5m"]
   stoploss_range: [-0.035, -0.008]
-  roi_range: [0.0015, 0.018]
-  max_open_trades_range: [1, 5]
-
-multi_timeframe:
-  enabled: true
-  available: ['5m', '15m', '1h', '4h']
-  max_timeframes: 4
-  higher_timeframe_preference:
-    - 'EMA'
-    - 'SMA'
-    - 'RSI'
-    - 'ATR'
-    - 'ADX'
-    - 'BBANDS'
-    - 'SUPERTREND'
+  roi_range: [0.003, 0.018]
+  max_open_trades_range: [1, 4]
+  trailing_stop_positive_range: [0.003, 0.012]
+  trailing_stop_offset_addition_range: [0.003, 0.01]
 
 indicators:
   available:
@@ -162,30 +149,31 @@ indicators:
     - 'VWAP'
     - 'STOCH'
     - 'DONCHIAN'
+    - 'WILLR'
     - 'AROON'
   min_per_strategy: 2
-  max_per_strategy: 5
+  max_per_strategy: 4
 
 storage:
-  database: "genetic_algorithm/data/wave26_V7.db"
-  strategy_dir: "user_data/strategies/wave26_V7"
-  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave26_V7"
+  database: "genetic_algorithm/data/wave30_A.db"
+  strategy_dir: "user_data/strategies/wave30_A"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave30_A"
   checkpoint_interval: 3
   keep_history: true
   min_disk_gb: 5.0
   min_disk_gb_runtime: 2.0
-  max_cache_disk_mb: 5000
+  max_cache_disk_mb: 8000
 
 logging:
   level: "INFO"
-  file: "genetic_algorithm/logs/wave26_V7.log"
+  file: "genetic_algorithm/logs/wave30_A.log"
   console: true
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 visualization:
   enabled: true
   update_interval: 1
-  output_dir: "genetic_algorithm/output/exploration/wave26/V7_3m_wide_mtf_rank/plots"
+  output_dir: "genetic_algorithm/output/exploration/wave30/A_rank_5m_ring/plots"
 
 terminal_monitor:
   enabled: true
@@ -194,22 +182,9 @@ terminal_monitor:
 hall_of_fame:
   enabled: true
   max_size: 50
-  inject_count: 2
+  inject_count: 3
   min_fitness: 0.10
-  directory: "genetic_algorithm/data/hall_of_fame_wave26_V7"
+  directory: "genetic_algorithm/data/hall_of_fame_wave30_A"
 
 deflated_sharpe:
   enabled: true
-  min_trades: 25
-  benchmark_sr: 0.0
-  skewness_correction: true
-
-advanced:
-  parallel_evaluation: true
-  max_workers: 5
-  enable_dry_run: false
-  enable_ml_fitness: false
-  enable_llm: false
-
-island_model:
-  enabled: false

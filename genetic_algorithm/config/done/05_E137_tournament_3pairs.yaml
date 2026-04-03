@@ -1,0 +1,202 @@
+# ============================================================================
+# WAVE 17 — E137: Tournament + 3 Pairs + Wider Indicator Range
+# ============================================================================
+# Purpose: All top experiments use only 2 pairs. Test if adding a 3rd pair
+#          (BNB/USDT) improves generalization. Also widen indicator ranges
+#          slightly to give the GA more room to explore. This tests whether
+#          the fitness landscape improves with more diverse market inputs.
+#
+# Changes from E77: Add BNB/USDT, wider indicator ranges, cross_pair weight
+# Expected runtime: ~1h10m (3 pairs = ~50% more backtest time per eval)
+# ============================================================================
+
+genetic_algorithm:
+  random_seed: 1370
+  population_size: 12
+  generations: 12
+  max_runtime_minutes: 120
+  mutation_rate: 0.18
+  crossover_rate: 0.80
+  crossover_method: 'uniform'
+  elite_size: 2
+  tournament_size: 4
+  selection_method: 'tournament'
+  convergence_patience: 8
+  adaptive_mutation: true
+  max_adaptation_factor: 2.0
+  adaptation_step: 0.10
+  max_mutation_rate: 0.35
+  fitness_sharing: true
+  sharing_radius: 0.30
+  diversity_threshold: 0.20
+  allow_self_crossover: false
+  random_immigrants: 1
+  mode: 'single_objective'
+
+fitness_weights:
+  profit: 0.22
+  sharpe_ratio: 0.16
+  sortino_ratio: 0.12
+  profit_factor: 0.10
+  drawdown: 0.16
+  win_rate: 0.05
+  trade_frequency: 0.04
+  monthly_stability: 0.05
+  cross_pair: 0.10
+
+fitness_penalties:
+  min_trades: 15
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  complexity_weight: 0.020
+  unused_indicator_weight: 0.025
+  pair_loss_threshold: -5.0
+
+backtesting:
+  timerange: "20230301-20260228"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "BNB/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 120
+
+walk_forward:
+  enabled: true
+  train_days: 120
+  validation_days: 30
+  step_days: 30
+  mode: 'rolling'
+  aggregation: 'trimmed_mean'
+  min_train_trades: 12
+  max_windows: 8
+  embargo_days: 3
+
+holdout_validation:
+  enabled: true
+  holdout_pct: 0.20
+
+holdout_monitoring:
+  enabled: true
+  interval: 2
+  top_n: 5
+  early_stop: true
+  early_stop_threshold: 0.50
+  early_stop_checks: 3
+  trend_early_stop: true
+  trend_checks: 3
+  fitness_penalty: true
+  penalty_factor: 0.60
+
+regime_aware:
+  enabled: false
+
+monte_carlo:
+  enabled: true
+  num_permutations: 15
+  methods:
+    - 'bootstrap'
+    - 'shuffle'
+  confidence_level: 0.95
+  min_robustness: 0.55
+
+deflated_sharpe:
+  enabled: true
+  min_trades: 12
+  benchmark_sr: 0.0
+  skewness_correction: true
+
+parsimony:
+  enabled: true
+  max_indicators: 4
+  max_conditions: 5
+
+cpcv:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 15
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  timeframes: ["15m"]
+  stoploss_range: [-0.10, -0.02]
+  roi_range: [0.01, 0.08]
+  max_open_trades_range: [1, 3]
+  min_exit_conditions: 1
+
+multi_timeframe:
+  enabled: false
+
+indicators:
+  available:
+    - "RSI"
+    - "EMA"
+    - "BBANDS"
+    - "ADX"
+    - "MACD"
+    - "SMA"
+    - "SUPERTREND"
+    - "STOCH"
+    - "ATR"
+    - "CCI"
+    - "CMF"
+    - "VROC"
+  max_per_strategy: 4
+  min_per_strategy: 2
+  min_entry_conditions: 2
+
+  RSI:
+    period: [6, 25]
+    buy_threshold: [20, 38]
+    sell_threshold: [62, 82]
+  MACD:
+    fast_period: [6, 20]
+    slow_period: [18, 55]
+    signal_period: [4, 16]
+  BBANDS:
+    period: [12, 35]
+    std_dev: [1.5, 3.0]
+  EMA:
+    period: [6, 50]
+  SMA:
+    period: [10, 100]
+  STOCH:
+    k_period: [4, 25]
+    d_period: [3, 16]
+    k_threshold: [15, 38]
+    d_threshold: [62, 85]
+  SUPERTREND:
+    period: [6, 16]
+    multiplier: [1.5, 4.5]
+  CMF:
+    period: [12, 25]
+    threshold: [-0.20, 0.20]
+  VROC:
+    period: [8, 30]
+    threshold: [-20, 20]
+
+trade_visualization:
+  enabled: false
+
+terminal_monitor:
+  enabled: false
+
+parallel_evaluation:
+  enabled: false
+
+output:
+  dir: 'genetic_algorithm/output/exploration/wave17/E137_tournament_3pairs'
+  save_stats: true
+  stats_file: 'evolution_stats.json'
+  save_snapshots: true
+  snapshot_interval: 1
+
+storage:
+  database: "genetic_algorithm/data/wave17_E137.db"
+  strategy_dir: "user_data/strategies/wave17_E137"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave17_E137"

@@ -1,0 +1,209 @@
+# ============================================================================
+# WAVE31 — I: Island 30m NSGA-II Pareto (3-Objective)
+# ============================================================================
+# Hypothesis: Combining island model diversity with Pareto front evolution
+#             on 30m timeframe. Objectives: profit ↑, trade_frequency ↑,
+#             drawdown ↓. Forcing the GA to find solutions that are profitable
+#             AND trade enough at 30m (natural scarcity at this TF).
+#             Island model adds regime specialization on top of Pareto.
+#
+# Key design:
+#   - Island model + NSGA-II (compatible — tested in E166)
+#   - 3 objectives: profit, trade_frequency, drawdown
+#   - 30m timeframe — wider SL/ROI
+#   - fitness_sharing: false (NSGA-II requirement — no fitness_sharing even in island)
+# 5 islands × 15 pop = 75 individuals, ring topology, 30m
+# Pair validation: 2 train (BTC+SOL) + 2 val (ETH+BNB)
+# QUEUE position 04
+# ============================================================================
+
+experiment_name: wave31_I_island_30m_nsga2_3obj
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 15
+  generations: 30
+  mutation_rate: 0.20
+  crossover_rate: 0.72
+  elite_size: 3
+  tournament_size: 3
+  selection_method: 'tournament'
+  convergence_patience: 15
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: false          # CRITICAL: must be OFF for NSGA-II
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'nsga2'
+
+# ── NSGA-II 3-Objective: Profit, Trade Frequency, Drawdown ────────────────
+nsga2:
+  objectives:
+    - name: 'profit'
+      type: 'maximize'
+      scale: 100.0
+    - name: 'trade_frequency'
+      type: 'maximize'
+      scale: 1.0
+    - name: 'max_drawdown'
+      type: 'minimize'
+      scale: 1.0
+  pareto_front_size: 15
+  crowding_distance_percentile: 0.1
+  min_trades: 25
+
+generic_island_model:
+  enabled: true
+  num_islands: 5
+  population_per_island: 15
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.40
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 4
+    count: 2
+    merge_rounds: false
+
+# ── Fitness Weights (reporting / scalar fallback) ─────────────────────────
+fitness_weights:
+  profit: 0.30
+  sharpe_ratio: 0.16
+  sortino_ratio: 0.08
+  profit_factor: 0.09
+  drawdown: 0.12
+  win_rate: 0.10
+  trade_frequency: 0.08
+  monthly_stability: 0.04
+  cross_pair: 0.03
+
+fitness_bounds:
+  profit_min: -15.0
+  profit_max: 50.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'gaussian'
+
+fitness_penalties:
+  min_trades: 25
+  min_trades_per_month: 5
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.22
+  min_win_rate: 0.38
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210101-20260331"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "SOL/USDT"
+    - "ETH/USDT"
+    - "BNB/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 300
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "SOL/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "BNB/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+  validate_top_n_only: 8
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 25
+  max_drawdown: 0.22
+  min_win_rate: 0.38
+  timeframes: ["30m"]
+  stoploss_range: [-0.060, -0.015]
+  roi_range: [0.008, 0.040]
+  max_open_trades_range: [1, 4]
+  trailing_stop_positive_range: [0.008, 0.030]
+  trailing_stop_offset_addition_range: [0.004, 0.015]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+    - 'STOCH'
+    - 'DONCHIAN'
+    - 'WILLR'
+    - 'AROON'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+storage:
+  database: "genetic_algorithm/data/wave31_I.db"
+  strategy_dir: "user_data/strategies/wave31_I"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave31_I"
+  checkpoint_interval: 3
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 6000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave31_I.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave31/I_island_30m_nsga2_3obj/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 3
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave31_I"
+
+deflated_sharpe:
+  enabled: true

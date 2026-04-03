@@ -77,29 +77,38 @@ extract_metrics() {
         gen_display="init"
     fi
 
-    # Best fitness
+    # Best fitness — island model: "[island_X] NEW BEST: fitness=0.4182" or legacy "Best: 0.42"
     local best_fitness
-    best_fitness=$(echo "$tail_content" | grep -oP '\[NEW BEST\].*fitness[= ]+\K[0-9.]+' | tail -1)
+    best_fitness=$(echo "$tail_content" | grep -oP '(?<=NEW BEST: fitness=)[0-9.]+' | sort -n | tail -1)
     if [[ -z "$best_fitness" ]]; then
-        best_fitness=$(echo "$tail_content" | grep -oP 'Best: \K[0-9.]+' | tail -1)
+        best_fitness=$(echo "$tail_content" | grep -oP '(?<=Best: )[0-9.]+' | tail -1)
     fi
     best_fitness="${best_fitness:-—}"
 
-    # Current avg fitness
+    # Current avg fitness — island model: "avg=0.XXXX" or legacy "Avg: 0.XX"
     local avg_fitness
-    avg_fitness=$(echo "$tail_content" | grep -oP 'Avg: \K[0-9.]+' | tail -1)
+    avg_fitness=$(echo "$tail_content" | grep -oP '(?<=avg=)[0-9.]+' \
+        | LC_NUMERIC=C awk '{s+=$1;n++} END{if(n>0) printf "%.4f",s/n}')
+    if [[ -z "$avg_fitness" ]]; then
+        avg_fitness=$(echo "$tail_content" | grep -oP 'Avg: \K[0-9.]+' | tail -1)
+    fi
     avg_fitness="${avg_fitness:-—}"
 
-    # Diversity
+    # Diversity — island model: "diversity=0.XXXX" or legacy "Diversity: 0.XX"
     local diversity
-    diversity=$(echo "$tail_content" | grep -oP '[Dd]iversity[: ]+\K[0-9.]+' | tail -1)
+    diversity=$(echo "$tail_content" | grep -oP '(?<=diversity=)[0-9.]+' \
+        | LC_NUMERIC=C awk '{s+=$1;n++} END{if(n>0) printf "%.4f",s/n}')
+    if [[ -z "$diversity" ]]; then
+        diversity=$(echo "$tail_content" | grep -oP '[Dd]iversity[: =]+\K[0-9.]+' | tail -1)
+    fi
     diversity="${diversity:-—}"
 
     # Errors count
     local errors
-    errors=$(grep -ci 'error\|exception\|traceback' "$log_file" 2>/dev/null || echo 0)
+    errors=$(grep -ciP '- (ERROR|CRITICAL) -|^Traceback' "$log_file" 2>/dev/null) || true
+    errors=${errors:-0}
 
-    # Process alive check — look for PID in the PID file
+    # Process alive check — PID file, then process list, then log age
     local pid status_display
     local pid_file
     pid_file=$(ls -t "${LOG_DIR}/${WAVE_NAME}_pids_"*.txt 2>/dev/null | head -1)
@@ -109,7 +118,6 @@ extract_metrics() {
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             status_display="${GREEN}RUNNING${NC}"
         elif [[ -n "$pid" ]]; then
-            # Check if it completed successfully
             local last_line
             last_line=$(tail -3 "$log_file" 2>/dev/null)
             if echo "$last_line" | grep -qi 'complete\|finished\|converged\|saved'; then
@@ -121,13 +129,24 @@ extract_metrics() {
             status_display="${DIM}UNKNOWN${NC}"
         fi
     else
-        # No PID file — check log modification time
-        local mod_age
-        mod_age=$(( $(date +%s) - $(stat -c%Y "$log_file" 2>/dev/null || echo 0) ))
-        if [[ $mod_age -lt 120 ]]; then
-            status_display="${GREEN}ACTIVE${NC}"
+        # No PID file — check if any run_ga.py process references this config
+        local active_proc
+        active_proc=$(ps aux 2>/dev/null | grep '[r]un_ga.py' | grep "${WAVE_NAME}/${exp_name}" || true)
+        if [[ -n "$active_proc" ]]; then
+            status_display="${GREEN}RUNNING${NC}"
         else
-            status_display="${YELLOW}IDLE${NC}"
+            # Fall back to log modification time
+            local mod_age
+            mod_age=$(( $(date +%s) - $(stat -c%Y "$log_file" 2>/dev/null || echo 0) ))
+            if [[ $mod_age -lt 300 ]]; then
+                status_display="${GREEN}ACTIVE${NC}"
+            elif grep -qE 'GA RUN COMPLETE|EVOLUTION COMPLETE|ISLAND MODEL EVOLUTION FINISHED' "$log_file" 2>/dev/null; then
+                status_display="${GREEN}DONE${NC}"
+            elif tail -10 "$log_file" 2>/dev/null | grep -qP 'Traceback|FATAL'; then
+                status_display="${RED}CRASHED${NC}"
+            else
+                status_display="${YELLOW}STALE${NC}"
+            fi
         fi
     fi
 
@@ -156,7 +175,10 @@ print_dashboard() {
         found=true
         local exp_name
         exp_name=$(basename "$config_file" .yaml)
-        local log_file="${LOG_DIR}/${WAVE_NAME}_${exp_name}.log"
+        # Log files are named wave30_A.log (letter-prefix only), not wave30_A_full_name.log
+        local exp_prefix
+        exp_prefix=$(echo "$exp_name" | cut -d_ -f1)
+        local log_file="${LOG_DIR}/${WAVE_NAME}_${exp_prefix}.log"
 
         local metrics
         metrics=$(extract_metrics "$log_file" "$exp_name")

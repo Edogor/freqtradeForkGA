@@ -128,6 +128,8 @@ genetic_algorithm/data/hall_of_fame_*/
 genetic_algorithm/data/incoming_migrants/*.json
 genetic_algorithm/data/outgoing_migrants/
 genetic_algorithm/data/runs/
+genetic_algorithm/data/backup_pre_restart/
+genetic_algorithm/data/*.parquet
 genetic_algorithm/benchmark_results/
 genetic_algorithm/genetic_algorithm/
 benchmark_*.txt
@@ -135,6 +137,10 @@ benchmark_*.json
 evolution_*.txt
 tmp*.yaml
 genetic_algorithm/visualization/regime_comparison_output/
+# Runtime queue backups (auto-created by daemon, not source-controlled)
+genetic_algorithm/config/queue/_backup_*/
+# SQLite backup files
+*.sqlite.old_*
 
 # Web frontend
 genetic_algorithm/web/frontend/node_modules/
