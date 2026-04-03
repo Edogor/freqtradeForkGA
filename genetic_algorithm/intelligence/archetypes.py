@@ -326,6 +326,7 @@ class ArchetypeClassifier:
 
             # Top indicators: ranked by enrichment vs global mean (not absolute prevalence)
             # This ensures archetype immigrants carry truly distinctive indicators.
+            cluster_ind_means = cluster_df[ind_cols].mean()
             global_ind_means = df[ind_cols].mean()
             enrichment_ratio = (cluster_ind_means / (global_ind_means + 0.01)).sort_values(ascending=False)
             s["top_indicators"] = [
