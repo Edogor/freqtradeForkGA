@@ -145,12 +145,17 @@ class SISIntegrator:
             miner = PatternMiner.load(models_dir)
             if miner is not None and miner.indicator_enrichment is not None:
                 enrich_df = miner.indicator_enrichment
-                self._pattern_enrichment = dict(
-                    zip(enrich_df['indicator'], enrich_df['enrichment'])
-                )
+                # Apply log1p compression: raw enrichment ratios (26x, 12x, ...) are
+                # mapped to log-scale weights similar to hardcoded constants (3.0, 2.5, ...)
+                # log1p(26.52)≈3.29, log1p(11.83)≈2.51, log1p(1.46)≈0.88 (ICHIMOKU fix)
+                self._pattern_enrichment = {
+                    str(row['indicator']): float(np.log1p(max(0, float(row['enrichment']))))
+                    for _, row in enrich_df.iterrows()
+                    if row['enrichment'] > 0
+                }
                 self.logger.info(
                     f"[SIS] Loaded PatternMiner enrichment for "
-                    f"{len(self._pattern_enrichment)} indicators"
+                    f"{len(self._pattern_enrichment)} indicators (log-compressed)"
                 )
             if miner is not None and miner.operator_patterns is not None:
                 entry_ops = miner.operator_patterns.get('entry_operators', {})
