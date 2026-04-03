@@ -333,12 +333,14 @@ class SISIntegrator:
             pop_inds = list(ga.population.individuals)
 
         if not pop_inds:
-            # Population not accessible via ga.population — return early
-            # (archetype classification requires a population to examine)
+            # Population not accessible via ga.population — cannot classify
             return immigrants
+
+        archetype_coverage: Dict[str, float] = {}
 
         feat_df, _ = self._build_feature_df(pop_inds)
         if feat_df.empty or len(feat_df) < 2:
+            self.log_generation(generation, pop_inds, archetype_coverage)
             return immigrants
 
         # Classify archetypes present in population
@@ -347,21 +349,32 @@ class SISIntegrator:
             present_archetypes = set(pred_df['archetype'].unique()) - {-1}
         except Exception as e:
             self.logger.debug(f"[SIS] Archetype prediction failed: {e}")
+            self.log_generation(generation, pop_inds, archetype_coverage)
             return immigrants
+
+        # Build archetype coverage dict for logging
+        if 'archetype' in pred_df.columns:
+            arch_counts = pred_df['archetype'].value_counts()
+            total = len(pred_df)
+            archetype_coverage = {
+                str(k): round(float(v) / total, 3)
+                for k, v in arch_counts.items()
+                if k != -1
+            }
 
         missing_archetypes = known_archetypes - present_archetypes
 
         # Also find archetypes present but very rare (< 2% of population)
         underrepresented: set = set()
         if 'archetype' in pred_df.columns:
-            counts = pred_df['archetype'].value_counts()
             threshold = max(1, len(pred_df) * 0.02)
             for arch_id in known_archetypes:
-                if counts.get(arch_id, 0) < threshold:
+                if arch_counts.get(arch_id, 0) < threshold:
                     underrepresented.add(arch_id)
 
         target_archetypes = list(missing_archetypes | underrepresented)
         if not target_archetypes:
+            self.log_generation(generation, pop_inds, archetype_coverage)
             return immigrants
 
         n_immigrants: int = self._sis_config.get('immigrants_per_gen', 2)
@@ -384,7 +397,7 @@ class SISIntegrator:
                 f"(missing={len(missing_archetypes)}, underrep={len(underrepresented)})"
             )
 
-        self.log_generation(generation, pop_inds)
+        self.log_generation(generation, pop_inds, archetype_coverage)
         return immigrants
 
     def _generate_archetype_immigrant(

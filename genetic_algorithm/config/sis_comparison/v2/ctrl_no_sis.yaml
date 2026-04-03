@@ -60,8 +60,8 @@ fitness_weights:
   drawdown: 0.12
   win_rate: 0.07
   trade_frequency: 0.20
-  consistency: 0.04
-  exposure_time: 0.04
+  monthly_stability: 0.04
+  cross_pair: 0.04
 
 trade_frequency_thresholds:
   auto_scale_by_timeframe: true
