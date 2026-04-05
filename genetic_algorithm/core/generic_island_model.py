@@ -399,6 +399,22 @@ class GenericIslandModelEvolution:
     # Build sub-GA for an island
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> None:
+        """
+        Recursively merge *override* into *base* in-place.
+
+        Dicts are merged recursively so that a partial override like
+        ``{'genetic_algorithm': {'selection_method': 'tournament'}}`` only
+        touches the ``selection_method`` key rather than replacing the whole
+        ``genetic_algorithm`` section.  All other types are replaced directly.
+        """
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                GenericIslandModelEvolution._deep_merge(base[key], value)
+            else:
+                base[key] = value
+
     def _build_island_config(self, ic: GenericIslandConfig) -> Dict[str, Any]:
         """
         Build a complete config dict for one island's GA, derived
@@ -447,9 +463,10 @@ class GenericIslandModelEvolution:
         # Tag island name for logging
         cfg['_island_name'] = ic.name
 
-        # Apply extra config overrides
-        for key, value in ic.extra_config.items():
-            cfg[key] = value
+        # Apply extra config overrides using deep merge so that partial
+        # overrides (e.g. only genetic_algorithm.selection_method) don't
+        # wipe sibling keys in the same section.
+        self._deep_merge(cfg, ic.extra_config)
 
         # Disable per-island parallel evaluation — the island model
         # creates ONE shared ParallelEvaluator to avoid spawning
@@ -671,6 +688,9 @@ class GenericIslandModelEvolution:
                          len(self.islands), self.generations,
                          " (PARALLEL)" if self.parallel_islands else "",
                          f" (resuming from gen {start_generation})" if start_generation > 0 else "")
+        max_runtime_minutes = self.config.get('genetic_algorithm', {}).get('max_runtime_minutes', None)
+        if max_runtime_minutes:
+            self.logger.info("  Max runtime: %.0f minutes", max_runtime_minutes)
         self.logger.info("═" * 70)
 
         overall_best_individual = None
@@ -787,6 +807,18 @@ class GenericIslandModelEvolution:
                     'migrations': len(self.migration_history),
                 },
             )
+
+            # Hard runtime cap: stop cleanly after max_runtime_minutes
+            if max_runtime_minutes is not None:
+                total_elapsed_min = (time.time() - phase_start) / 60.0
+                if total_elapsed_min >= max_runtime_minutes:
+                    self.logger.info(
+                        "[RUNTIME] %.1f min elapsed ≥ limit %.0f min"
+                        " — stopping after gen %d/%d",
+                        total_elapsed_min, max_runtime_minutes,
+                        gen + 1, self.generations,
+                    )
+                    break
 
         # Collect results: pool top-5 from every island, deduplicate
         results = self._collect_final_results()

@@ -121,7 +121,10 @@ discover_logs() {
     local -a patterns=()
 
     if [[ -n "$WAVE_FILTER" ]]; then
+        # Direct wave logs: wave32_A.log, wave32_A1.log
         patterns+=("${LOG_DIR}/${WAVE_FILTER}_*.log")
+        # Nested/detailed island model logs: wave31_wave32_A_island_....log
+        patterns+=("${LOG_DIR}/wave*_${WAVE_FILTER}_*.log")
         patterns+=("${LOG_DIR}/queue_*${WAVE_FILTER}*.log")
     else
         # Discover all experiment logs
@@ -137,18 +140,29 @@ discover_logs() {
         done < <(ls -1 $pat 2>/dev/null)
     done
 
-    # Deduplicate: each experiment may produce two logs:
-    #   GA internal log:  wave25_A1.log          (from Python logging.file config)
-    #   Shell redirect:   wave25_A1_console.log  (stdout/stderr capture)
-    #   or:               wave26_C1_island_scalp_1m.log
-    # Group by canonical experiment ID (wave{N}_{LETTER}{DIGITS}) and keep the
-    # GA internal log (shorter name) which has cleaner metrics data.
+    # Deduplicate: each island-model experiment produces two logs:
+    #   Short per-island log:  wave32_A.log    (GeneticAlgorithm file handler, no SUMMARY)
+    #   Detailed island log:   wave31_wave32_A_island_15m_rank_ring.log  (GenericIslandModel,
+    #                          has [SUMMARY] Gen X/Y lines — this is what we want for monitoring)
+    #
+    # For plain GA there is also a short log (wave32_E.log) with GENERATION/[STATS] AND
+    # a redirect main log without them.  Both are from the same process.
+    #
+    # Canonical key: waveN_LETTER[DIGITS]  e.g. wave32_A, wave25_A1
+    # If a log name embeds a nested wave (wave31_wave32_A_...) AND a corresponding short
+    # log exists (wave32_A.log), prefer the LONGER/DETAILED log for island model
+    # (it has SUMMARY lines) but keep the SHORT log for plain GA (it has STATS lines).
     local -A best_log=()
     for f in "${all_logs[@]}"; do
         local bn
         bn=$(basename "$f" .log)
         local canonical=""
-        if [[ "$bn" =~ ^(wave[0-9]+_[A-Z][0-9]+)(_.+)?$ ]]; then
+
+        # Pattern 1: plain short name  wave32_A  or  wave25_A1
+        if [[ "$bn" =~ ^(wave[0-9]+_[A-Z][0-9]*)(_.+)?$ ]]; then
+            canonical="${BASH_REMATCH[1]}"
+        # Pattern 2: nested wave name  wave31_wave32_A_island_...  →  canonical = wave32_A
+        elif [[ "$bn" =~ ^wave[0-9]+_(wave[0-9]+_[A-Z][0-9]*)(_.*)?$ ]]; then
             canonical="${BASH_REMATCH[1]}"
         fi
 
@@ -156,15 +170,23 @@ discover_logs() {
             if [[ -z "${best_log[$canonical]+x}" ]]; then
                 best_log["$canonical"]="$f"
             else
-                # Prefer shorter basename (GA internal log has cleaner data)
-                local existing_bn
+                local existing_bn cur_bn
                 existing_bn=$(basename "${best_log[$canonical]}" .log)
-                if [[ ${#bn} -lt ${#existing_bn} ]]; then
+                cur_bn="$bn"
+                # Prefer the log that matches the "nested wave" pattern (waveM_waveN_X_...)
+                # because it is the GenericIslandModel log with [SUMMARY] lines.
+                # Fallback: prefer longer name (more context).
+                local cur_nested=0 existing_nested=0
+                [[ "$cur_bn" =~ ^wave[0-9]+_wave[0-9]+_ ]] && cur_nested=1
+                [[ "$existing_bn" =~ ^wave[0-9]+_wave[0-9]+_ ]] && existing_nested=1
+                if [[ "$cur_nested" -gt "$existing_nested" ]]; then
+                    best_log["$canonical"]="$f"
+                elif [[ "$cur_nested" -eq "$existing_nested" && ${#cur_bn} -gt ${#existing_bn} ]]; then
                     best_log["$canonical"]="$f"
                 fi
             fi
         else
-            # Non-wave or non-standard naming — no dedup needed
+            # Non-standard naming — keep as-is
             best_log["$bn"]="$f"
         fi
     done
@@ -231,15 +253,48 @@ get_metrics() {
     buf=$(tail -300 "$log" 2>/dev/null)
 
     # ── Generation ──
+    # Island model: use [SUMMARY] Gen X/Y which marks a completed gen.
+    # Also capture the active GENERATION marker (may be 1 ahead of last SUMMARY).
     local gen="init" gen_current=0 gen_total=0
-    local gl
-    gl=$(echo "$buf" | grep -oP 'GENERATION \d+/\d+' | tail -1 || true)
+    local gl summary_gen
+    # 1. Try [SUMMARY] Gen X/Y (island model completed-gen marker)
+    summary_gen=$(echo "$buf" | grep -oP '\[SUMMARY\] Gen \K\d+/\d+' | tail -1 || true)
+    # 2. Try plain GENERATION X/Y marker
+    gl=$(echo "$buf" | grep -oP 'GENERATION \K\d+/\d+' | tail -1 || true)
     if [[ -n "$gl" ]]; then
-        gen="${gl#GENERATION }"
-        gen_current=$(echo "$gen" | cut -d/ -f1)
-        gen_total=$(echo "$gen" | cut -d/ -f2)
+        gen="${gl}"
+        gen_current=$(echo "$gl" | cut -d/ -f1)
+        gen_total=$(echo "$gl" | cut -d/ -f2)
+    elif [[ -n "$summary_gen" ]]; then
+        gen="${summary_gen}"
+        gen_current=$(echo "$summary_gen" | cut -d/ -f1)
+        gen_total=$(echo "$summary_gen" | cut -d/ -f2)
     fi
-
+    # For plain GA experiments, the per-GA file handler log (short log) has GENERATION
+    # and [STATS], while the redirect log does not.  If we haven't found gen info yet,
+    # try the corresponding short log (e.g. wave32_E.log given wave31_wave32_E_plain...log).
+    local _alt_log=""
+    if [[ "$gen" == "init" ]]; then
+        local _bn _wave_target _letter
+        _bn=$(basename "$log" .log)
+        _wave_target=$(echo "$_bn" | grep -oP 'wave\d+(?=_[A-Z][0-9]*(?:[_.]|$))' | tail -1 || true)
+        _letter=$(echo "$_bn" | grep -oP '(?<=_)[A-Z][0-9]*(?=[_.]|$)' | tail -1 || true)
+        if [[ -n "$_wave_target" && -n "$_letter" ]]; then
+            _alt_log="${LOG_DIR}/${_wave_target}_${_letter}.log"
+            if [[ -f "$_alt_log" && "$_alt_log" != "$log" ]]; then
+                local _alt_buf
+                _alt_buf=$(tail -300 "$_alt_log" 2>/dev/null)
+                gl=$(echo "$_alt_buf" | grep -oP 'GENERATION \K\d+/\d+' | tail -1 || true)
+                if [[ -n "$gl" ]]; then
+                    gen="${gl}"
+                    gen_current=$(echo "$gl" | cut -d/ -f1)
+                    gen_total=$(echo "$gl" | cut -d/ -f2)
+                    # Re-read buf from the alt log for subsequent metric extraction
+                    buf="$_alt_buf"
+                fi
+            fi
+        fi
+    fi
     # ── Eval sub-progress ──
     local evp
     evp=$(echo "$buf" | grep -oP '\[EVAL\] Progress: \K\d+/\d+' | tail -1 || true)
@@ -247,24 +302,28 @@ get_metrics() {
     # ── Best fitness ──
     local best="—"
     local v
+    # 1. Plain GA: [STATS] Best: X.XXXX
     v=$(echo "$buf" | grep -oP '\[STATS\] Best: \K[0-9.]+' | tail -1 || true)
     if [[ -n "$v" ]]; then
         best="$v"
     else
-        v=$(echo "$buf" | grep -oP '\[SUMMARY\].*master=\K[0-9.]+' | tail -1 || true)
-        if [[ -n "$v" ]]; then
-            best="$v"
-        else
+        # 2. Island model: [SUMMARY] Gen X/Y (...): island_0=V, island_1=V, ... → max value
+        local summary_line
+        summary_line=$(echo "$buf" | grep '\[SUMMARY\]' | tail -1 || true)
+        if [[ -n "$summary_line" ]]; then
+            v=$(echo "$summary_line" | grep -oP 'island_[^=]+=\K[0-9.]+' | sort -n | tail -1 || true)
+            [[ -n "$v" ]] && best="$v"
+        fi
+        if [[ "$best" == "—" ]]; then
+            # 3. Fallback: [NEW BEST] line
             v=$(echo "$buf" | grep -oP '\[NEW BEST\].*fitness.?\K[0-9.]+' | tail -1 || true)
-            if [[ -n "$v" ]]; then
-                best="$v"
-            else
-                # Island model format: [island_X_name] best=0.XXXX avg=... diversity=...
-                # Try buf first (running); fall back to full log for completed runs
-                v=$(echo "$buf" | grep -oP '(?<=\] )best=\K[0-9.]+' | sort -n | tail -1 || true)
-                [[ -z "$v" ]] && v=$(grep -oP '(?<=\] )best=\K[0-9.]+' "$log" | sort -n | tail -1 || true)
-                [[ -n "$v" ]] && best="$v"
-            fi
+            [[ -n "$v" ]] && best="$v"
+        fi
+        if [[ "$best" == "—" ]]; then
+            # 4. Island per-island 'best=X' lines: use max from buf first, fall back to full log
+            v=$(echo "$buf" | grep -oP '(?<=\] )best=\K[0-9.]+' | sort -n | tail -1 || true)
+            [[ -z "$v" ]] && v=$(grep -oP '(?<=\] )best=\K[0-9.]+' "$log" 2>/dev/null | sort -n | tail -1 || true)
+            [[ -n "$v" ]] && best="$v"
         fi
     fi
 

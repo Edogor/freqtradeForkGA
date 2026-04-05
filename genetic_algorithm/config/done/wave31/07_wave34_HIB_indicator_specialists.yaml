@@ -1,0 +1,363 @@
+# ============================================================================
+# WAVE34 — HI-B: Indicator Specialists (Heterogeneous Islands)
+# ============================================================================
+# Hypothesis: Restrict each island group to a different indicator family.
+#             Momentum indicators (RSI, MACD, ROC) find entries based on
+#             speed and rate-of-change. Trend indicators (EMA, SUPERTREND)
+#             follow directional bias. Volume/structure indicators (CMF, VROC,
+#             DONCHIAN) use market participation and range breakouts.
+#
+#             By specialising islands, each group evolves the BEST possible
+#             strategy within its indicator universe. Ring migration then
+#             allows the strongest individuals from each family to cross-breed
+#             — creating hybrid strategies that combine multiple signal types
+#             in ways a single-pool search might never find.
+#
+#             Mutation rates reflect each family's signal characteristics:
+#             - Momentum (0.22): noisy signals → more exploration needed
+#             - Trend (0.18): directional bias → standard exploration
+#             - Volume/structure (0.14): structural levels → exploit precisely
+#
+# 12 islands × 8 pop = 96 total · ring · 15m · 7 gens ≈ 3.8h
+# ============================================================================
+
+experiment_name: wave34_HIB_indicator_specialists
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 8
+  generations: 7
+  mutation_rate: 0.18
+  crossover_rate: 0.70
+  elite_size: 2
+  tournament_size: 3
+  selection_method: 'rank'
+  convergence_patience: 6
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.25
+  diversity_threshold: 0.12
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'single_objective'
+
+surrogate:
+  enabled: true
+  min_training_samples: 60
+  filter_percentile: 70
+  retrain_interval: 3
+  model: "gradient_boosting"
+  mutate_skipped: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 12
+  population_per_island: 8
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: false    # explicit indicator_pool per island below
+    indicator_overlap: 0.40
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+    merge_rounds: false
+  islands:
+    # ── Group 1: Momentum specialists (islands 0–3, mutation=0.22) ───────
+    # RSI, MACD, ROC, MFI, STOCH, WILLR + EMA anchor
+    - name: island_0_momentum
+      population_size: 8
+      seed: 200
+      indicator_pool: ['RSI', 'MACD', 'ROC', 'MFI', 'STOCH', 'WILLR', 'EMA', 'BBANDS']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.22   # higher: momentum signals are noisy
+          selection_method: 'rank'
+
+    - name: island_1_momentum
+      population_size: 8
+      seed: 201
+      indicator_pool: ['RSI', 'MACD', 'ROC', 'MFI', 'STOCH', 'WILLR', 'EMA', 'BBANDS']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.22
+          selection_method: 'rank'
+
+    - name: island_2_momentum
+      population_size: 8
+      seed: 202
+      indicator_pool: ['RSI', 'MACD', 'ROC', 'MFI', 'STOCH', 'WILLR', 'EMA', 'BBANDS']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.22
+          selection_method: 'tournament'
+          tournament_size: 3
+
+    - name: island_3_momentum
+      population_size: 8
+      seed: 203
+      indicator_pool: ['RSI', 'MACD', 'ROC', 'MFI', 'STOCH', 'WILLR', 'EMA', 'BBANDS']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.22
+          selection_method: 'tournament'
+          tournament_size: 3
+
+    # ── Group 2: Trend/MA specialists (islands 4–7, mutation=0.18) ───────
+    # EMA, SMA, SUPERTREND, PSAR, TEMA, KAMA + RSI confirmation
+    - name: island_4_trend
+      population_size: 8
+      seed: 204
+      indicator_pool: ['EMA', 'SMA', 'SUPERTREND', 'PSAR', 'TEMA', 'KAMA', 'RSI', 'MACD']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.18
+          selection_method: 'rank'
+
+    - name: island_5_trend
+      population_size: 8
+      seed: 205
+      indicator_pool: ['EMA', 'SMA', 'SUPERTREND', 'PSAR', 'TEMA', 'KAMA', 'RSI', 'MACD']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.18
+          selection_method: 'rank'
+
+    - name: island_6_trend
+      population_size: 8
+      seed: 206
+      indicator_pool: ['EMA', 'SMA', 'SUPERTREND', 'PSAR', 'TEMA', 'KAMA', 'RSI', 'MACD']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.18
+          selection_method: 'tournament'
+          tournament_size: 3
+
+    - name: island_7_trend
+      population_size: 8
+      seed: 207
+      indicator_pool: ['EMA', 'SMA', 'SUPERTREND', 'PSAR', 'TEMA', 'KAMA', 'RSI', 'MACD']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.18
+          selection_method: 'tournament'
+          tournament_size: 3
+
+    # ── Group 3: Volume/structure specialists (islands 8–11, mutation=0.14) ─
+    # CMF, VROC, VWAP, AROON, DONCHIAN, BBANDS + RSI confirmation
+    - name: island_8_volume
+      population_size: 8
+      seed: 208
+      indicator_pool: ['CMF', 'VROC', 'VWAP', 'AROON', 'DONCHIAN', 'BBANDS', 'RSI', 'STOCH']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.14   # lower: structural signals are more stable
+          elite_size: 3         # keep more elites to refine good solutions
+          selection_method: 'rank'
+        fitness_weights:
+          profit: 0.36
+          sharpe_ratio: 0.09
+          sortino_ratio: 0.04
+          profit_factor: 0.12
+          drawdown: 0.04
+          win_rate: 0.18
+          trade_frequency: 0.17  # slightly higher: volume signals = activity
+
+    - name: island_9_volume
+      population_size: 8
+      seed: 209
+      indicator_pool: ['CMF', 'VROC', 'VWAP', 'AROON', 'DONCHIAN', 'BBANDS', 'RSI', 'STOCH']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.14
+          elite_size: 3
+          selection_method: 'rank'
+        fitness_weights:
+          profit: 0.36
+          sharpe_ratio: 0.09
+          sortino_ratio: 0.04
+          profit_factor: 0.12
+          drawdown: 0.04
+          win_rate: 0.18
+          trade_frequency: 0.17
+
+    - name: island_10_volume
+      population_size: 8
+      seed: 210
+      indicator_pool: ['CMF', 'VROC', 'VWAP', 'AROON', 'DONCHIAN', 'BBANDS', 'RSI', 'STOCH']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.14
+          elite_size: 3
+          selection_method: 'tournament'
+          tournament_size: 3
+        fitness_weights:
+          profit: 0.36
+          sharpe_ratio: 0.09
+          sortino_ratio: 0.04
+          profit_factor: 0.12
+          drawdown: 0.04
+          win_rate: 0.18
+          trade_frequency: 0.17
+
+    - name: island_11_volume
+      population_size: 8
+      seed: 211
+      indicator_pool: ['CMF', 'VROC', 'VWAP', 'AROON', 'DONCHIAN', 'BBANDS', 'RSI', 'STOCH']
+      extra_config:
+        genetic_algorithm:
+          mutation_rate: 0.14
+          elite_size: 3
+          selection_method: 'tournament'
+          tournament_size: 3
+        fitness_weights:
+          profit: 0.36
+          sharpe_ratio: 0.09
+          sortino_ratio: 0.04
+          profit_factor: 0.12
+          drawdown: 0.04
+          win_rate: 0.18
+          trade_frequency: 0.17
+
+# ── Base config ─────────────────────────────────────────────────────────────
+fitness_weights:
+  profit: 0.38
+  sharpe_ratio: 0.09
+  sortino_ratio: 0.04
+  profit_factor: 0.12
+  drawdown: 0.04
+  win_rate: 0.18
+  trade_frequency: 0.15
+
+fitness_bounds:
+  profit_min: -5.0
+  profit_max: 10.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'gaussian'
+
+fitness_penalties:
+  min_trades: 80
+  min_trades_per_month: 12
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.20
+  min_win_rate: 0.38
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210101-20260331"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+  max_open_trades: 4
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 300
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+  validation_pairs:
+    - "SOL/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+  weight_train: 0.50
+  weight_val: 0.50
+  min_val_fitness: 0.0
+  validate_top_n_only: 8
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 80
+  max_drawdown: 0.20
+  min_win_rate: 0.38
+  timeframes: ["15m"]
+  stoploss_range: [-0.040, -0.010]
+  roi_range: [0.005, 0.025]
+  max_open_trades_range: [1, 4]
+  trailing_stop_positive_range: [0.005, 0.020]
+  trailing_stop_offset_addition_range: [0.003, 0.012]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+    - 'STOCH'
+    - 'DONCHIAN'
+    - 'WILLR'
+    - 'AROON'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+storage:
+  database: "genetic_algorithm/data/wave34_HIB.db"
+  strategy_dir: "user_data/strategies/wave34_HIB"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave34_HIB"
+  checkpoint_interval: 2
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 8000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave34_HIB.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave34/HIB_indicator_specialists/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 3
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave34_HIB"
+
+deflated_sharpe:
+  enabled: true

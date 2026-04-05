@@ -335,6 +335,17 @@ count_running_ga() {
     echo "$count"
 }
 
+check_memory_ok() {
+    # Returns 0 (ok) if available memory >= 1500 MB, 1 (defer) otherwise.
+    local free_mb
+    free_mb=$(free -m | awk '/^Mem:/{print $7}')
+    if [[ "${free_mb:-0}" -lt 1500 ]]; then
+        log "WARNING" "Low memory (${free_mb}MB available) — deferring launch until ≥1500MB free"
+        return 1
+    fi
+    return 0
+}
+
 get_next_queued() {
     find "$QUEUE_DIR" -maxdepth 1 -name '*.yaml' -printf '%f\n' 2>/dev/null | sort | head -1
 }
@@ -554,8 +565,12 @@ while true; do
         for ((i=0; i<to_launch; i++)); do
             next_config=$(get_next_queued)
             if [[ -n "$next_config" ]]; then
-                launch_experiment "$next_config" || true
-                sleep 2  # Brief pause between launches
+                if check_memory_ok; then
+                    launch_experiment "$next_config" || true
+                    sleep 2  # Brief pause between launches
+                else
+                    break  # Out of memory — skip remaining slots this cycle, retry next poll
+                fi
             fi
         done
     fi

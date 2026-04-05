@@ -98,8 +98,8 @@ class FitnessEvaluator:
         
         # Fitness bounds for clamping extreme values
         fitness_bounds = config.get('fitness_bounds', {})
-        self.profit_min = fitness_bounds.get('profit_min', -50)
-        self.profit_max = fitness_bounds.get('profit_max', 200)
+        self.profit_min = fitness_bounds.get('profit_min', -10)
+        self.profit_max = fitness_bounds.get('profit_max', 10)
         self.sharpe_min = fitness_bounds.get('sharpe_min', -5)
         self.sharpe_max = fitness_bounds.get('sharpe_max', 10)
         self.sortino_min = fitness_bounds.get('sortino_min', -5)
@@ -1319,8 +1319,10 @@ class FitnessEvaluator:
         pf_bonus = _sigmoid_bonus(profit_factor, 1.5, 0.05, steepness=3.0)
         total_bonus += sortino_bonus * pf_bonus / 0.05  # Scales 0-0.10 when both good
         
-        # Profit bonus: smooth ramp centred around 5% profit (replaces 0% and 10% cliffs)
-        profit_bonus = _sigmoid_bonus(profit, 5.0, 0.15, steepness=0.3)
+        # Profit bonus: smooth ramp centred at break-even (0% profit).
+        # Threshold moved from 5.0→0.0 and steepness raised 0.3→0.5 so the
+        # gradient is strongest exactly where strategies cross into positive territory.
+        profit_bonus = _sigmoid_bonus(profit, 0.0, 0.15, steepness=0.5)
         total_bonus += profit_bonus
         
         # Risk-adjusted excellence: smooth product of Sharpe and low-drawdown sigmoids
@@ -1331,6 +1333,14 @@ class FitnessEvaluator:
         # Soft cap via tanh saturation instead of hard min()
         excess = total_bonus - 1.0
         total_bonus = 1.0 + 0.3 * math.tanh(excess / 0.3)  # Saturates near 1.3x
+
+        # Hard floor: negative-profit strategies cannot use bonus amplification.
+        # This defunds the ~30% of the population that survives on Sharpe/drawdown
+        # metrics alone while producing negative returns — they score at base fitness
+        # only, leaving more selection pressure available for profitable strategies.
+        if profit < 0:
+            total_bonus = min(total_bonus, 1.0)
+
         fitness *= total_bonus
         
         # ==================================================================================

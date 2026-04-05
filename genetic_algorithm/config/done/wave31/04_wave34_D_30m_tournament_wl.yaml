@@ -1,0 +1,211 @@
+# ============================================================================
+# WAVE34 — D: 30m Tournament Ring, Strict W/L + Wide Validation
+# ============================================================================
+# Hypothesis: Tournament selection on 30m hunts for exceptional W/L outliers.
+#             Widest validation set (4 pairs incl. PEPE meme coin) is the
+#             strictest generalization test: a strategy must perform on diverse
+#             volatility profiles to score well. Val-priority weighting (0.55)
+#             further discourages overfit. High min_win_rate penalty (0.40)
+#             hard-filters low-quality W/L strategies from the population.
+#
+# Lessons applied:
+#   - wave32_D (3/3 OVERFIT): used only 3 val pairs → insufficient pressure
+#   - wave33_B (2/5 OVERFIT): profit weight too high (0.50) + low val diversity
+#   - Fix: 4 val pairs + profit=0.34 + val-priority weight (0.55)
+#   - wave32_H (5/5 SAFE, tournament): tournament on 30m should find quality
+#
+# 30m adjustments same as experiment C (wider ROI/SL, lower min_trades).
+# Timing: 12 islands × 8 pop = 96 total, 30m → 10 gens ≈ 3.9h
+#
+# Selection: tournament(3) · Topology: ring · TF: 30m
+# Train: BTC/USDT + ETH/USDT  |  Val: SOL/USDT + BNB/USDT + XRP/USDT + PEPE/USDT
+# ============================================================================
+
+experiment_name: wave34_D_30m_tournament_wl
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 8
+  generations: 10
+  mutation_rate: 0.18
+  crossover_rate: 0.70
+  elite_size: 2
+  tournament_size: 3
+  selection_method: 'tournament'
+  convergence_patience: 8
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.25
+  diversity_threshold: 0.12
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'single_objective'
+
+surrogate:
+  enabled: true
+  min_training_samples: 60
+  filter_percentile: 70
+  retrain_interval: 3
+  model: "gradient_boosting"
+  mutate_skipped: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 12
+  population_per_island: 8
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.40
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+    merge_rounds: false
+
+# ── Fitness Weights — Maximum W/L + 30m trade frequency ───────────────────
+fitness_weights:
+  profit: 0.34
+  sharpe_ratio: 0.08
+  sortino_ratio: 0.04
+  profit_factor: 0.14       # ↑↑ win/loss magnitude ratio
+  drawdown: 0.03
+  win_rate: 0.22            # ↑↑ maximum win rate
+  trade_frequency: 0.13     # slightly lower (30m is naturally less frequent)
+  monthly_stability: 0.01
+  cross_pair: 0.01
+
+fitness_bounds:
+  profit_min: -5.0
+  profit_max: 10.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'gaussian'
+
+fitness_penalties:
+  min_trades: 60            # ↓ appropriate for 30m timeframe
+  min_trades_per_month: 8   # ↓ lower floor for 30m
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.20
+  min_win_rate: 0.40        # ↑↑ hard W/L filter
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210101-20260331"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "PEPE/USDT"
+  max_open_trades: 4
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 300
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+  validation_pairs:
+    - "SOL/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "PEPE/USDT"            # meme coin: diverse volatility profile
+  weight_train: 0.45
+  weight_val: 0.55           # val-priority: stricter generalization test
+  min_val_fitness: 0.0
+  validate_top_n_only: 8
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 60
+  max_drawdown: 0.20
+  min_win_rate: 0.40
+  timeframes: ["30m"]
+  stoploss_range: [-0.060, -0.015]    # wider for 30m
+  roi_range: [0.008, 0.035]           # wider ROI at 30m
+  max_open_trades_range: [1, 4]
+  trailing_stop_positive_range: [0.006, 0.025]
+  trailing_stop_offset_addition_range: [0.004, 0.015]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+    - 'STOCH'
+    - 'DONCHIAN'
+    - 'WILLR'
+    - 'AROON'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+storage:
+  database: "genetic_algorithm/data/wave34_D.db"
+  strategy_dir: "user_data/strategies/wave34_D"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave34_D"
+  checkpoint_interval: 2
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 8000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave34_D.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave34/D_30m_tournament_wl/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 3
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave34_D"
+
+deflated_sharpe:
+  enabled: true

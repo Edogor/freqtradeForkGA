@@ -1832,8 +1832,11 @@ class GeneticAlgorithm:
         if self.best_individual.raw_fitness is None:
             return True
         
-        # Update if candidate is better (based on raw_fitness)
-        return candidate.raw_fitness > self.best_individual.raw_fitness
+        # Compare against best_fitness_ever (an immutable scalar snapshot) rather than
+        # self.best_individual.raw_fitness, which holdout monitoring can reduce in-place
+        # after we store the reference. That mutation caused non-monotonic [NEW BEST] logs
+        # (e.g. Gen15 reporting 0.1871 after Gen8's 0.2738 had already been accepted).
+        return candidate.raw_fitness > self.best_fitness_ever
     
     def _visualize_strategy_trades(self, individual: Individual, generation: int, individual_idx: int):
         """
@@ -2795,13 +2798,17 @@ class GeneticAlgorithm:
                     # properly via the exponential decay branch.
                     self.no_improvement_count = 0
                     self._new_best_this_gen = True
-                self.logger.info(f"[NEW BEST] {best.id} with fitness {best.fitness:.4f}")
-                self.monitor.on_new_best(best)
-                # Record for dashboard
-                try:
-                    self._tracker.record_new_best(gen, best.fitness, best.metrics)
-                except Exception:
-                    pass
+                    # Log [NEW BEST] only here — inside the genuine improvement block.
+                    # Previously this was outside the if, causing non-monotonic log entries
+                    # when holdout monitoring reduced raw_fitness in-place on the stored
+                    # best_individual reference, fooling the next-gen comparison.
+                    self.logger.info(f"[NEW BEST] {best.id} with fitness {best.fitness:.4f}")
+                    self.monitor.on_new_best(best)
+                    # Record for dashboard
+                    try:
+                        self._tracker.record_new_best(gen, best.fitness, best.metrics)
+                    except Exception:
+                        pass
                 
                 # Generate trade visualization on improvement
                 if self.trade_visualizer and self.trade_vis_mode == 'improvement':
