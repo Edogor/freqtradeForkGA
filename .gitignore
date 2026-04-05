@@ -126,10 +126,12 @@ genetic_algorithm/data/checkpoints_*/
 genetic_algorithm/data/hall_of_fame/
 genetic_algorithm/data/hall_of_fame_*/
 genetic_algorithm/data/incoming_migrants/*.json
+genetic_algorithm/data/incoming_migrants/.pulled_log/
 genetic_algorithm/data/outgoing_migrants/
 genetic_algorithm/data/runs/
 genetic_algorithm/data/backup_pre_restart/
 genetic_algorithm/data/*.parquet
+genetic_algorithm/data/config.yaml
 genetic_algorithm/benchmark_results/
 genetic_algorithm/genetic_algorithm/
 benchmark_*.txt
@@ -141,6 +143,13 @@ genetic_algorithm/visualization/regime_comparison_output/
 genetic_algorithm/config/queue/_backup_*/
 # SQLite backup files
 *.sqlite.old_*
+# Local-only laptop run data / scripts
+genetic_algorithm/config/done/wave26_laptop/
+genetic_algorithm/config/done/wave27_laptop/
+pip_error.txt
+launch_wave*.ps1
+restart_wave*.ps1
+show_wave*.py
 
 # Web frontend
 genetic_algorithm/web/frontend/node_modules/
