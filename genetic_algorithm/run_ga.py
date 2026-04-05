@@ -186,11 +186,14 @@ def print_configuration(config: dict):
     
     fitness_weights = config['fitness_weights']
     print("Fitness Weights:")
-    print(f"  Profit:             {fitness_weights['profit']:.2%}")
-    print(f"  Sharpe Ratio:       {fitness_weights['sharpe_ratio']:.2%}")
-    print(f"  Drawdown:           {fitness_weights['drawdown']:.2%}")
-    print(f"  Win Rate:           {fitness_weights['win_rate']:.2%}")
-    print(f"  Trade Frequency:    {fitness_weights['trade_frequency']:.2%}")
+    for fw_key, fw_label in [
+        ('profit', 'Profit'), ('profit_factor', 'Profit Factor'),
+        ('sharpe_ratio', 'Sharpe Ratio'), ('drawdown', 'Drawdown'),
+        ('win_rate', 'Win Rate'), ('trade_frequency', 'Trade Frequency'),
+        ('monthly_stability', 'Monthly Stability'), ('cross_pair', 'Cross Pair'),
+    ]:
+        if fw_key in fitness_weights:
+            print(f"  {fw_label + ':':20s}{fitness_weights[fw_key]:.2%}")
     print()
     print("=" * 80)
     print()

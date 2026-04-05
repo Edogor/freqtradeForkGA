@@ -1477,6 +1477,19 @@ class FitnessEvaluator:
                                f"< {self.min_trades_per_month} minimum → fitness=0")
                     return 0.0  # Early return, skip remaining penalties
         
+        # Profit factor penalty: penalise strategies below minimum PF (< 1.0 = losing money).
+        # Uses a steep sigmoid so PF ≥ min_pf is unaffected, PF → 0 is heavily penalised.
+        min_pf = penalties.get('min_profit_factor', 0.0)
+        if min_pf > 0:
+            pf = metrics.get('profit_factor', 0)
+            if pf <= 0:
+                fitness *= 0.01  # No winning trades at all → near-zero fitness
+            elif pf < min_pf:
+                # Linear ramp: 0 at PF=0, 1.0 at PF=min_pf
+                pf_penalty = max(0.01, pf / min_pf)
+                fitness *= pf_penalty
+                logger.debug(f"[FITNESS] profit_factor penalty: PF={pf:.3f} < {min_pf} → x{pf_penalty:.3f}")
+
         # Smooth penalty for excessive drawdown (sigmoid onset around threshold).
         # Gives a gentle signal even slightly below threshold instead of a hard gate.
         max_dd_threshold = penalties.get('max_drawdown', 0.30)

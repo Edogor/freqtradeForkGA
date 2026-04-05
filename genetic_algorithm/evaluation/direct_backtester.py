@@ -758,7 +758,11 @@ class DirectBacktester:
                         strategy_name=strategy_name,
                         error_message=f"Strategy class '{strategy_name}' not found in module"
                     )
-        except (ImportError, ModuleNotFoundError, NameError, AttributeError) as e:
+        except (ImportError, ModuleNotFoundError) as e:
+            # Missing optional dependencies (psutil, rapidjson, etc.) — non-fatal.
+            # The actual backtesting call below will succeed if freqtrade itself can load.
+            logger.debug(f"Strategy '{strategy_name}' pre-import skipped (missing dep): {e}")
+        except (NameError, AttributeError) as e:
             logger.error(f"Strategy '{strategy_name}' has runtime import error: {e}")
             return BacktestResult(
                 success=False,

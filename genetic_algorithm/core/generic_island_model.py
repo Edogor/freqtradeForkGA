@@ -520,7 +520,8 @@ class GenericIslandModelEvolution:
         """
         original_sigint = signal.getsignal(signal.SIGINT)
         original_sigterm = signal.getsignal(signal.SIGTERM)
-        original_sigusr1 = signal.getsignal(signal.SIGUSR1)
+        _sigusr1_available = hasattr(signal, 'SIGUSR1')
+        original_sigusr1 = signal.getsignal(signal.SIGUSR1) if _sigusr1_available else None
 
         def _shutdown(signum, frame):
             if self._shutdown_requested:
@@ -535,14 +536,16 @@ class GenericIslandModelEvolution:
 
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
-        signal.signal(signal.SIGUSR1, _checkpoint_now)
+        if _sigusr1_available:
+            signal.signal(signal.SIGUSR1, _checkpoint_now)
 
         try:
             return self._evolve_inner()
         finally:
             signal.signal(signal.SIGINT, original_sigint)
             signal.signal(signal.SIGTERM, original_sigterm)
-            signal.signal(signal.SIGUSR1, original_sigusr1)
+            if _sigusr1_available:
+                signal.signal(signal.SIGUSR1, original_sigusr1)
 
     def _evolve_inner(self) -> Dict[str, List[Individual]]:
         start_time = time.time()

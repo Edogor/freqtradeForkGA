@@ -2232,6 +2232,7 @@ class GeneticAlgorithm:
                     child1 = create_child(parent1.strategy_gene, child1_id)
                     child2 = create_child(parent2.strategy_gene, child2_id)
                 except (ValueError, KeyError, AttributeError, TypeError) as e2:
+                    # Parent genes are corrupted — skip this pair entirely
                     self.logger.debug(f"[CROSSOVER] Fallback clone also failed: {e2}")
                     continue
             

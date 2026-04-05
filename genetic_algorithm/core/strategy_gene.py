@@ -434,6 +434,10 @@ class StrategyGene:
         for attr in ('entry_conditions', 'exit_conditions'):
             original = getattr(self, attr)
             kept = [c for c in original if c.indicator in present_refs]
+            # Never prune to zero — always keep at least one condition to prevent
+            # invalid gene state that bypasses __post_init__ validation
+            if not kept and original:
+                kept = original[:1]
             pruned += len(original) - len(kept)
             setattr(self, attr, kept)
         
