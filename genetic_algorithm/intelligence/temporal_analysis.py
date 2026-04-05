@@ -18,6 +18,7 @@ Usage:
     combos = analyzer.find_complementary_pairs(top_n=10)
 """
 
+import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -178,8 +179,19 @@ class TemporalAnalyzer:
     def _find_monthly_complementary(
         self, pool: pd.DataFrame, top_n: int
     ) -> List[Dict[str, Any]]:
-        """Find complementary pairs based on monthly profit pattern anti-correlation."""
-        # Use available monthly stats as proxy features
+        """Find complementary pairs based on monthly profit anti-correlation.
+
+        Uses raw monthly profit vectors (``monthly_profits_raw``) when available
+        for true month-by-month Pearson correlation.  Falls back to summary-stat
+        proxy when raw data is missing.
+        """
+        # Try raw-vector approach first
+        if 'monthly_profits_raw' in pool.columns:
+            raw_result = self._find_monthly_complementary_raw(pool, top_n)
+            if raw_result:
+                return raw_result
+
+        # Fallback: summary-stat proxy
         features = ["monthly_profit_mean", "monthly_profit_std",
                      "monthly_profit_min", "monthly_profit_max",
                      "n_positive_months", "n_negative_months"]
@@ -201,14 +213,10 @@ class TemporalAnalyzer:
         indices = pool_clean.index.tolist()
         for i in range(len(indices)):
             for j in range(i + 1, len(indices)):
-                # Anti-correlation score: strategies whose "bad" features anti-correlate
-                # High std in A but low in B → complementary
                 a = X_norm[i]
                 b = X_norm[j]
-                # Negative dot product = anti-correlated profiles
                 score = -np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
 
-                # Also consider: combined fitness should be good
                 fa = pool_clean.iloc[i].get("fitness", 0) or 0
                 fb = pool_clean.iloc[j].get("fitness", 0) or 0
                 combined_quality = (fa + fb) / 2
@@ -220,12 +228,190 @@ class TemporalAnalyzer:
                     "fitness_b": fb,
                     "complementary_score": float(score),
                     "combined_quality": float(combined_quality),
-                    # Composite: balance complementarity and quality
                     "composite_score": float(0.6 * score + 0.4 * combined_quality),
                 })
 
         combos.sort(key=lambda x: -x["composite_score"])
         return combos[:top_n]
+
+    def _find_monthly_complementary_raw(
+        self, pool: pd.DataFrame, top_n: int
+    ) -> List[Dict[str, Any]]:
+        """True month-by-month anti-correlation using raw profit vectors."""
+        # Parse raw JSON vectors
+        parsed: List[tuple] = []  # (idx, fingerprint, fitness, profit_vec)
+        for idx, row in pool.iterrows():
+            raw = row.get('monthly_profits_raw')
+            if not raw or pd.isna(raw):
+                continue
+            try:
+                vec = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(vec, list) and len(vec) >= 3:
+                    parsed.append((
+                        idx,
+                        row.get('fingerprint', ''),
+                        row.get('fitness', 0) or 0,
+                        np.array(vec, dtype=float),
+                    ))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+
+        if len(parsed) < 4:
+            return []
+
+        # Trim to top_n*2 by fitness
+        parsed.sort(key=lambda x: -x[2])
+        parsed = parsed[:top_n * 2]
+
+        combos = []
+        for i in range(len(parsed)):
+            for j in range(i + 1, len(parsed)):
+                _, fp_a, fa, va = parsed[i]
+                _, fp_b, fb, vb = parsed[j]
+
+                # Align vectors to same length (truncate longer)
+                min_len = min(len(va), len(vb))
+                if min_len < 3:
+                    continue
+                va_t, vb_t = va[:min_len], vb[:min_len]
+
+                # Pearson correlation
+                corr = np.corrcoef(va_t, vb_t)[0, 1]
+                if np.isnan(corr):
+                    corr = 0.0
+
+                # Ensemble Sharpe estimate (equal-weight portfolio)
+                ensemble = (va_t + vb_t) / 2
+                ens_mean = float(np.mean(ensemble))
+                ens_std = float(np.std(ensemble))
+                ensemble_sharpe = ens_mean / (ens_std + 1e-8)
+
+                # Individual Sharpes for comparison
+                sharpe_a = float(np.mean(va_t)) / (float(np.std(va_t)) + 1e-8)
+                sharpe_b = float(np.mean(vb_t)) / (float(np.std(vb_t)) + 1e-8)
+                sharpe_improvement = ensemble_sharpe - max(sharpe_a, sharpe_b)
+
+                combined_quality = (fa + fb) / 2
+                # Score: anti-correlation + quality + Sharpe improvement
+                anti_corr = -corr  # higher is more anti-correlated
+                composite = (0.35 * anti_corr
+                             + 0.30 * combined_quality
+                             + 0.35 * max(0, sharpe_improvement))
+
+                combos.append({
+                    "strategy_a": fp_a,
+                    "strategy_b": fp_b,
+                    "fitness_a": fa,
+                    "fitness_b": fb,
+                    "monthly_correlation": round(float(corr), 3),
+                    "ensemble_sharpe": round(ensemble_sharpe, 3),
+                    "sharpe_improvement": round(sharpe_improvement, 3),
+                    "complementary_score": round(float(anti_corr), 3),
+                    "combined_quality": round(float(combined_quality), 3),
+                    "composite_score": round(float(composite), 3),
+                })
+
+        combos.sort(key=lambda x: -x["composite_score"])
+        return combos[:top_n]
+
+    def find_portfolio(
+        self, max_size: int = 5, top_n: int = 30
+    ) -> Dict[str, Any]:
+        """Greedy portfolio construction from top strategies.
+
+        Selects strategies one-by-one that maximally improve portfolio Sharpe
+        using their raw monthly profit vectors.
+
+        Args:
+            max_size: Maximum number of strategies in the portfolio.
+            top_n: Candidate pool size (top N by fitness).
+
+        Returns:
+            Dict with 'strategies', 'ensemble_sharpe', 'individual_sharpes',
+            'monthly_correlation_matrix'.
+        """
+        if 'monthly_profits_raw' not in self.df.columns:
+            return {"error": "No raw monthly profit data in corpus"}
+
+        # Parse profit vectors for top strategies
+        pool = self.df.nlargest(top_n, "fitness")
+        candidates: List[Dict[str, Any]] = []
+        for _, row in pool.iterrows():
+            raw = row.get('monthly_profits_raw')
+            if not raw or pd.isna(raw):
+                continue
+            try:
+                vec = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(vec, list) and len(vec) >= 3:
+                    candidates.append({
+                        'fingerprint': row.get('fingerprint', ''),
+                        'fitness': row.get('fitness', 0) or 0,
+                        'vec': np.array(vec, dtype=float),
+                    })
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+
+        if len(candidates) < 2:
+            return {"error": f"Only {len(candidates)} strategies with raw monthly data"}
+
+        # Find min common length
+        min_len = min(len(c['vec']) for c in candidates)
+        for c in candidates:
+            c['vec'] = c['vec'][:min_len]
+
+        # Greedy selection: pick strategy that maximizes ensemble Sharpe
+        selected: List[Dict[str, Any]] = []
+
+        # Start with best individual Sharpe
+        best_idx = max(
+            range(len(candidates)),
+            key=lambda i: np.mean(candidates[i]['vec']) / (np.std(candidates[i]['vec']) + 1e-8)
+        )
+        selected.append(candidates.pop(best_idx))
+
+        while len(selected) < max_size and candidates:
+            best_improvement = -float('inf')
+            best_j = -1
+
+            # Current portfolio returns
+            port_vec = np.mean([s['vec'] for s in selected], axis=0)
+            current_sharpe = float(np.mean(port_vec)) / (float(np.std(port_vec)) + 1e-8)
+
+            for j, cand in enumerate(candidates):
+                trial_vecs = [s['vec'] for s in selected] + [cand['vec']]
+                trial_port = np.mean(trial_vecs, axis=0)
+                trial_sharpe = float(np.mean(trial_port)) / (float(np.std(trial_port)) + 1e-8)
+                improvement = trial_sharpe - current_sharpe
+                if improvement > best_improvement:
+                    best_improvement = improvement
+                    best_j = j
+
+            if best_j >= 0 and best_improvement > -0.01:
+                selected.append(candidates.pop(best_j))
+            else:
+                break
+
+        # Build result
+        port_vec = np.mean([s['vec'] for s in selected], axis=0)
+        ensemble_sharpe = float(np.mean(port_vec)) / (float(np.std(port_vec)) + 1e-8)
+
+        # Correlation matrix
+        vecs = np.array([s['vec'] for s in selected])
+        corr_matrix = np.corrcoef(vecs) if len(vecs) > 1 else np.array([[1.0]])
+
+        return {
+            'strategies': [
+                {'fingerprint': s['fingerprint'], 'fitness': s['fitness']}
+                for s in selected
+            ],
+            'ensemble_sharpe': round(ensemble_sharpe, 3),
+            'individual_sharpes': [
+                round(float(np.mean(s['vec'])) / (float(np.std(s['vec'])) + 1e-8), 3)
+                for s in selected
+            ],
+            'monthly_correlation_matrix': np.round(corr_matrix, 3).tolist(),
+            'n_months': min_len,
+        }
 
     def _find_pair_complementary(
         self, pool: pd.DataFrame, top_n: int
@@ -295,5 +481,52 @@ class TemporalAnalyzer:
                 lines.append(f"    {fp}  fitness={fitness:.3f}  weaknesses: {ws_str}")
         else:
             lines.append("  No weakness analysis yet. Call analyze_weaknesses() first.")
+
+        # Complementary pairs
+        lines.append("")
+        lines.append("-" * 70)
+        lines.append("  COMPLEMENTARY PAIRS")
+        lines.append("-" * 70)
+        try:
+            pairs = self.find_complementary_pairs(top_n=5)
+            if pairs:
+                for i, p in enumerate(pairs, 1):
+                    fp_a = p['strategy_a'][:10]
+                    fp_b = p['strategy_b'][:10]
+                    score = p.get('composite_score', 0)
+                    corr = p.get('monthly_correlation', None)
+                    sharpe_imp = p.get('sharpe_improvement', None)
+                    detail = f"  {i}. {fp_a} + {fp_b}  composite={score:.3f}"
+                    if corr is not None:
+                        detail += f"  corr={corr:.2f}"
+                    if sharpe_imp is not None:
+                        detail += f"  sharpe_Δ={sharpe_imp:+.3f}"
+                    lines.append(detail)
+            else:
+                lines.append("  No complementary pairs found.")
+        except Exception as e:
+            lines.append(f"  Complementary analysis failed: {e}")
+
+        # Portfolio
+        lines.append("")
+        lines.append("-" * 70)
+        lines.append("  PORTFOLIO CONSTRUCTION")
+        lines.append("-" * 70)
+        try:
+            portfolio = self.find_portfolio(max_size=5)
+            if 'error' in portfolio:
+                lines.append(f"  {portfolio['error']}")
+            else:
+                lines.append(
+                    f"  Ensemble Sharpe: {portfolio['ensemble_sharpe']:.3f} "
+                    f"({portfolio['n_months']} months)"
+                )
+                for i, (strat, sharpe) in enumerate(
+                    zip(portfolio['strategies'], portfolio['individual_sharpes']), 1
+                ):
+                    fp = strat['fingerprint'][:12]
+                    lines.append(f"    {i}. {fp}  fitness={strat['fitness']:.3f}  sharpe={sharpe:.3f}")
+        except Exception as e:
+            lines.append(f"  Portfolio construction failed: {e}")
 
         return "\n".join(lines)

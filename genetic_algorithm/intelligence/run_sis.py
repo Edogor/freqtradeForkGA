@@ -86,11 +86,11 @@ def cmd_corpus(args) -> pd.DataFrame:
 
 
 def cmd_predict(args) -> None:
-    """Train multi-target prediction models."""
+    """Train multi-target prediction models (v3: regression + classification + overfit risk)."""
     from genetic_algorithm.intelligence.predictors import MultiTargetPredictor
 
     print("\n" + "=" * 70)
-    print("  PHASE 2: TRAINING MULTI-TARGET PREDICTORS")
+    print("  PHASE 2: TRAINING MULTI-TARGET PREDICTORS (SIS v3)")
     print("=" * 70)
 
     df = _load_corpus(args)
@@ -103,7 +103,8 @@ def cmd_predict(args) -> None:
 
     print(predictor.report())
     predictor.save()
-    print("  Models saved to genetic_algorithm/ml/models/")
+    print(f"  Saved {len(predictor.models)} regressors + "
+          f"{len(predictor.classifiers)} classifiers to genetic_algorithm/ml/models/")
 
 
 def cmd_cluster(args) -> None:
@@ -216,10 +217,153 @@ def cmd_all(args) -> None:
     # Phase 5: Pattern mining
     cmd_patterns(args)
 
+    # Phase 6: Health report
+    cmd_report(args)
+
     elapsed = time.time() - start
     print(f"\n{'█' * 70}")
     print(f"  COMPLETE — {elapsed:.1f}s total")
     print(f"{'█' * 70}")
+
+
+def cmd_report(args) -> None:
+    """Generate SIS health report."""
+    from genetic_algorithm.intelligence.sis_evaluator import SISEvaluator
+    from genetic_algorithm.intelligence.predictors import MultiTargetPredictor
+    from genetic_algorithm.intelligence.archetypes import ArchetypeClassifier
+
+    print("\n" + "=" * 70)
+    print("  SIS HEALTH REPORT")
+    print("=" * 70)
+
+    df = _load_corpus(args)
+
+    predictor = MultiTargetPredictor()
+    try:
+        predictor.load()
+    except Exception:
+        predictor = None
+        print("  WARNING: Could not load predictor models")
+
+    classifier = ArchetypeClassifier()
+    try:
+        classifier.load()
+    except Exception:
+        classifier = None
+        print("  WARNING: Could not load archetype classifier")
+
+    evaluator = SISEvaluator(
+        corpus_df=df if not df.empty else None,
+        predictor=predictor,
+        classifier=classifier,
+    )
+    report = evaluator.health_report()
+    print(SISEvaluator.format_health_report(report))
+
+    return report
+
+
+def cmd_post_run(args) -> None:
+    """Generate post-evolution-run analysis.
+
+    Compares SIS predictions against actual outcomes from a completed run.
+    Expects a HoF or checkpoint file from the run as input.
+    """
+    from genetic_algorithm.intelligence.sis_evaluator import SISEvaluator
+    from genetic_algorithm.intelligence.predictors import MultiTargetPredictor
+    from genetic_algorithm.intelligence.archetypes import ArchetypeClassifier
+    from genetic_algorithm.intelligence.corpus import CorpusBuilder
+
+    print("\n" + "=" * 70)
+    print("  POST-RUN ANALYSIS")
+    print("=" * 70)
+
+    # Load new strategies from the specified run
+    run_hof = Path(args.run_hof)
+    if not run_hof.exists():
+        print(f"  ERROR: HoF file not found: {run_hof}")
+        return
+
+    builder = CorpusBuilder()
+    import json
+    with open(run_hof) as f:
+        hof_data = json.load(f)
+
+    records = []
+    strategies = hof_data if isinstance(hof_data, list) else hof_data.get("strategies", [])
+    for entry in strategies:
+        gene = entry.get("gene", entry.get("strategy_gene", {}))
+        metrics = entry.get("metrics", {})
+        fitness = entry.get("fitness", metrics.get("fitness", 0))
+        record = builder._build_record(
+            gene_dict=gene,
+            fitness=fitness,
+            raw_fitness=entry.get("raw_fitness", fitness),
+            metrics=metrics,
+            run_id=args.run_id or "unknown",
+            generation=entry.get("generation", 0),
+            individual_id=entry.get("individual_id", ""),
+            source="post_run_analysis",
+        )
+        records.append(record)
+
+    if not records:
+        print("  ERROR: No strategies found in HoF file")
+        return
+
+    new_df = pd.DataFrame(records)
+    print(f"  Loaded {len(new_df)} strategies from {run_hof}")
+
+    predictor = MultiTargetPredictor()
+    try:
+        predictor.load()
+    except Exception:
+        predictor = None
+        print("  WARNING: Could not load predictor models")
+
+    classifier = ArchetypeClassifier()
+    try:
+        classifier.load()
+    except Exception:
+        classifier = None
+
+    evaluator = SISEvaluator(
+        corpus_df=None,
+        predictor=predictor,
+        classifier=classifier,
+    )
+    report = evaluator.post_run_report(new_df)
+
+    # Print drift results
+    drift = report.get("prediction_drift", {})
+    if drift:
+        print("\n  PREDICTION DRIFT")
+        for name, info in drift.items():
+            if isinstance(info, dict) and "error" not in info:
+                marker = " [DEGRADED]" if info.get("degraded") else ""
+                if info["type"] == "regression":
+                    print(f"    {name}: train_R²={info.get('train_r2')}, "
+                          f"new_R²={info.get('new_r2')}, drift={info.get('drift')}{marker}")
+                else:
+                    print(f"    {name}: train_AUC={info.get('train_auc')}, "
+                          f"new_AUC={info.get('new_auc')}, drift={info.get('drift')}{marker}")
+
+    # Print archetype discovery
+    arch = report.get("archetype_discovery", {})
+    if arch and "error" not in arch:
+        print("\n  ARCHETYPE DISCOVERY")
+        print(f"    Known: {arch.get('known_archetypes', [])}")
+        print(f"    Found: {arch.get('found_in_run', [])}")
+        print(f"    Missing: {arch.get('missing_from_run', [])}")
+
+    # Print recommendations
+    recs = report.get("recommendations", [])
+    if recs:
+        print("\n  RECOMMENDATIONS")
+        for i, rec in enumerate(recs, 1):
+            print(f"    {i}. {rec}")
+
+    return report
 
 
 def _load_corpus(args) -> pd.DataFrame:
@@ -273,6 +417,14 @@ def main():
     # patterns
     sub = subparsers.add_parser("patterns", help="Pattern mining")
 
+    # report (health check)
+    sub = subparsers.add_parser("report", help="Generate SIS health report")
+
+    # post-run (analysis after evolution)
+    sub = subparsers.add_parser("post-run", help="Post-evolution analysis")
+    sub.add_argument("run_hof", help="Path to HoF JSON file from completed run")
+    sub.add_argument("--run-id", default=None, help="Run ID for labeling")
+
     # all
     sub = subparsers.add_parser("all", help="Run full pipeline")
     sub.add_argument("--test-waves", nargs="+", help="Waves to hold out for testing")
@@ -297,6 +449,8 @@ def main():
         "cluster": cmd_cluster,
         "analyze": cmd_analyze,
         "patterns": cmd_patterns,
+        "report": cmd_report,
+        "post-run": cmd_post_run,
         "all": cmd_all,
     }
 

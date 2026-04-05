@@ -269,15 +269,29 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
     
     # Get adaptive weights (injected by evolution.py from feature importance)
     indicator_weights = config.get('_indicator_weights', {})
-    
+    # v3: synergy weights keyed by partner indicator type
+    synergy_weights = config.get('_synergy_weights', {})
+
     mutations_applied = []
     _gene_tf = mutated_gene.timeframe  # for TF-adaptive indicator parameter scaling
-    
-    def _weighted_choice(candidates: list) -> str:
-        """Pick an indicator using adaptive weights if available, else uniform."""
-        if not indicator_weights or not candidates:
+
+    def _weighted_choice(candidates: list, context_indicators: list = None) -> str:
+        """Pick an indicator using adaptive weights + synergy context, else uniform."""
+        if not candidates:
             return random.choice(candidates)
+
+        # Start with base indicator weights
         weights = [indicator_weights.get(c, 1.0) for c in candidates]
+
+        # v3: Blend synergy weights when we know existing indicators
+        if synergy_weights and context_indicators:
+            for i, c in enumerate(candidates):
+                if c in synergy_weights:
+                    # Multiplicative boost from synergy graph
+                    weights[i] *= (1.0 + synergy_weights[c])
+
+        if not any(w > 0 for w in weights):
+            return random.choice(candidates)
         return random.choices(candidates, weights=weights, k=1)[0]
     
     # Choose mutation operation
@@ -296,7 +310,8 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
         available_new = [t for t in available_indicators if t not in existing_types]
         
         if available_new:
-            new_type = _weighted_choice(available_new)
+            existing_types_for_ctx = [ind.type for ind in mutated_gene.indicators]
+            new_type = _weighted_choice(available_new, context_indicators=existing_types_for_ctx)
             new_indicator = _create_random_indicator(new_type, indicator_config, timeframe=_gene_tf)
             mutated_gene.indicators.append(new_indicator)
             mutations_applied.append(f"add_{new_type}")
@@ -350,7 +365,8 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
             # Choose a different indicator type
             available_new = [t for t in available_indicators if t != old_type]
             if available_new:
-                new_type = _weighted_choice(available_new)
+                remaining_types = [ind.type for ind in mutated_gene.indicators if ind.type != old_type]
+                new_type = _weighted_choice(available_new, context_indicators=remaining_types)
                 new_indicator = _create_random_indicator(new_type, indicator_config, timeframe=_gene_tf)
                 mutated_gene.indicators[idx] = new_indicator
                 mutations_applied.append(f"replace_{old_type}_with_{new_type}")

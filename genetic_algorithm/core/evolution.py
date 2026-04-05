@@ -413,6 +413,22 @@ class GeneticAlgorithm:
         except Exception as e:
             self.logger.warning(f"[SIS] Failed to initialize: {e}")
 
+    def _get_common_indicators(self, population, top_n: int = 3):
+        """Get the most common indicator types in top-performing strategies."""
+        from collections import Counter
+        evaluated = [ind for ind in population.individuals
+                     if ind.fitness is not None]
+        if not evaluated:
+            return []
+        # Use top 30% by fitness
+        evaluated.sort(key=lambda x: x.fitness, reverse=True)
+        top_inds = evaluated[:max(3, len(evaluated) // 3)]
+        counter = Counter()
+        for ind in top_inds:
+            for indicator in ind.strategy_gene.indicators:
+                counter[indicator.type] += 1
+        return [t for t, _ in counter.most_common(top_n)]
+
     def _setup_diagnostics(self):
         """Initialise run diagnostics and terminal monitor."""
         output_config = self.config.get('output', {})
@@ -1929,100 +1945,110 @@ class GeneticAlgorithm:
         next_gen = Population(size=self.population_size, generation=self.current_generation + 1)
         
         # Step 1: Elitism - keep top performers
-        # Use raw_fitness (not shared fitness) to select elites, because
-        # fitness sharing can push strong strategies down artificially.
-        # This ensures the truly best strategy is never lost to sharing noise.
-        self.logger.debug(f"[ELITISM] Preserving top {self.elite_size} individuals (by raw fitness)")
-        
-        # Select elites by raw_fitness (the un-shared, un-adjusted fitness)
-        ranked_by_raw = sorted(
-            [ind for ind in population.individuals if ind.raw_fitness is not None],
-            key=lambda x: x.raw_fitness,
-            reverse=True,
-        )
+        # Step 1: Elitism - keep top performers
+        # NSGA-II mode skips raw-fitness elitism: (μ+λ) environmental selection
+        # (_nsga2_environmental_selection) merges parents + offspring and
+        # preserves elite rank-1 individuals via Pareto sorting.  Adding elites
+        # to next_gen here would cause duplicates in the combined pool passed to
+        # environmental selection, biasing crowding distances.
+        if self.mode == 'nsga2':
+            self.logger.debug("[ELITISM] NSGA-II mode: skipping raw-fitness elitism (handled by environmental selection)")
+            elites: list = []
+        else:
+            # Use raw_fitness (not shared fitness) to select elites, because
+            # fitness sharing can push strong strategies down artificially.
+            # This ensures the truly best strategy is never lost to sharing noise.
+            self.logger.debug(f"[ELITISM] Preserving top {self.elite_size} individuals (by raw fitness)")
 
-        # Diversity-aware elitism: greedily pick top candidates while
-        # ensuring no two elites are near-duplicates (distance < threshold).
-        # When a candidate is too close to an already-selected elite, skip
-        # it and try the next-best individual from the ranked list.
-        from genetic_algorithm.core.population import calculate_strategy_distance
-        diversity_threshold = self.config.get('elite_diversity_threshold', 0.15)
-        elites: list = []
-        for candidate in ranked_by_raw:
-            if len(elites) >= self.elite_size:
-                break
-            too_close = False
-            for elite in elites:
-                if calculate_strategy_distance(candidate, elite) < diversity_threshold:
-                    too_close = True
-                    break
-            if not too_close:
-                elites.append(candidate)
-        # If not enough diverse candidates, fill remaining slots from top
-        if len(elites) < self.elite_size:
+            # Select elites by raw_fitness (the un-shared, un-adjusted fitness)
+            ranked_by_raw = sorted(
+                [ind for ind in population.individuals if ind.raw_fitness is not None],
+                key=lambda x: x.raw_fitness,
+                reverse=True,
+            )
+
+            # Diversity-aware elitism: greedily pick top candidates while
+            # ensuring no two elites are near-duplicates (distance < threshold).
+            # When a candidate is too close to an already-selected elite, skip
+            # it and try the next-best individual from the ranked list.
+            from genetic_algorithm.core.population import calculate_strategy_distance
+            diversity_threshold = self.config.get('elite_diversity_threshold', 0.15)
+            elites: list = []
             for candidate in ranked_by_raw:
                 if len(elites) >= self.elite_size:
                     break
-                if candidate not in elites:
+                too_close = False
+                for elite in elites:
+                    if calculate_strategy_distance(candidate, elite) < diversity_threshold:
+                        too_close = True
+                        break
+                if not too_close:
                     elites.append(candidate)
-        
-        for individual in elites:
-            gene_copy = individual.strategy_gene.copy()
-            gene_copy.generation = self.current_generation + 1
-            # Preserve self-adaptive mutation rate through elite carry-over
-            if getattr(individual.strategy_gene, 'self_mutation_rate', None) is not None:
-                gene_copy.self_mutation_rate = individual.strategy_gene.self_mutation_rate
-                gene_copy.self_crossover_pref = individual.strategy_gene.self_crossover_pref
-            elite_copy = Individual(strategy_gene=gene_copy)
-            # Carry over fitness and metrics to avoid re-evaluation.
-            # If holdout monitoring penalized raw_fitness, restore the
-            # pre-penalty value so that fitness sharing in the next gen
-            # starts from the un-penalized base — otherwise holdout
-            # penalties compound across generations.
-            pre_holdout = getattr(individual, '_pre_holdout_raw_fitness', None)
-            elite_copy.raw_fitness = pre_holdout if pre_holdout is not None else individual.raw_fitness
-            elite_copy.fitness = elite_copy.raw_fitness  # will be re-shared anyway
-            elite_copy.metrics = individual.metrics.copy() if individual.metrics else {}
-            elite_copy.evaluated = True
-            # Enforce min_entry_conditions on elite copies
-            _enforce_min_entry_conditions(elite_copy.strategy_gene, self.config)
-            next_gen.add_individual(elite_copy)
-        self.logger.info(f"[ELITISM] Preserved {self.elite_size} elite individuals")
-        
-        # Step 1b: Parsimony pressure — try to simplify elites
-        parsimony_config = self.config.get('parsimony', {})
-        # Pass min_entry_conditions so parsimony respects the configured floor
-        indicator_config = self.config.get('indicators', {})
-        parsimony_config['min_entry_conditions'] = indicator_config.get('min_entry_conditions', 2)
-        if parsimony_config.get('enabled', False):
-            elite_list = list(next_gen.individuals)
-            
-            if self.parallel_enabled:
-                # Use parallel parsimony: evaluate all removal candidates
-                # concurrently across all elites using ProcessPoolExecutor.
-                from genetic_algorithm.evaluation.parallel import parallel_parsimony
-                
-                parallel_cfg = self.config.get('parallel_evaluation', {})
-                num_workers = parallel_cfg.get('num_workers') or (os.cpu_count() - 1)
-                bt_timeout = parallel_cfg.get('backtest_timeout', 120)
-                
-                removed = parallel_parsimony(
-                    elite_list, parsimony_config, self.config,
-                    num_workers=num_workers,
-                    backtest_timeout=bt_timeout,
-                    evaluator=self.parallel_evaluator,
-                )
-            else:
-                # Sequential fallback
-                from genetic_algorithm.core.parsimony import apply_parsimony_to_elites
-                
-                def _eval_fn(gene):
-                    return self.fitness_evaluator.evaluate(gene)
-                
-                removed = apply_parsimony_to_elites(elite_list, _eval_fn, parsimony_config)
-            
-            if removed > 0:
-                self.logger.info(f"[PARSIMONY] Removed {removed} component(s) from elites")
+            # If not enough diverse candidates, fill remaining slots from top
+            if len(elites) < self.elite_size:
+                for candidate in ranked_by_raw:
+                    if len(elites) >= self.elite_size:
+                        break
+                    if candidate not in elites:
+                        elites.append(candidate)
+
+            for individual in elites:
+                gene_copy = individual.strategy_gene.copy()
+                gene_copy.generation = self.current_generation + 1
+                # Preserve self-adaptive mutation rate through elite carry-over
+                if getattr(individual.strategy_gene, 'self_mutation_rate', None) is not None:
+                    gene_copy.self_mutation_rate = individual.strategy_gene.self_mutation_rate
+                    gene_copy.self_crossover_pref = individual.strategy_gene.self_crossover_pref
+                elite_copy = Individual(strategy_gene=gene_copy)
+                # Carry over fitness and metrics to avoid re-evaluation.
+                # If holdout monitoring penalized raw_fitness, restore the
+                # pre-penalty value so that fitness sharing in the next gen
+                # starts from the un-penalized base — otherwise holdout
+                # penalties compound across generations.
+                pre_holdout = getattr(individual, '_pre_holdout_raw_fitness', None)
+                elite_copy.raw_fitness = pre_holdout if pre_holdout is not None else individual.raw_fitness
+                elite_copy.fitness = elite_copy.raw_fitness  # will be re-shared anyway
+                elite_copy.metrics = individual.metrics.copy() if individual.metrics else {}
+                elite_copy.evaluated = True
+                # Enforce min_entry_conditions on elite copies
+                _enforce_min_entry_conditions(elite_copy.strategy_gene, self.config)
+                next_gen.add_individual(elite_copy)
+            self.logger.info(f"[ELITISM] Preserved {self.elite_size} elite individuals")
+
+            # Step 1b: Parsimony pressure — try to simplify elites
+            parsimony_config = self.config.get('parsimony', {})
+            # Pass min_entry_conditions so parsimony respects the configured floor
+            indicator_config = self.config.get('indicators', {})
+            parsimony_config['min_entry_conditions'] = indicator_config.get('min_entry_conditions', 2)
+            if parsimony_config.get('enabled', False):
+                elite_list = list(next_gen.individuals)
+
+                if self.parallel_enabled:
+                    # Use parallel parsimony: evaluate all removal candidates
+                    # concurrently across all elites using ProcessPoolExecutor.
+                    from genetic_algorithm.evaluation.parallel import parallel_parsimony
+
+                    parallel_cfg = self.config.get('parallel_evaluation', {})
+                    num_workers = parallel_cfg.get('num_workers') or (os.cpu_count() - 1)
+                    bt_timeout = parallel_cfg.get('backtest_timeout', 120)
+
+                    removed = parallel_parsimony(
+                        elite_list, parsimony_config, self.config,
+                        num_workers=num_workers,
+                        backtest_timeout=bt_timeout,
+                        evaluator=self.parallel_evaluator,
+                    )
+                else:
+                    # Sequential fallback
+                    from genetic_algorithm.core.parsimony import apply_parsimony_to_elites
+
+                    def _eval_fn(gene):
+                        return self.fitness_evaluator.evaluate(gene)
+
+                    removed = apply_parsimony_to_elites(elite_list, _eval_fn, parsimony_config)
+
+                if removed > 0:
+                    self.logger.info(f"[PARSIMONY] Removed {removed} component(s) from elites")
         
         # Helper to calculate next available individual ID
         def calculate_next_id():
@@ -2854,6 +2880,17 @@ class GeneticAlgorithm:
                     if self._sis_integrator is not None:
                         sis_weights = self._sis_integrator.get_indicator_weights(indicator_weights)
                         self.config['_indicator_weights'] = sis_weights
+                        # v3: Inject synergy weights for context-aware mutation
+                        if hasattr(self._sis_integrator, 'get_synergy_weights'):
+                            # Compute synergy weights based on most common indicators
+                            common_inds = self._get_common_indicators(population, top_n=3)
+                            syn_w = self._sis_integrator.get_synergy_weights(common_inds)
+                            if syn_w:
+                                self.config['_synergy_weights'] = syn_w
+                        # Inject operator weights
+                        op_w = self._sis_integrator.get_operator_weights()
+                        if op_w:
+                            self.config['_operator_weights'] = op_w
             except Exception as e:
                 self.logger.warning(f"Feature importance update failed: {e}")
                 self.monitor.on_error(f"Feature importance update failed: {e}")
@@ -2942,6 +2979,26 @@ class GeneticAlgorithm:
                         )
             except Exception:
                 pass  # Non-critical diagnostics
+
+            # SIS health summary for dashboard
+            if self._sis_integrator is not None:
+                try:
+                    sis_status = self._sis_integrator.get_status_summary()
+                    _extras['sis'] = sis_status
+                    # Emit dedicated SIS event via web monitor
+                    if self._web_monitor and hasattr(self._web_monitor, 'on_sis_health_update'):
+                        self._web_monitor.on_sis_health_update(sis_status)
+                except Exception:
+                    pass  # Non-critical
+
+                # Online learning: feed generation results back
+                if self._sis_integrator is not None:
+                    try:
+                        all_inds_list = list(population.individuals) if hasattr(population, 'individuals') else list(population)
+                        self._sis_integrator.update_from_generation(gen, all_inds_list)
+                    except Exception as e:
+                        self.logger.debug(f"[SIS] Online learning update failed: {e}")
+
             self.diagnostics.end_generation(
                 gen, stats, population,
                 extras=_extras,

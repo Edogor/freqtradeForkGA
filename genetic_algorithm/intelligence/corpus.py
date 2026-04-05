@@ -302,6 +302,10 @@ class CorpusBuilder:
                        "n_profitable_pairs", "n_pairs"]:
                 record[k] = None
 
+        # Raw temporal vectors for correlation/complementary analysis
+        record["monthly_profits_raw"] = json.dumps(monthly) if monthly else None
+        record["per_pair_profit_raw"] = json.dumps(per_pair) if per_pair else None
+
         # Metadata
         record["fingerprint"] = self._gene_fingerprint(gene_dict)
         record["run_id"] = run_id
@@ -766,6 +770,7 @@ class CorpusBuilder:
                 df.at[idx, "n_positive_months"] = sum(1 for m in monthly if m > 0)
                 df.at[idx, "n_negative_months"] = sum(1 for m in monthly if m < 0)
                 df.at[idx, "n_months_total"] = len(monthly)
+                df.at[idx, "monthly_profits_raw"] = json.dumps(monthly)
 
             # Fill per-pair profit stats
             per_pair = best["per_pair_profit"]
@@ -777,5 +782,6 @@ class CorpusBuilder:
                 df.at[idx, "per_pair_profit_max"] = np.max(vals)
                 df.at[idx, "n_profitable_pairs"] = sum(1 for v in vals if v > 0)
                 df.at[idx, "n_pairs"] = len(vals)
+                df.at[idx, "per_pair_profit_raw"] = json.dumps(per_pair)
 
         return df

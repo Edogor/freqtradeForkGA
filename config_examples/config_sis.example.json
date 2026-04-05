@@ -1,0 +1,132 @@
+{
+  "_comment": "Example configuration for the Strategy Intelligence System (SIS).",
+  "_comment2": "Copy the 'sis' block into your GA config YAML/JSON to enable SIS.",
+
+  "sis": {
+    "_comment": "Master switch. Set to true to activate SIS.",
+    "enabled": true,
+
+    "_comment_paths": "Where trained ML models and corpus data live.",
+    "models_dir": "genetic_algorithm/ml/models",
+    "corpus_path": "genetic_algorithm/data/strategy_corpus.parquet",
+    "log_file": "genetic_algorithm/output/sis_log.jsonl",
+
+    "_comment_hooks": "Enable/disable individual SIS hooks independently.",
+    "hooks": {
+      "seed_filtering": true,
+      "immigrants": true,
+      "indicator_weights": true,
+      "operator_weights": true,
+      "synergy_weights": true
+    },
+
+    "_comment_immigrants": "How archetype immigrants are generated.",
+    "immigrants_mode": "full",
+    "immigrants_per_generation": 2,
+    "immigrants_max_fraction": 0.15,
+
+    "_comment_filtering": "Seed quality filtering settings.",
+    "filter_fraction": 0.15,
+    "quality_gate_threshold": 0.25,
+    "min_enrichment_samples": 10,
+
+    "_comment_weights": "Indicator and operator weight scaling.",
+    "indicator_weight_scale": 1.5,
+    "operator_weight_scale": 1.0,
+    "weight_cap": 5.0,
+    "underrepresentation_pct": 0.02,
+
+    "_comment_search": "Archetype gap analysis — boost underrepresented archetypes.",
+    "search_direction": true,
+    "gap_boost_max": 1.5,
+
+    "_comment_adaptive": "Online Bayesian weight learning.",
+    "evidence_trust_max": 0.85,
+    "min_observations": 5,
+    "observation_halflife": 15,
+    "online_retrain_interval": 10
+  },
+
+  "_comment_ga": "Minimal GA block to pair with SIS (expand for real runs).",
+  "genetic_algorithm": {
+    "population_size": 50,
+    "generations": 30,
+    "mutation_rate": 0.15,
+    "crossover_rate": 0.7,
+    "elite_size": 5,
+    "selection_method": "tournament",
+    "tournament_size": 3,
+    "mode": "single_objective"
+  },
+
+  "indicators": {
+    "available": ["RSI", "EMA", "SMA", "MACD", "BBANDS", "ATR", "ADX",
+                  "STOCH", "CCI", "ROC", "DONCHIAN", "SUPERTREND"],
+    "max_per_strategy": 5,
+    "min_per_strategy": 1,
+    "min_entry_conditions": 2,
+    "min_exit_conditions": 1,
+
+    "RSI":        {"period": [7, 21]},
+    "EMA":        {"period": [10, 50]},
+    "SMA":        {"period": [10, 50]},
+    "MACD":       {"fast_period": [8, 21], "slow_period": [21, 50], "signal_period": [5, 14]},
+    "BBANDS":     {"period": [14, 28]},
+    "ATR":        {"period": [7, 21]},
+    "ADX":        {"period": [7, 28]},
+    "STOCH":      {"k_period": [5, 21], "d_period": [3, 9]},
+    "CCI":        {"period": [10, 28]},
+    "ROC":        {"period": [7, 21]},
+    "DONCHIAN":   {"period": [10, 40]},
+    "SUPERTREND": {"period": [7, 21], "multiplier": [2, 5]}
+  },
+
+  "strategy_constraints": {
+    "stoploss_range": [-0.15, -0.03],
+    "roi_range": [0.01, 0.10],
+    "timeframes": ["5m", "15m", "1h", "4h"],
+    "max_open_trades_range": [1, 10]
+  },
+
+  "backtesting": {
+    "pairs": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+    "timerange": "20240101-20241231",
+    "stake_amount": 100
+  },
+
+  "walk_forward": {
+    "enabled": false
+  },
+
+  "output": {
+    "dir": "genetic_algorithm/output"
+  },
+
+  "hall_of_fame": {
+    "enabled": true,
+    "size": 20
+  },
+
+  "logging": {
+    "level": "INFO",
+    "file": "genetic_algorithm/output/ga.log"
+  },
+
+  "_comment_bootstrap": [
+    "BOOTSTRAP SEQUENCE (cold start — no trained models yet):",
+    "  1. FIRST RUN: SIS enabled but models absent → hooks use static enrichment weights only.",
+    "     SIS still logs generation data → sis_log.jsonl accumulates.",
+    "     Result: normal GA run + corpus building happens in background.",
+    "",
+    "  2. TRAIN: After ≥1 run, train models from accumulated data:",
+    "     python -m genetic_algorithm.intelligence.run_sis train \\",
+    "            --corpus genetic_algorithm/data/strategy_corpus.parquet",
+    "",
+    "  3. SUBSEQUENT RUNS: models loaded → seed_filtering, quality-gated immigrants,",
+    "     archetype gap analysis, regime-affinity scoring all become active.",
+    "",
+    "  4. HEALTH CHECK at any time:",
+    "     python -m genetic_algorithm.intelligence.run_sis report \\",
+    "            --corpus genetic_algorithm/data/strategy_corpus.parquet"
+  ]
+}

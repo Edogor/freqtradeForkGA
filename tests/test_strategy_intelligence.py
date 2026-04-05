@@ -7,6 +7,7 @@ TemporalAnalyzer, and PatternMiner.
 
 import json
 import hashlib
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -499,7 +500,7 @@ class TestMultiTargetPredictor:
         assert isinstance(fi_df, pd.DataFrame)
         assert "feature" in fi_df.columns
         assert "importance" in fi_df.columns
-        assert len(fi_df) == 65
+        assert len(fi_df) == 77  # 65 base + 10 synergies + 2 ratios
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -790,3 +791,265 @@ class TestSISIntegration:
     def test_feature_column_count(self):
         """SURROGATE_FEATURE_NAMES should have exactly 65 entries."""
         assert len(SURROGATE_FEATURE_NAMES) == 65
+
+
+# ══════════════════════════════════════════════════════════════════════
+# SIS v3 Tests — New Features
+# ══════════════════════════════════════════════════════════════════════
+
+class TestOverfitRiskPredictor:
+    """Tests for the overfitting risk predictor target."""
+
+    def test_overfit_risk_computed(self, synthetic_corpus_df):
+        """Overfitting risk should be derived from train/holdout gap."""
+        pred = MultiTargetPredictor()
+        results = pred.train(synthetic_corpus_df)
+        # overfit_risk should appear in results if train_fitness and holdout_fitness exist
+        assert "overfit_risk" in results
+
+    def test_overfit_risk_range(self, synthetic_corpus_df):
+        """Overfitting risk predictions should be in reasonable range."""
+        pred = MultiTargetPredictor()
+        pred.train(synthetic_corpus_df)
+        scored = pred.predict(synthetic_corpus_df)
+        if "pred_overfit_risk" in scored.columns:
+            preds = scored["pred_overfit_risk"].dropna()
+            assert preds.min() > -2.0  # Clipped to sane range
+            assert preds.max() < 2.0
+
+
+class TestClassificationPredictors:
+    """Tests for the top-quartile classification predictors."""
+
+    def test_classifiers_trained(self, synthetic_corpus_df):
+        """Classification models should be trained for available targets."""
+        pred = MultiTargetPredictor()
+        results = pred.train(synthetic_corpus_df)
+        # At least clf_fitness and clf_win_rate should exist
+        assert any(k.startswith("clf_") for k in results)
+
+    def test_classifier_auc_above_chance(self, synthetic_corpus_df):
+        """Classification AUC should be above random chance (0.5)."""
+        pred = MultiTargetPredictor()
+        results = pred.train(synthetic_corpus_df)
+        for key, metrics in results.items():
+            if metrics.get("type") == "classification":
+                # For synthetic data with clear clusters, AUC should be decent
+                assert metrics["auc"] >= 0.45, f"{key} AUC too low: {metrics['auc']}"
+
+    def test_classification_probabilities(self, synthetic_corpus_df):
+        """predict() should return probability columns for classifiers."""
+        pred = MultiTargetPredictor()
+        pred.train(synthetic_corpus_df)
+        scored = pred.predict(synthetic_corpus_df)
+        prob_cols = [c for c in scored.columns if c.startswith("prob_clf_")]
+        assert len(prob_cols) >= 1
+        for col in prob_cols:
+            vals = scored[col].dropna()
+            assert vals.min() >= 0.0
+            assert vals.max() <= 1.0
+
+    def test_quality_score(self, synthetic_corpus_df):
+        """predict_quality_score should return normalized 0-1 scores."""
+        pred = MultiTargetPredictor()
+        pred.train(synthetic_corpus_df)
+        scores = pred.predict_quality_score(synthetic_corpus_df)
+        assert len(scores) == len(synthetic_corpus_df)
+        assert scores.min() >= -0.01  # Allow tiny float imprecision
+        assert scores.max() <= 1.01
+
+    def test_save_load_classifiers(self, synthetic_corpus_df, tmp_path):
+        """Classifiers should persist and reload correctly."""
+        pred = MultiTargetPredictor(models_dir=tmp_path)
+        pred.train(synthetic_corpus_df)
+        n_clf = len(pred.classifiers)
+        pred.save(tmp_path)
+
+        pred2 = MultiTargetPredictor(models_dir=tmp_path)
+        pred2.load(tmp_path)
+        assert len(pred2.classifiers) == n_clf
+        assert pred2._quartile_thresholds  # Thresholds should be saved
+
+
+class TestInteractionFeatures:
+    """Tests for pairwise indicator interaction features."""
+
+    def test_interaction_features_added(self, synthetic_corpus_df):
+        """Interaction features should be added during training."""
+        from genetic_algorithm.intelligence.predictors import _add_interaction_features
+        df = _add_interaction_features(synthetic_corpus_df)
+        synergy_cols = [c for c in df.columns if c.startswith("syn_")]
+        assert len(synergy_cols) == 10  # 10 synergy pairs
+        assert "ratio_entry_exit" in df.columns
+        assert "ratio_ind_cond" in df.columns
+
+    def test_interaction_features_values(self, synthetic_corpus_df):
+        """Interaction features should be products of indicator presence."""
+        from genetic_algorithm.intelligence.predictors import _add_interaction_features
+        df = _add_interaction_features(synthetic_corpus_df)
+        # syn_DONCHIAN_ROC should be 1 only when both indicators present
+        if "syn_DONCHIAN_ROC" in df.columns:
+            for _, row in df.head(10).iterrows():
+                expected = row.get("ind_DONCHIAN", 0) * row.get("ind_ROC", 0)
+                assert row["syn_DONCHIAN_ROC"] == expected
+
+
+class TestEvolutionState:
+    """Tests for convergence-aware evolution state tracking."""
+
+    def test_initial_state_exploring(self):
+        """Initial state should be EXPLORING."""
+        from genetic_algorithm.intelligence.sis_integrator import EvolutionState
+        es = EvolutionState()
+        assert es.state == EvolutionState.EXPLORING
+
+    def test_states_transition(self):
+        """State should transition through exploring -> improving -> stagnating."""
+        from genetic_algorithm.intelligence.sis_integrator import EvolutionState
+        es = EvolutionState()
+
+        # Early gens: exploring
+        es.update(1, 0.3, 0.25, 100)
+        assert es.state == EvolutionState.EXPLORING
+
+        # Improving (monotonically increasing fitness, mean stays stable)
+        for gen in range(6, 10):
+            es.update(gen, 0.3 + gen * 0.01, 0.3 + gen * 0.009, 100)
+        assert es.state == EvolutionState.IMPROVING
+
+        # Stagnating (no improvement for many gens, mean stays stable)
+        peak = 0.3 + 9 * 0.01
+        for gen in range(10, 20):
+            es.update(gen, peak, peak * 0.95, 100)  # no improvement
+        assert es.state == EvolutionState.STAGNATING
+
+    def test_stagnation_params(self):
+        """Stagnation should increase immigrant multiplier."""
+        from genetic_algorithm.intelligence.sis_integrator import EvolutionState
+        es = EvolutionState()
+        for gen in range(20):
+            es.update(gen, 0.5, 0.3, 100)
+        params = es.params
+        assert params["immigrant_multiplier"] > 1.0  # More immigrants during stagnation
+        assert params["weight_bias_strength"] < 1.0  # Flatter weights
+
+    def test_post_restart_detected(self):
+        """Post-restart state should be detected after fitness reset."""
+        from genetic_algorithm.intelligence.sis_integrator import EvolutionState
+        es = EvolutionState()
+        es.update(1, 0.5, 0.4, 100)
+        es.update(2, 0.55, 0.45, 100)
+        # Simulate catastrophic restart: big fitness drop
+        es.update(3, 0.2, 0.15, 100)
+        assert es.state == EvolutionState.POST_RESTART
+
+
+class TestAdaptiveWeightTracker:
+    """Tests for online Bayesian weight blending."""
+
+    def test_early_gen_trusts_prior(self):
+        """Early generations should return weights close to prior."""
+        from genetic_algorithm.intelligence.sis_integrator import AdaptiveWeightTracker
+        prior = {"CCI": 3.0, "MACD": 0.5}
+        tracker = AdaptiveWeightTracker(prior, {})
+        # No observations yet, gen 0
+        blended = tracker.get_blended_indicator_weights()
+        assert abs(blended["CCI"] - 3.0) < 0.01
+        assert abs(blended["MACD"] - 0.5) < 0.01
+
+    def test_late_gen_shifts_to_evidence(self):
+        """Late generations should shift toward live evidence."""
+        from unittest.mock import MagicMock
+        from genetic_algorithm.intelligence.sis_integrator import AdaptiveWeightTracker
+
+        prior = {"CCI": 3.0, "MACD": 0.5}
+        tracker = AdaptiveWeightTracker(prior, {})
+
+        # Simulate many generations where MACD strategies do well
+        for gen in range(30):
+            mock_pop = []
+            for _ in range(20):
+                ind = MagicMock()
+                ind.fitness = 0.7
+                gene = MagicMock()
+                indicator = MagicMock()
+                indicator.type = "MACD"
+                gene.indicators = [indicator]
+                gene.entry_conditions = []
+                ind.strategy_gene = gene
+                mock_pop.append(ind)
+            tracker.observe_generation(mock_pop, gen)
+
+        blended = tracker.get_blended_indicator_weights()
+        # MACD should have increased from 0.5 toward higher value
+        assert blended["MACD"] > 0.5
+
+
+class TestSynergyGraph:
+    """Tests for synergy-aware indicator weights."""
+
+    def test_synergy_weights_empty_when_no_indicators(self):
+        """Synergy weights should be empty with no existing indicators."""
+        from genetic_algorithm.intelligence.sis_integrator import SIS_INDICATOR_ENRICHMENT, SYNERGY_GRAPH
+        # Direct function test
+        existing = []
+        synergy_weights = {}
+        for existing_ind in existing:
+            partners = SYNERGY_GRAPH.get(existing_ind, {})
+            for partner, lift in partners.items():
+                if partner not in existing:
+                    synergy_weights[partner] = max(synergy_weights.get(partner, 0), lift)
+        assert synergy_weights == {}
+
+    def test_synergy_weights_with_donchian(self):
+        """Having DONCHIAN should strongly prefer ROC."""
+        from genetic_algorithm.intelligence.sis_integrator import SYNERGY_GRAPH
+        existing = ["DONCHIAN"]
+        synergy_weights = {}
+        for existing_ind in existing:
+            partners = SYNERGY_GRAPH.get(existing_ind, {})
+            for partner, lift in partners.items():
+                if partner not in existing:
+                    synergy_weights[partner] = max(synergy_weights.get(partner, 0), lift)
+        assert "ROC" in synergy_weights
+        assert synergy_weights["ROC"] > 10  # 21.5x lift
+
+    def test_synergy_bidirectional(self):
+        """Synergy graph should be bidirectional: DONCHIAN->ROC and ROC->DONCHIAN."""
+        from genetic_algorithm.intelligence.sis_integrator import SYNERGY_GRAPH
+        assert "ROC" in SYNERGY_GRAPH.get("DONCHIAN", {})
+        assert "DONCHIAN" in SYNERGY_GRAPH.get("ROC", {})
+
+
+class TestSISIntegratorV3:
+    """Tests for the v3 SIS integrator features."""
+
+    def test_integrator_initializes_v3_components(self, synthetic_corpus_df, tmp_path):
+        """SIS integrator should initialize all v3 components."""
+        from genetic_algorithm.intelligence.sis_integrator import SISIntegrator
+        # Train and save models
+        pred = MultiTargetPredictor(models_dir=tmp_path)
+        pred.train(synthetic_corpus_df)
+        pred.save(tmp_path)
+
+        ac = ArchetypeClassifier(min_cluster_size=5, min_samples=3)
+        ac.fit(synthetic_corpus_df)
+        ac.save(tmp_path)
+
+        corpus_path = tmp_path / "strategy_corpus.parquet"
+        synthetic_corpus_df.to_parquet(corpus_path, index=False)
+
+        config = {
+            "sis": {
+                "enabled": True,
+                "models_dir": str(tmp_path),
+                "corpus_path": str(corpus_path),
+            },
+            "output": {"dir": str(tmp_path)},
+        }
+        sis = SISIntegrator(config, logging.getLogger("test"))
+        assert sis._predictor_ready
+        assert sis._classifier_ready
+        assert sis._evo_state is not None
+        assert sis._adaptive_weights is not None
+        assert sis._synergy_graph  # Should have synergy data

@@ -84,6 +84,7 @@ class ArchetypeClassifier:
             min_cluster_size=self.min_cluster_size,
             min_samples=self.min_samples,
             metric="euclidean",
+            copy=True,  # silence FutureWarning: default will change to True in sklearn 1.10
         )
         self.labels_ = self._clusterer.fit_predict(X_scaled)
 
