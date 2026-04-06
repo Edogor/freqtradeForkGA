@@ -1,0 +1,64 @@
+# Production — full-featured island model with walk-forward validation
+# For serious strategy discovery runs. ~4-8 hours on 8 cores.
+
+backtesting:
+  pairs: [BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT]
+  timerange: "20240101-20260201"
+  max_open_trades: 3
+
+genetic_algorithm:
+  population_size: 10
+  generations: 20
+  elite_size: 2
+  mutation_rate: 0.20
+  crossover_rate: 0.75
+  selection_method: rank
+  convergence_patience: 10
+  adaptive_mutation: true
+  fitness_sharing: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 8
+  population_per_island: 10
+  migration:
+    topology: ring
+    interval: 3
+    rate: 0.2
+
+fitness_weights:
+  profit: 0.28
+  sharpe_ratio: 0.18
+  sortino_ratio: 0.13
+  profit_factor: 0.08
+  drawdown: 0.15
+  win_rate: 0.05
+  trade_frequency: 0.05
+  monthly_stability: 0.04
+  cross_pair: 0.04
+
+parallel_evaluation:
+  enabled: true
+
+walk_forward:
+  enabled: true
+  train_days: 120
+  validation_days: 30
+  step_days: 30
+  aggregation: harmonic_mean
+
+holdout_validation:
+  enabled: true
+  holdout_pct: 0.15
+
+holdout_monitoring:
+  enabled: true
+  interval: 2
+  early_stop: true
+
+monte_carlo:
+  enabled: true
+  iterations: 50
+
+deflated_sharpe:
+  enabled: true

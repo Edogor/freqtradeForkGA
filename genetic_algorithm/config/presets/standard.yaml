@@ -1,0 +1,32 @@
+# Standard — single-population GA with sensible defaults
+# Good starting point for strategy discovery. ~30-60 min on 8 cores.
+
+backtesting:
+  pairs: [BTC/USDT, ETH/USDT]
+  timerange: "20240601-20260201"
+  max_open_trades: 3
+
+genetic_algorithm:
+  population_size: 30
+  generations: 12
+  elite_size: 4
+  mutation_rate: 0.20
+  crossover_rate: 0.75
+  selection_method: tournament
+  convergence_patience: 8
+  adaptive_mutation: true
+
+parallel_evaluation:
+  enabled: true
+
+holdout_validation:
+  enabled: true
+  holdout_pct: 0.15
+
+holdout_monitoring:
+  enabled: true
+  interval: 2
+  early_stop: true
+
+deflated_sharpe:
+  enabled: true
