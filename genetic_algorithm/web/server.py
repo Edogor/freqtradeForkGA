@@ -85,6 +85,7 @@ def create_app(
         backtest,
         data,
         dry_run,
+        sis,
     )
 
     app.include_router(ws.router)
@@ -95,6 +96,7 @@ def create_app(
     app.include_router(backtest.router)
     app.include_router(data.router)
     app.include_router(dry_run.router)
+    app.include_router(sis.router)
 
     # ── Health check ───────────────────────────────────────────────
     @app.get("/api/health")

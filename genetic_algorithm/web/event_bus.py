@@ -55,6 +55,10 @@ class EventType(str, enum.Enum):
     # ── Strategy injection ─────────────────────────────────────────
     STRATEGY_INJECTED = "strategy.injected"
 
+    # ── SIS (Strategy Intelligence System) ────────────────────────
+    SIS_HEALTH = "sis.health"
+    SIS_STATE_CHANGE = "sis.state_change"
+
     # ── System ─────────────────────────────────────────────────────
     LOG = "log"
     ERROR = "error"

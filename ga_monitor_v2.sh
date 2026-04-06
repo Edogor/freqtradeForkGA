@@ -333,14 +333,11 @@ get_metrics() {
     if [[ -n "$v" ]]; then
         avg="$v"
     else
-        # Island model format: mean of per-island avg= values (last gen block)
-        v=$(echo "$buf" | grep -oP '(?<=\] )best=[0-9.]+ avg=\K[0-9.]+' \
-            | tail -20 \
-            | LC_NUMERIC=C awk '{s+=$1; c++} END {if(c>0) printf "%.4f", s/c}' || true)
-        # Fall back to full log for completed runs where tail-300 has no stats
-        [[ -z "$v" ]] && v=$(grep -oP '(?<=\] )best=[0-9.]+ avg=\K[0-9.]+' "$log" \
-            | tail -20 \
-            | LC_NUMERIC=C awk '{s+=$1; c++} END {if(c>0) printf "%.4f", s/c}' || true)
+        # Island model format: mean of each island's LATEST avg= value.
+        # Extract all per-island avg values, keep last per island via awk, then average.
+        v=$(grep -oP '\[island_\w+\s*\] best=[0-9.]+ avg=\K[0-9.]+' "$log" \
+            | tail -40 \
+            | LC_NUMERIC=C awk '{vals[NR]=$1} END {if(NR>0){s=0;for(i=1;i<=NR;i++)s+=vals[i]; printf "%.4f",s/NR}}' || true)
         [[ -n "$v" ]] && avg="$v"
     fi
 
@@ -350,14 +347,10 @@ get_metrics() {
     if [[ -n "$v" ]]; then
         div="$v"
     else
-        # Island model format: mean of per-island diversity= values (last gen block)
-        v=$(echo "$buf" | grep -oP 'diversity=\K[0-9.]+' \
-            | tail -20 \
-            | LC_NUMERIC=C awk '{s+=$1; c++} END {if(c>0) printf "%.4f", s/c}' || true)
-        # Fall back to full log for completed runs
-        [[ -z "$v" ]] && v=$(grep -oP 'diversity=\K[0-9.]+' "$log" \
-            | tail -20 \
-            | LC_NUMERIC=C awk '{s+=$1; c++} END {if(c>0) printf "%.4f", s/c}' || true)
+        # Island model format: mean of each island's LATEST diversity= value.
+        v=$(grep -oP '\[island_\w+\s*\] best=[0-9.]+ avg=[0-9.]+ diversity=\K[0-9.]+' "$log" \
+            | tail -40 \
+            | LC_NUMERIC=C awk '{vals[NR]=$1} END {if(NR>0){s=0;for(i=1;i<=NR;i++)s+=vals[i]; printf "%.4f",s/NR}}' || true)
         [[ -n "$v" ]] && div="$v"
     fi
 
@@ -443,6 +436,7 @@ get_metrics() {
     fi
 
     # ── Best strategy trades + W/L ratio ──
+    # Extract trades and win_rate from the NEW BEST line with the highest fitness
     local best_trades="—" best_wl="—"
     local _best_line
     _best_line=$(grep -oP 'NEW BEST: fitness=\K[0-9.]+ profit=-?[0-9.]+% trades=\d+ win_rate=[0-9.]+' "$log" 2>/dev/null \
@@ -451,9 +445,16 @@ get_metrics() {
         local _t _w
         _t=$(echo "$_best_line" | grep -oP 'trades=\K\d+' || true)
         _w=$(echo "$_best_line" | grep -oP 'win_rate=\K[0-9.]+' || true)
-        [[ -n "$_t" ]] && best_trades="$_t"
+        if [[ -n "$_t" ]]; then
+            best_trades="$_t"
+        fi
         if [[ -n "$_w" ]]; then
-            best_wl=$(LC_NUMERIC=C awk -v w="$_w" 'BEGIN{l=1-w+0; if(l<=0){print "inf"} else{printf "%.2f",w/l}}')
+            # Convert win_rate (0.0–1.0) to W/L ratio; avoid division by zero
+            best_wl=$(LC_NUMERIC=C awk -v w="$_w" 'BEGIN{
+                l=1-w+0;
+                if(l<=0){print "∞"}
+                else{printf "%.2f", w/l}
+            }')
         fi
     fi
 
@@ -650,7 +651,7 @@ print_dashboard() {
         apad "${BOLD}TIME${NC}"       9; echo -n " "
         apad "${BOLD}ETA${NC}"        9; echo -n " "
         apad "${BOLD}TRADES${NC}"     8; echo -n " "
-        apad "${BOLD}W/L${NC}"       7; echo -n " "
+        apad "${BOLD}W/L${NC}"        7; echo -n " "
         echo -e "${BOLD}STATUS${NC}"
         echo -e "  ${DIM}───── ───────────────────────────── ───────────────── ───────── ───────── ─────── ───────── ───── ───────── ───────── ────────────────────── ──────────${NC}"
     else
@@ -666,7 +667,7 @@ print_dashboard() {
         apad "${BOLD}TIME${NC}"       9; echo -n " "
         apad "${BOLD}ETA${NC}"        9; echo -n " "
         apad "${BOLD}TRADES${NC}"     8; echo -n " "
-        apad "${BOLD}W/L${NC}"       7; echo -n " "
+        apad "${BOLD}W/L${NC}"        7; echo -n " "
         echo -e "${BOLD}STATUS${NC}"
         echo -e "  ${DIM}───── ───────────────────────────── ───────────────── ───────── ───────── ─────── ───────── ───── ───────── ───────── ────────────────────── ──────────${NC}"
     fi
@@ -682,8 +683,6 @@ print_dashboard() {
         local raw
         raw=$(get_metrics "$lf")
         IFS='|' read -r gen best avg div errs elapsed eta best_trades best_wl profit status <<< "$raw"
-
-        # Verify RUNNING with actual PID
         if [[ "$status" == "RUNNING" ]]; then
             local pid
             pid=$(find_pid_for "$exp" "$wave" 2>/dev/null || true)

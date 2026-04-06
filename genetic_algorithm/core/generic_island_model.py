@@ -919,9 +919,11 @@ class GenericIslandModelEvolution:
                     ist.best_fitness = best_ind.raw_fitness
                     profit = best_ind.metrics.get('profit', 0)
                     ist.best_profit = profit
+                    trades = best_ind.metrics.get('num_trades', 0)
+                    win_rate = best_ind.metrics.get('win_rate', 0.0)
                     self.logger.info(
-                        "  [%s] NEW BEST: fitness=%.4f profit=%.2f%%",
-                        island_name, ist.best_fitness, profit,
+                        "  [%s] NEW BEST: fitness=%.4f profit=%.2f%% trades=%d win_rate=%.2f",
+                        island_name, ist.best_fitness, profit, trades, win_rate,
                     )
                 ist.avg_fitness = stats.avg_fitness
                 ist.generations_completed = generation + 1

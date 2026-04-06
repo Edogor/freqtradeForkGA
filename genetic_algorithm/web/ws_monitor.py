@@ -256,6 +256,32 @@ class WebSocketMonitor:
             data=data,
         ))
 
+    # ── SIS health reporting ───────────────────────────────────────
+
+    def on_sis_health_update(self, health_data: Dict[str, Any]) -> None:
+        """Emit a SIS health event with predictor/archetype/corpus status."""
+        self.bus.publish(Event(
+            type=EventType.SIS_HEALTH,
+            run_id=self.run_id,
+            data={
+                "generation": self._current_gen,
+                **health_data,
+            },
+        ))
+
+    def on_sis_state_change(self, old_state: str, new_state: str, reason: str = "") -> None:
+        """Emit a SIS state change event (e.g. EXPLORING -> STAGNATING)."""
+        self.bus.publish(Event(
+            type=EventType.SIS_STATE_CHANGE,
+            run_id=self.run_id,
+            data={
+                "generation": self._current_gen,
+                "old_state": old_state,
+                "new_state": new_state,
+                "reason": reason,
+            },
+        ))
+
     # ── Population snapshot persistence ────────────────────────────
 
     def store_population_snapshot(self, individuals_dicts: List[dict]) -> None:
