@@ -36,16 +36,16 @@ logger = logging.getLogger(__name__)
 # ── Static enrichment weights from PatternMiner analysis on 4289 strategies ──
 
 SIS_INDICATOR_ENRICHMENT: Dict[str, float] = {
-    'CCI': 3.0,       # 26.5x lift in top strategies
-    'STOCH': 2.5,     # 12.5x lift
-    'ATR': 2.0,       # 6.5x lift
-    'ROC': 2.0,       # 6.5x lift
-    'DONCHIAN': 1.8,  # Enriched + best synergy pair with ROC
-    'ADX': 1.5,       # Enriched in top archetypes
+    'CCI': 1.5,       # Moderated (was 3.0) — still elevated, less dominant
+    'STOCH': 1.5,     # Moderated (was 2.5)
+    'ATR': 1.4,       # Moderated (was 2.0) — valuable across all timeframes
+    'ROC': 1.3,       # Moderated (was 2.0)
+    'DONCHIAN': 1.3,  # Moderated (was 1.8)
+    'ADX': 1.2,       # Moderated (was 1.5)
     'RSI': 1.0,
-    'BBANDS': 1.0,
-    'SUPERTREND': 1.0,
-    'EMA': 0.9,
+    'BBANDS': 1.1,    # Raised (was 1.0) — useful for 4H volatility
+    'SUPERTREND': 1.1, # Raised (was 1.0) — good 4H trend indicator
+    'EMA': 1.0,       # Raised (was 0.9) — restore to neutral
     'SMA': 0.9,
     'WILLR': 1.1,
     'MFI': 1.0,
@@ -53,10 +53,10 @@ SIS_INDICATOR_ENRICHMENT: Dict[str, float] = {
     'TEMA': 1.0,
     'KAMA': 1.0,
     'VROC': 1.0,
-    'PSAR': 0.8,
+    'PSAR': 0.9,      # Raised (was 0.8)
     'CMF': 0.9,
-    'MACD': 0.5,      # Depleted in top strategies
-    'ICHIMOKU': 0.3,  # Strongly depleted
+    'MACD': 0.9,      # Raised (was 0.5) — much less suppressed, works on 4H
+    'ICHIMOKU': 0.8,  # Raised (was 0.3) — restore, good 4H trend system
 }
 
 SIS_OPERATOR_ENRICHMENT: Dict[str, float] = {
@@ -116,8 +116,10 @@ class EvolutionState:
             self.gens_since_improvement += 1
 
         # Detect post-restart (population size drops or big fitness reset)
-        if (len(self.fitness_history) >= 2 and
-                mean_fitness < self.fitness_history[-2] * 0.7):
+        # Guard: don't trigger on natural early-gen variance (require gen >= 5)
+        if (generation >= 5 and
+                len(self.fitness_history) >= 2 and
+                mean_fitness < self.fitness_history[-2] * 0.5):  # 50% drop (was 0.7)
             self._last_restart_gen = generation
             self.state = self.POST_RESTART
         elif generation - self._last_restart_gen <= 3:
@@ -167,6 +169,11 @@ class EvolutionState:
         return {"filter_strength": 1.0, "immigrant_multiplier": 1.0,
                 "weight_bias_strength": 1.0, "exploration_bonus": 0.0}
 
+    def notify_restart(self, generation: int) -> None:
+        """Called by evolution.py when a catastrophic restart actually fires."""
+        self._last_restart_gen = generation
+        self.state = self.POST_RESTART
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Online Adaptive Weights
@@ -193,7 +200,7 @@ class AdaptiveWeightTracker:
         self._prior_ind = dict(prior_indicator_weights)
         self._prior_op = dict(prior_operator_weights)
         self._evidence_trust_max = evidence_trust_max
-        self._evidence_trust_initial: float = min(0.4, evidence_trust_max * 0.5)
+        self._evidence_trust_initial: float = min(0.2, evidence_trust_max * 0.25)
         self._min_observations = min_observations
         self._observation_halflife = observation_halflife
         # Accumulate live evidence: indicator -> [(gen, rel_fitness), ...]
@@ -389,7 +396,7 @@ class SISIntegrator:
         self._hook_skips: Dict[str, int] = {k: 0 for k in self._hook_enabled}
 
         # ── Configurable thresholds (with sensible defaults) ──────────────
-        self._quality_gate_threshold: float = self._sis_config.get('quality_gate_threshold', 0.25)
+        self._quality_gate_threshold: float = self._sis_config.get('quality_gate_threshold', 0.10)
         self._weight_cap: float = self._sis_config.get('weight_cap', 5.0)
         self._underrep_pct: float = self._sis_config.get('underrepresentation_pct', 0.02)
         self._evidence_trust_max: float = self._sis_config.get('evidence_trust_max', 0.85)
@@ -412,7 +419,13 @@ class SISIntegrator:
             self._classifier.load(models_dir)
         except Exception as e:
             self.logger.warning(f"[SIS] Could not load archetype classifier: {e}")
-        self._classifier_ready = bool(self._classifier.archetype_labels)
+        n_real_archetypes = sum(1 for k in self._classifier.archetype_labels if k != -1)
+        self._classifier_ready = n_real_archetypes > 0
+        self.logger.info(
+            f"[SIS] Archetype classifier: {n_real_archetypes} real archetypes, "
+            f"{len(self._classifier.archetype_labels)} total labels, "
+            f"centroids={len(self._classifier._centroids)}"
+        )
 
         # ── Predictor (v3: multi-model) ────────────────────────────────────────
         self._predictor = MultiTargetPredictor(models_dir=models_dir)
@@ -684,6 +697,7 @@ class SISIntegrator:
             return immigrants
 
         if not self._classifier_ready:
+            self.logger.debug("[SIS] immigrant_provider: skip — classifier_ready=False")
             return immigrants
 
         mode = self._sis_config.get('immigrants_mode', 'full')
@@ -692,6 +706,7 @@ class SISIntegrator:
 
         known_archetypes = set(self._classifier.archetype_labels.keys()) - {-1}
         if not known_archetypes:
+            self.logger.warning("[SIS] immigrant_provider: known_archetypes EMPTY — all labels are noise!")
             return immigrants
 
         pop_inds: List[Individual] = []
@@ -724,8 +739,13 @@ class SISIntegrator:
         try:
             pred_df = self._classifier.predict(feat_df)
             present_archetypes = set(pred_df['archetype'].unique()) - {-1}
+            n_noise = int((pred_df['archetype'] == -1).sum())
+            self.logger.info(
+                f"[SIS] Gen {generation}: predict → {len(present_archetypes)} present archetypes, "
+                f"{n_noise}/{len(pred_df)} classified as noise"
+            )
         except Exception as e:
-            self.logger.debug(f"[SIS] Archetype prediction failed: {e}")
+            self.logger.warning(f"[SIS] Archetype prediction failed: {e}")
             self.log_generation(generation, pop_inds, archetype_coverage)
             return immigrants
 
@@ -765,6 +785,9 @@ class SISIntegrator:
             )
 
         if not target_archetypes:
+            self.logger.info(
+                f"[SIS] Gen {generation}: no missing/underrep archetypes → 0 immigrants"
+            )
             self.log_generation(generation, pop_inds, archetype_coverage)
             return immigrants
 
@@ -788,8 +811,8 @@ class SISIntegrator:
         self._n_immigrants_last = len(immigrants)
 
         if immigrants:
-            self.logger.debug(
-                f"[SIS] Gen {generation} [{state}]: injecting {len(immigrants)} immigrants "
+            self.logger.info(
+                f"[SIS] Gen {generation} [{state}]: injecting {len(immigrants)} corpus immigrants "
                 f"(missing={len(missing_archetypes)}, underrep={len(underrepresented)}, "
                 f"regime={regime or 'none'})"
             )
@@ -953,8 +976,8 @@ class SISIntegrator:
                 if not feat_df_imm.empty:
                     score = self._predictor.predict_quality_score(feat_df_imm)
                     if not score.empty and float(score.iloc[0]) < self._quality_gate_threshold:
-                        self.logger.debug(
-                            f"[SIS] Immigrant (arch={archetype_id}) rejected: "
+                        self.logger.info(
+                            f"[SIS] Immigrant (arch={archetype_id}) REJECTED: "
                             f"quality_score={float(score.iloc[0]):.3f} < {self._quality_gate_threshold}"
                         )
                         return None
