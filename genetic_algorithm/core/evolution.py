@@ -592,9 +592,14 @@ class GeneticAlgorithm:
         return population
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
-        """Load configuration from YAML file."""
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
+        """Load configuration from YAML file, applying schema defaults."""
+        try:
+            from genetic_algorithm.config.schema import load_config as _schema_load
+            return _schema_load(config_path)
+        except Exception:
+            # Fallback: raw YAML load (e.g. during tests with patched _load_config)
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
     
     def _setup_logging(self) -> logging.Logger:
         """Set up logging."""

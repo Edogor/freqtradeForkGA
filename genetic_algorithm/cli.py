@@ -204,7 +204,7 @@ def _cmd_run(args) -> int:
             results = evo.evolve()
         else:
             from genetic_algorithm.core.evolution import GeneticAlgorithm
-            ga = GeneticAlgorithm(config, monitor_enabled=not args.no_monitor)
+            ga = GeneticAlgorithm(str(config_path))
             results = ga.evolve(resume_from=args.resume)
 
         best_fitness = 0.0
