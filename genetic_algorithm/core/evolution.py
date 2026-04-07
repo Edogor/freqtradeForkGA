@@ -48,6 +48,8 @@ from genetic_algorithm.core.culling import StrategyCuller
 from genetic_algorithm.utils.run_diagnostics import RunDiagnostics
 from genetic_algorithm.llm.designer import StrategyDesigner
 from genetic_algorithm.monitor import create_monitor
+from genetic_algorithm.engine.checkpoint import CheckpointManager
+from genetic_algorithm.engine.adaptive import AdaptiveController
 
 
 class GeneticAlgorithm:
@@ -136,6 +138,9 @@ class GeneticAlgorithm:
         self.adaptation_step = ga_config.get('adaptation_step', 0.1)
         self.max_mutation_rate = ga_config.get('max_mutation_rate', 0.65)
         self.mutation_cooldown_factor = ga_config.get('mutation_cooldown_factor', 0.5)
+        
+        # --- Adaptive controller (delegates adaptive mutation + convergence) ---
+        self._adaptive = AdaptiveController(self.config, self.logger)
         
         # --- Evolution tracking state ---
         self.current_generation = 0
@@ -343,15 +348,11 @@ class GeneticAlgorithm:
         storage_config = self.config.get('storage', {})
         self.checkpoint_dir = Path(storage_config.get('checkpoint_dir', 'genetic_algorithm/data/checkpoints'))
         self.checkpoint_interval = storage_config.get('checkpoint_interval', 5)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-        # Clean up stale .tmp files from previous crashes
-        for tmp_file in self.checkpoint_dir.glob('*.tmp'):
-            try:
-                tmp_file.unlink()
-                self.logger.debug(f"Cleaned up stale temp file: {tmp_file}")
-            except Exception as e:
-                self.logger.warning(f"Failed to clean temp file {tmp_file}: {e}")
+        # Delegate checkpoint I/O to CheckpointManager
+        self._checkpoint_mgr = CheckpointManager(
+            self.checkpoint_dir, self.checkpoint_interval, self.logger
+        )
 
     def _setup_holdout(self):
         """Initialise holdout monitoring configuration."""
@@ -637,50 +638,25 @@ class GeneticAlgorithm:
         """
         Save current evolution state to a checkpoint file.
         
-        Saves the full population (all individuals with their genes, fitness,
-        and metrics), the GA state (best individual, generation stats, adaptive
-        params), and the config used.
-        
-        Args:
-            population: Current population to save
-            generation: Current generation number
-            filepath: Optional explicit path. If None, auto-generates in checkpoint_dir.
-            
-        Returns:
-            Path to the saved checkpoint file
+        Delegates to CheckpointManager while preserving the original API.
         """
-        if filepath is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = str(self.checkpoint_dir / f"checkpoint_gen{generation}_{timestamp}.json")
-        
-        checkpoint = {
-            'version': 2,
-            'timestamp': datetime.now().isoformat(),
-            'generation': generation,
+        ga_state = {
+            'best_individual': self.best_individual,
+            'best_fitness_ever': self.best_fitness_ever,
+            'no_improvement_count': self.no_improvement_count,
+            'current_mutation_rate': self.mutation_rate,
+            'base_mutation_rate': self.base_mutation_rate,
+            'catastrophic_restart_needed': self._catastrophic_restart_needed,
             'total_generations': self.generations,
-            'population_size': self.population_size,
-            
-            # Full population state
-            'population': {
-                'size': population.size,
-                'generation': population.generation,
-                'individuals': [ind.to_dict() for ind in population.individuals]
-            },
-            
-            # GA engine state
-            'ga_state': {
-                'best_individual': self.best_individual.to_dict() if self.best_individual else None,
-                'best_fitness_ever': self.best_fitness_ever,
-                'no_improvement_count': self.no_improvement_count,
-                'current_mutation_rate': self.mutation_rate,
-                'base_mutation_rate': self.base_mutation_rate,
-                'catastrophic_restart_needed': self._catastrophic_restart_needed,
-            },
-            
-            # Feature importance tracker state
+            'random_seed': self.random_seed,
+        }
+        config_snapshot = {
+            'genetic_algorithm': self.config.get('genetic_algorithm', {}),
+            'backtesting': self.config.get('backtesting', {}),
+            'walk_forward': self.config.get('walk_forward', {}),
+        }
+        extras = {
             'feature_tracker': self.feature_tracker.to_dict() if hasattr(self, 'feature_tracker') else None,
-            
-            # Holdout monitoring state
             'holdout_state': {
                 'consecutive_bad': self._holdout_consecutive_bad,
                 'degradation_history': list(self._holdout_degradation_history),
@@ -689,78 +665,22 @@ class GeneticAlgorithm:
                     for h in self.generation_holdout_history
                 ],
             },
-            
-            # Adaptive modules state
             'aos_state': self._aos.to_dict() if self._aos.enabled else None,
             'surrogate_state': self._surrogate.to_dict() if self._surrogate.enabled else None,
             'map_elites_state': self._map_elites.to_dict() if self._map_elites.enabled else None,
-            
-            # Generation history (stats)
-            'generation_stats': [
-                {
-                    'generation': s.generation,
-                    'best_fitness': s.best_fitness,
-                    'avg_fitness': s.avg_fitness,
-                    'worst_fitness': s.worst_fitness,
-                    'genetic_diversity': s.genetic_diversity,
-                    'best_raw_fitness': s.best_raw_fitness,
-                    'avg_raw_fitness': s.avg_raw_fitness,
-                }
-                for s in self.generation_stats
-            ],
-            
-            # Config snapshot for reference
-            'config_snapshot': {
-                'genetic_algorithm': self.config.get('genetic_algorithm', {}),
-                'backtesting': self.config.get('backtesting', {}),
-                'walk_forward': self.config.get('walk_forward', {}),
-            },
-            
-            # Random state for reproducible resume
-            'random_state': {
-                'python': random.getstate(),
-            }
         }
-        
-        # Save numpy random state if available (convert ndarray to list for JSON)
-        try:
-            import numpy as np
-            np_state = np.random.get_state()
-            checkpoint['random_state']['numpy'] = (
-                np_state[0],
-                np_state[1].tolist(),
-                int(np_state[2]),
-                int(np_state[3]),
-                float(np_state[4]),
-            )
-        except ImportError:
-            pass
-        
-        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-        
-        # Atomic write: serialize to temp file, then rename (prevents corruption on crash)
-        json_bytes = json.dumps(checkpoint, indent=2, default=str).encode('utf-8')
-        checkpoint['checksum'] = hashlib.sha256(json_bytes).hexdigest()
-        
-        tmp_path = filepath + '.tmp'
-        with open(tmp_path, 'w') as f:
-            json.dump(checkpoint, f, indent=2, default=str)
-        os.replace(tmp_path, filepath)  # atomic on same filesystem
-        
-        self.logger.info(f"[CHECKPOINT] Saved generation {generation} to {filepath}")
-        
-        # Also write legacy checkpoint for web dashboard compatibility
-        try:
-            self._save_legacy_checkpoint(population, generation)
-            self.monitor.on_checkpoint_saved(generation, filepath)
-        except Exception as e:
-            self.logger.debug(f"[CHECKPOINT] Monitor/legacy notification failed: {e}")
-        
-        return filepath
+        return self._checkpoint_mgr.save(
+            population, generation, ga_state, config_snapshot,
+            self.generation_stats, extras=extras, filepath=filepath,
+            monitor=self.monitor,
+        )
     
     def load_checkpoint(self, filepath: str) -> tuple:
         """
         Load evolution state from a checkpoint file.
+        
+        Delegates to CheckpointManager, then restores GA-specific sub-system
+        state on self.
         
         Args:
             filepath: Path to checkpoint JSON file
@@ -768,85 +688,65 @@ class GeneticAlgorithm:
         Returns:
             Tuple of (population, start_generation)
         """
-        self.logger.info(f"[CHECKPOINT] Loading from {filepath}")
-        
-        with open(filepath, 'r') as f:
-            checkpoint = json.load(f)
-        
-        # Verify checksum if present (checkpoint hardening)
-        stored_checksum = checkpoint.pop('checksum', None)
-        if stored_checksum:
-            # Recompute checksum on the data without the checksum field
-            json_bytes = json.dumps(checkpoint, indent=2, default=str).encode('utf-8')
-            computed = hashlib.sha256(json_bytes).hexdigest()
-            if computed != stored_checksum:
-                self.logger.warning(f"[CHECKPOINT] Checksum mismatch! File may be corrupted. "
-                                   f"Expected {stored_checksum[:12]}..., got {computed[:12]}...")
-            else:
-                self.logger.debug("[CHECKPOINT] Checksum verified OK")
-        
-        saved_gen = checkpoint['generation']
-        
-        # Restore population
-        pop_data = checkpoint['population']
-        population = Population(
-            size=pop_data.get('size', self.population_size),
-            generation=pop_data.get('generation', saved_gen)
+        population, start_generation, state = self._checkpoint_mgr.load(
+            filepath, self.population_size
         )
-        
-        for ind_data in pop_data['individuals']:
-            individual = Individual.from_dict(ind_data)
-            population.add_individual(individual)
-        
-        self.logger.info(f"[CHECKPOINT] Restored population: {len(population.individuals)} individuals from generation {saved_gen}")
-        
-        # Restore GA state
-        ga_state = checkpoint.get('ga_state', {})
-        
-        if ga_state.get('best_individual'):
-            self.best_individual = Individual.from_dict(ga_state['best_individual'])
-        
+
+        # Restore GA state onto self
+        ga_state = state.get('ga_state', {})
+
+        best_ind = ga_state.get('best_individual')
+        if best_ind is not None:
+            self.best_individual = best_ind
+
         self.best_fitness_ever = ga_state.get('best_fitness_ever', 0.0)
         self.no_improvement_count = ga_state.get('no_improvement_count', 0)
         self.mutation_rate = ga_state.get('current_mutation_rate', self.mutation_rate)
         self.base_mutation_rate = ga_state.get('base_mutation_rate', self.base_mutation_rate)
         self._catastrophic_restart_needed = ga_state.get('catastrophic_restart_needed', False)
-        
-        # Restore feature importance tracker
-        ft_data = checkpoint.get('feature_tracker')
+
+        # Sync adaptive controller
+        self._adaptive.load_state({
+            'mutation_rate': self.mutation_rate,
+            'base_mutation_rate': self.base_mutation_rate,
+            'no_improvement_count': self.no_improvement_count,
+            'catastrophic_restart_needed': self._catastrophic_restart_needed,
+        })
+
+        # Restore feature tracker
+        ft_data = state.get('feature_tracker')
         if ft_data and hasattr(self, 'feature_tracker'):
             try:
                 self.feature_tracker.load_from_dict(ft_data)
                 self.logger.info(f"[CHECKPOINT] Restored feature tracker ({ft_data.get('total_generations', 0)} generations of data)")
             except Exception as e:
                 self.logger.warning(f"[CHECKPOINT] Failed to restore feature tracker: {e}")
-        
+
         # Restore holdout monitoring state
-        holdout_state = checkpoint.get('holdout_state', {})
+        holdout_state = state.get('holdout_state', {})
         if holdout_state:
             self._holdout_consecutive_bad = holdout_state.get('consecutive_bad', 0)
             self._holdout_degradation_history = holdout_state.get('degradation_history', [])
             self.generation_holdout_history = holdout_state.get('generation_holdout_history', [])
-        
-        # Restore adaptive modules state
-        aos_data = checkpoint.get('aos_state')
+
+        # Restore adaptive modules
+        aos_data = state.get('aos_state')
         if aos_data and self._aos.enabled:
             try:
                 self._aos.load_from_dict(aos_data)
                 self.logger.info("[CHECKPOINT] Restored AOS state")
             except Exception as e:
                 self.logger.warning(f"[CHECKPOINT] Failed to restore AOS state: {e}")
-        
-        me_data = checkpoint.get('map_elites_state')
+
+        me_data = state.get('map_elites_state')
         if me_data and self._map_elites.enabled:
             try:
                 self._map_elites.load_from_dict(me_data)
                 self.logger.info(f"[CHECKPOINT] Restored MAP-Elites archive ({self._map_elites.filled_cells} cells)")
             except Exception as e:
                 self.logger.warning(f"[CHECKPOINT] Failed to restore MAP-Elites state: {e}")
-        
-        # Restore surrogate model counters (model retrains from scratch)
-        surr_data = checkpoint.get('surrogate_state')
+
+        surr_data = state.get('surrogate_state')
         if surr_data and self._surrogate.enabled:
             try:
                 self._surrogate.load_from_dict(surr_data)
@@ -858,65 +758,10 @@ class GeneticAlgorithm:
                 )
             except Exception as e:
                 self.logger.warning(f"[CHECKPOINT] Failed to restore surrogate state: {e}")
-        
+
         # Restore generation stats
-        stats_data = checkpoint.get('generation_stats', [])
-        self.generation_stats = []
-        for s in stats_data:
-            stat = PopulationStats(
-                generation=s.get('generation', 0),
-                size=self.population_size,
-                best_fitness=s.get('best_fitness', 0),
-                avg_fitness=s.get('avg_fitness', 0),
-                worst_fitness=s.get('worst_fitness', 0),
-                best_raw_fitness=s.get('best_raw_fitness'),
-                avg_raw_fitness=s.get('avg_raw_fitness'),
-            )
-            stat.genetic_diversity = s.get('genetic_diversity')
-            self.generation_stats.append(stat)
-        
-        # Log config comparison
-        saved_config = checkpoint.get('config_snapshot', {})
-        saved_pop_size = saved_config.get('genetic_algorithm', {}).get('population_size')
-        if saved_pop_size and saved_pop_size != self.population_size:
-            self.logger.warning(
-                f"[CHECKPOINT] Population size changed: checkpoint={saved_pop_size}, "
-                f"current={self.population_size}. Population will be adjusted."
-            )
-        
-        # Resume from the NEXT generation
-        start_generation = saved_gen + 1
-        self.logger.info(f"[CHECKPOINT] Will resume from generation {start_generation + 1}/{self.generations}")
-        
-        # Restore random state for reproducible resume
-        random_state = checkpoint.get('random_state', {})
-        if 'python' in random_state:
-            try:
-                # JSON deserializes tuples as lists — convert back
-                py_state = random_state['python']
-                random.setstate((
-                    py_state[0],
-                    tuple(py_state[1]),
-                    py_state[2],
-                ))
-                self.logger.debug("[CHECKPOINT] Restored Python random state")
-            except Exception as e:
-                self.logger.warning(f"[CHECKPOINT] Failed to restore Python random state: {e}")
-        if 'numpy' in random_state:
-            try:
-                import numpy as np
-                np_state = random_state['numpy']
-                np.random.set_state((
-                    np_state[0],
-                    np.array(np_state[1], dtype=np.uint32),
-                    int(np_state[2]),
-                    int(np_state[3]),
-                    float(np_state[4]),
-                ))
-                self.logger.debug("[CHECKPOINT] Restored NumPy random state")
-            except Exception as e:
-                self.logger.warning(f"[CHECKPOINT] Failed to restore NumPy random state: {e}")
-        
+        self.generation_stats = state.get('generation_stats', [])
+
         return population, start_generation
     
     # ========================================================================
@@ -2495,74 +2340,28 @@ class GeneticAlgorithm:
         """
         Check if evolution has converged.
         
-        best_fitness_ever is maintained at the [NEW BEST] detection point
-        (before holdout monitoring can corrupt raw_fitness in-place).
-        This method only increments no_improvement_count when no new best
-        was recorded this generation, and handles adaptive mutation.
-        
-        Args:
-            stats: Current generation statistics
-            
-        Returns:
-            True if converged, False otherwise
+        Delegates core adaptive logic to AdaptiveController, then handles
+        LLM-specific escalation that depends on self.strategy_designer.
         """
         if self.best_individual is None:
             return False
         
-        # best_fitness_ever and no_improvement_count are already updated
-        # at the [NEW BEST] detection point (before holdout penalty).
-        # Here we only need to increment no_improvement_count when there
-        # was NO new best this generation.
-        if not getattr(self, '_new_best_this_gen', False):
-            self.no_improvement_count += 1
-        # Reset the flag for next generation
-        self._new_best_this_gen = False
+        # Sync GA flags → controller before check
+        self._adaptive._new_best_this_gen = self._new_best_this_gen
+        self._adaptive.no_improvement_count = self.no_improvement_count
+        self._adaptive.mutation_rate = self.mutation_rate
+        self._adaptive.base_mutation_rate = self.base_mutation_rate
         
-        # Adaptive mutation: increase mutation rate if stuck
-        if self.adaptive_mutation and self.no_improvement_count > 0:
-            # Gradually increase mutation rate when stuck
-            # adaptation_factor = 1.0 + (generations_stuck * adaptation_step)
-            # Capped at max_adaptation_factor (default 2.0 = double the rate)
-            adaptation_factor = min(
-                self.max_adaptation_factor, 
-                1.0 + (self.no_improvement_count * self.adaptation_step)
-            )
-            self.mutation_rate = min(self.max_mutation_rate, self.base_mutation_rate * adaptation_factor)
-            self.logger.info(
-                f"Adaptive mutation: rate increased to {self.mutation_rate:.3f} "
-                f"(factor={adaptation_factor:.2f}, no improvement for {self.no_improvement_count} gens)"
-            )
-        elif self.adaptive_mutation:
-            # Gradual cooldown: exponentially decay back toward base rate
-            # instead of snapping instantly.  This prevents sawtooth oscillation
-            # where a marginal improvement kills all exploratory momentum.
-            cooldown = getattr(self, 'mutation_cooldown_factor', 0.5)
-            excess = self.mutation_rate - self.base_mutation_rate
-            if excess > 1e-6:
-                self.mutation_rate = self.base_mutation_rate + excess * cooldown
-                self.logger.info(
-                    f"Adaptive mutation: cooling down to {self.mutation_rate:.3f} "
-                    f"(cooldown factor={cooldown})"
-                )
-            else:
-                self.mutation_rate = self.base_mutation_rate
-        else:
-            self.mutation_rate = self.base_mutation_rate
+        converged = self._adaptive.check_convergence()
         
-        if self.no_improvement_count >= self.convergence_patience:
-            self.logger.info(f"Converged: No improvement for {self.convergence_patience} generations")
+        # Sync controller state → GA attributes
+        self.no_improvement_count = self._adaptive.no_improvement_count
+        self.mutation_rate = self._adaptive.mutation_rate
+        self._new_best_this_gen = self._adaptive._new_best_this_gen
+        self._catastrophic_restart_needed = self._adaptive._catastrophic_restart_needed
+        
+        if converged:
             return True
-        
-        # Catastrophic restart: when stuck for half the convergence patience,
-        # flag for replacing 40% of the population with random individuals.
-        # The actual replacement happens in evolve() which has population access.
-        half_patience = self.convergence_patience // 2
-        if half_patience > 0 and self.no_improvement_count == half_patience:
-            self._catastrophic_restart_needed = True
-            self.logger.warning(
-                f"[CATASTROPHIC RESTART] Stagnation for {half_patience} gens "
-                f"— flagged for 40% population replacement"
-            )
         
         # LLM stagnation escalation: boost LLM involvement when stuck
         if self.llm_enabled and self.strategy_designer.enabled:
@@ -2570,7 +2369,6 @@ class GeneticAlgorithm:
             escalation_threshold = llm_cfg.get('escalation_threshold', 5)
             
             if self.no_improvement_count >= escalation_threshold:
-                # Escalate: increase immigrant ratio and log
                 base_ratio = llm_cfg.get('immigrant_ratio', 0.5)
                 escalation_ratio = llm_cfg.get('escalation_immigrant_ratio', 0.8)
                 if self.strategy_designer.immigrant_ratio < escalation_ratio:
@@ -2581,7 +2379,6 @@ class GeneticAlgorithm:
                         f"immigrant_ratio {base_ratio:.0%} → {escalation_ratio:.0%}"
                     )
             elif self.no_improvement_count == 0:
-                # Reset to base ratio on improvement
                 base_ratio = llm_cfg.get('immigrant_ratio', 0.5)
                 if self.strategy_designer.immigrant_ratio != base_ratio:
                     self.strategy_designer.immigrant_ratio = base_ratio
