@@ -19,13 +19,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from genetic_algorithm.orchestration.registry import ExperimentRegistry
 
 logger = logging.getLogger(__name__)
 
 _PID_FILE = Path("genetic_algorithm/logs/scheduler.pid")
+_MIN_FREE_MEMORY_MB = 1500
 
 
 class RunScheduler:
@@ -36,13 +37,18 @@ class RunScheduler:
         max_concurrent: int = 5,
         persistent: bool = False,
         poll_interval: int = 30,
+        min_free_memory_mb: int = _MIN_FREE_MEMORY_MB,
     ) -> None:
         self.max_concurrent = max_concurrent
         self.persistent = persistent
         self.poll_interval = poll_interval
+        self.min_free_memory_mb = min_free_memory_mb
         self.registry = ExperimentRegistry()
         self._running = True
         self._child_pids: dict[str, int] = {}  # experiment_id → pid
+        self._launched_count = 0
+        self._completed_count = 0
+        self._failed_count = 0
 
     def run(self) -> None:
         """Main daemon loop.  Blocks until interrupted or no work left."""
@@ -80,6 +86,13 @@ class RunScheduler:
         if slots <= 0:
             return
 
+        if not self._check_memory():
+            logger.warning(
+                "[SCHEDULER] Insufficient free memory (<%d MB); deferring launch",
+                self.min_free_memory_mb,
+            )
+            return
+
         queued = self.registry.list(status="queued", limit=slots)
         for exp in queued:
             eid = exp["experiment_id"]
@@ -111,6 +124,7 @@ class RunScheduler:
                 )
 
             self._child_pids[eid] = proc.pid
+            self._launched_count += 1
             self.registry.start(
                 eid,
                 pid=proc.pid,
@@ -135,9 +149,11 @@ class RunScheduler:
             if exp and exp["status"] == "running":
                 if exit_code == 0:
                     logger.info("Experiment %s finished (exit=0)", eid)
+                    self._completed_count += 1
                     # run command already calls registry.complete()
                 else:
                     logger.warning("Experiment %s exited with code %d", eid, exit_code)
+                    self._failed_count += 1
                     self.registry.fail(eid, error=f"Exit code: {exit_code}")
 
     def _handle_signal(self, signum, frame) -> None:
@@ -157,3 +173,65 @@ class RunScheduler:
         except ProcessLookupError:
             print(f"Scheduler (pid={pid}) not running. Cleaning up PID file.")
             _PID_FILE.unlink(missing_ok=True)
+
+    @property
+    def stats(self) -> Dict[str, Any]:
+        """Current scheduler statistics."""
+        return {
+            "active": len(self._child_pids),
+            "max_concurrent": self.max_concurrent,
+            "launched": self._launched_count,
+            "completed": self._completed_count,
+            "failed": self._failed_count,
+            "queued": self.registry.count(status="queued"),
+            "persistent": self.persistent,
+        }
+
+    def _check_memory(self) -> bool:
+        """Check if there is sufficient free memory to launch a new run."""
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        kb = int(line.split()[1])
+                        return kb // 1024 >= self.min_free_memory_mb
+        except (OSError, ValueError, IndexError):
+            pass
+        # If we can't determine memory, allow launch
+        return True
+
+    def recover_active(self) -> int:
+        """Recover tracking of runs still active in the registry.
+
+        Call on scheduler restart to re-adopt running experiments
+        launched by a previous scheduler instance.
+
+        Returns the number of recovered processes.
+        """
+        running = self.registry.list(status="running")
+        recovered = 0
+        for entry in running:
+            pid = entry.get("pid")
+            exp_id = entry["experiment_id"]
+            if pid and self._is_process_alive(pid):
+                self._child_pids[exp_id] = pid
+                recovered += 1
+                logger.info(
+                    "[SCHEDULER] Recovered active run: %s (PID %d)", exp_id, pid
+                )
+            else:
+                self.registry.fail(exp_id, error="Process not found on recovery")
+                self._failed_count += 1
+                logger.warning(
+                    "[SCHEDULER] Stale run on recovery: %s", exp_id
+                )
+        return recovered
+
+    @staticmethod
+    def _is_process_alive(pid: int) -> bool:
+        """Check if a process is still running."""
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False

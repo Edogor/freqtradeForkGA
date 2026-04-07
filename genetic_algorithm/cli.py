@@ -228,57 +228,17 @@ def _cmd_run(args) -> int:
 
 def _cmd_monitor(args) -> int:
     """Show live monitor of running experiments."""
-    from genetic_algorithm.orchestration.registry import ExperimentRegistry
+    from genetic_algorithm.orchestration.monitor import ExperimentMonitor
 
-    registry = ExperimentRegistry()
+    monitor = ExperimentMonitor(
+        experiment_id=getattr(args, "experiment", None),
+        show_completed=(args.filter in ("all", "completed")),
+    )
 
-    if args.filter == "all":
-        status_filter = None
+    if args.once:
+        monitor.snapshot()
     else:
-        status_filter = args.filter
-
-    import time as _time
-
-    while True:
-        os.system("clear" if os.name != "nt" else "cls")
-
-        experiments = registry.list(
-            status=status_filter,
-            tags=args.tag if args.tag else None,
-        )
-
-        summary = registry.summary()
-        print("=" * 72)
-        print(f"  GA Monitor  |  Running: {summary.get('running', 0)}  "
-              f"Queued: {summary.get('queued', 0)}  "
-              f"Completed: {summary.get('completed', 0)}  "
-              f"Failed: {summary.get('failed', 0)}")
-        print("=" * 72)
-
-        if not experiments:
-            print(f"\n  No experiments with status='{args.filter}'")
-        else:
-            # Header
-            print(f"\n  {'ID':<30} {'Status':<12} {'Gen':<10} "
-                  f"{'Fitness':<10} {'Tags'}")
-            print("  " + "-" * 70)
-
-            for exp in experiments:
-                gen_str = ""
-                if exp.get("generation") is not None:
-                    total = exp.get("generations_total", "?")
-                    gen_str = f"{exp['generation']}/{total}"
-                fit_str = f"{exp['best_fitness']:.4f}" if exp.get("best_fitness") else "-"
-                tags = ", ".join(exp.get("tags", []))
-                print(f"  {exp['experiment_id']:<30} {exp['status']:<12} "
-                      f"{gen_str:<10} {fit_str:<10} {tags}")
-
-        print(f"\n  Refreshing every {args.interval}s (Ctrl+C to exit)")
-
-        if args.once:
-            break
-
-        _time.sleep(args.interval)
+        monitor.run(interval=args.interval)
 
     return 0
 
@@ -389,13 +349,23 @@ def _cmd_experiment(args) -> int:
 def _cmd_data(args) -> int:
     """Data management commands."""
     if args.data_cmd == "report":
-        from genetic_algorithm.orchestration.registry import ExperimentRegistry
-        registry = ExperimentRegistry()
-        summary = registry.summary()
-        total = registry.count()
-        print(f"Experiments: {total}")
-        for status, count in sorted(summary.items()):
-            print(f"  {status}: {count}")
+        from genetic_algorithm.orchestration.lifecycle import DataLifecycle
+        lifecycle = DataLifecycle(dry_run=True)
+        report = lifecycle.report()
+
+        print("Disk Usage Report")
+        print("=" * 50)
+        for cat, size in sorted(report["categories"].items()):
+            if size > 0:
+                from genetic_algorithm.orchestration.lifecycle import _human_bytes
+                print(f"  {cat:<20} {_human_bytes(size):>10}")
+        print(f"  {'TOTAL':<20} {report['total_human']:>10}")
+        print(f"  Files: {report['file_count']}")
+        print()
+        print("Experiments:")
+        for status, count in sorted(report["experiments"].items()):
+            if count > 0:
+                print(f"  {status:<12} {count}")
         return 0
 
     elif args.data_cmd == "cleanup":
