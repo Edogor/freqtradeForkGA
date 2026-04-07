@@ -95,7 +95,6 @@ def main(argv: list[str] | None = None) -> int:
 
     d_clean = d_sub.add_parser("cleanup", help="Clean up old data")
     d_clean.add_argument("--dry-run", action="store_true", help="Preview without deleting")
-    d_clean.add_argument("--force", action="store_true", help="Skip confirmation")
 
     d_sub.add_parser("backfill", help="Backfill registry from existing runs/ data")
 
@@ -390,21 +389,25 @@ def _cmd_experiment(args) -> int:
 def _cmd_data(args) -> int:
     """Data management commands."""
     if args.data_cmd == "report":
-        from genetic_algorithm.orchestration.lifecycle import DataLifecycle
-        lifecycle = DataLifecycle()
-        lifecycle.report()
+        from genetic_algorithm.orchestration.registry import ExperimentRegistry
+        registry = ExperimentRegistry()
+        summary = registry.summary()
+        total = registry.count()
+        print(f"Experiments: {total}")
+        for status, count in sorted(summary.items()):
+            print(f"  {status}: {count}")
         return 0
 
     elif args.data_cmd == "cleanup":
         from genetic_algorithm.orchestration.lifecycle import DataLifecycle
-        lifecycle = DataLifecycle()
-        lifecycle.cleanup(dry_run=args.dry_run, force=args.force)
+        lifecycle = DataLifecycle(dry_run=args.dry_run)
+        result = lifecycle.run()
+        print(f"Archived: {result['archived']}, Deleted: {result['deleted']}"
+              f"{' (dry-run)' if result.get('dry_run') else ''}")
         return 0
 
     elif args.data_cmd == "backfill":
-        from genetic_algorithm.orchestration.lifecycle import DataLifecycle
-        lifecycle = DataLifecycle()
-        lifecycle.backfill_registry()
+        print("Backfill not yet implemented.")
         return 0
 
     else:
