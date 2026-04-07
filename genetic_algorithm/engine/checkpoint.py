@@ -183,25 +183,47 @@ class CheckpointManager:
                 self.logger.debug("[CHECKPOINT] Checksum verified OK")
 
         saved_gen = checkpoint['generation']
+        ckpt_version = checkpoint.get('version', 1)
 
-        # Restore population
-        pop_data = checkpoint['population']
-        population = Population(
-            size=pop_data.get('size', population_size),
-            generation=pop_data.get('generation', saved_gen),
-        )
-        for ind_data in pop_data['individuals']:
+        # Restore population — handle v1 (list) and v2 (dict) formats
+        pop_raw = checkpoint['population']
+        if isinstance(pop_raw, list):
+            # Legacy v1 format: population is a flat list of individual dicts
+            self.logger.debug("[CHECKPOINT] Detected legacy v1 checkpoint format")
+            individuals_data = pop_raw
+            pop_gen = saved_gen
+            pop_size = checkpoint.get('population_size', population_size)
+        else:
+            # v2 format: population is a dict with size/generation/individuals
+            individuals_data = pop_raw['individuals']
+            pop_gen = pop_raw.get('generation', saved_gen)
+            pop_size = pop_raw.get('size', population_size)
+
+        population = Population(size=pop_size, generation=pop_gen)
+        for ind_data in individuals_data:
             population.add_individual(Individual.from_dict(ind_data))
 
         self.logger.info(
             f"[CHECKPOINT] Restored population: {len(population.individuals)} "
-            f"individuals from generation {saved_gen}"
+            f"individuals from generation {saved_gen} (v{ckpt_version} format)"
         )
 
-        # Build state dict for caller to restore
-        ga_state = checkpoint.get('ga_state', {})
-        if ga_state.get('best_individual'):
-            ga_state['best_individual'] = Individual.from_dict(ga_state['best_individual'])
+        # Build state dict — handle v1 (flat keys) and v2 (ga_state sub-dict)
+        if ckpt_version == 1 or 'ga_state' not in checkpoint:
+            # Legacy: ga state fields are top-level keys
+            best_ind_data = checkpoint.get('best_individual')
+            ga_state = {
+                'best_individual': Individual.from_dict(best_ind_data) if best_ind_data else None,
+                'best_fitness_ever': checkpoint.get('best_fitness_ever', 0.0),
+                'no_improvement_count': checkpoint.get('no_improvement_count', 0),
+                'current_mutation_rate': checkpoint.get('mutation_rate', 0.1),
+                'base_mutation_rate': checkpoint.get('mutation_rate', 0.1),
+                'catastrophic_restart_needed': False,
+            }
+        else:
+            ga_state = checkpoint.get('ga_state', {})
+            if ga_state.get('best_individual'):
+                ga_state['best_individual'] = Individual.from_dict(ga_state['best_individual'])
 
         # Restore generation stats
         stats_data = checkpoint.get('generation_stats', [])
