@@ -122,7 +122,7 @@ class TestBuildRemovalCandidates:
 
 class TestApplyRemoval:
     def test_remove_indicator(self):
-        gene = _make_gene(n_indicators=3, n_entry=3, n_exit=1)
+        gene = _make_gene(n_indicators=3, n_entry=3, n_exit=3)
         result = _apply_removal(gene, 'indicator', 0, min_entry_conditions=1)
         assert result is not None
         assert len(result.indicators) == 2
@@ -141,7 +141,10 @@ class TestApplyRemoval:
             generation=0, individual_id=0,
             indicators=indicators,
             entry_conditions=entry_conditions,
-            exit_conditions=[ConditionGene(indicator='RSI_0', operator='>', threshold=70)],
+            exit_conditions=[
+                ConditionGene(indicator='RSI_0', operator='>', threshold=70),
+                ConditionGene(indicator='EMA_0', operator='<', threshold=50),
+            ],
         )
         result = _apply_removal(gene, 'indicator', 0, min_entry_conditions=1)
         assert result is not None

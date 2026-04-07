@@ -6,4 +6,7 @@ from genetic_algorithm.engine.operators.mutation import (  # noqa: F401
     _mutate_indicator_params,
     _mutate_condition_threshold,
     _mutate_regime_gene,
+    _THRESHOLD_CLAMPS,
+    _VALID_REGIME_MODES,
+    _VALID_REGIMES,
 )

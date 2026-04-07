@@ -895,22 +895,22 @@ class TestC1OffspringLoopSafety:
     def test_evolution_source_has_max_attempts_guard(self):
         """Verify the while loop in create_next_generation has a safety counter."""
         import inspect
-        from genetic_algorithm.core.evolution import GeneticAlgorithm
-        source = inspect.getsource(GeneticAlgorithm.create_next_generation)
-        assert 'max_offspring_attempts' in source, (
-            "create_next_generation() missing max_offspring_attempts guard"
+        from genetic_algorithm.engine.generation import GenerationStep
+        source = inspect.getsource(GenerationStep._create_offspring)
+        assert 'max_attempts' in source, (
+            "_create_offspring() missing max_attempts guard"
         )
-        assert '_offspring_loop_iter' in source, (
-            "create_next_generation() missing iteration counter"
+        assert 'attempts' in source, (
+            "_create_offspring() missing iteration counter"
         )
 
     def test_evolution_source_has_unmutated_fallback(self):
         """Verify mutation failure adds unmutated clone as fallback."""
         import inspect
-        from genetic_algorithm.core.evolution import GeneticAlgorithm
-        source = inspect.getsource(GeneticAlgorithm.create_next_generation)
+        from genetic_algorithm.engine.generation import GenerationStep
+        source = inspect.getsource(GenerationStep._create_offspring)
         assert 'ga_offspring_unmutated' in source, (
-            "create_next_generation() missing unmutated clone fallback"
+            "_create_offspring() missing unmutated clone fallback"
         )
 
 

@@ -24,7 +24,7 @@ from genetic_algorithm.core.population import (
     _BEHAVIORAL_DISTANCE_WEIGHT,
     calculate_pairwise_distances,
 )
-import genetic_algorithm.core.population as pop_mod
+import genetic_algorithm.engine.population as pop_mod
 
 
 # ---------------------------------------------------------------------------

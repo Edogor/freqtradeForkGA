@@ -144,7 +144,7 @@ def classify_overfitting(
     )
     
     # Zero-trade strategies cannot be validated — classify as WARNING immediately
-    if metrics.get('no_trades') or metrics.get('num_trades', 0) == 0:
+    if metrics.get('no_trades') or ('num_trades' in metrics and metrics['num_trades'] == 0):
         assessment.overall_label = LABEL_WARNING
         assessment.composite_score = 0.5
         return assessment
