@@ -9,7 +9,6 @@ import os
 import random
 import json
 import hashlib
-import signal
 import yaml
 import time
 from pathlib import Path
@@ -1888,6 +1887,11 @@ class GeneticAlgorithm:
         """
         Run the complete evolution process.
         
+        Delegates to :class:`RunEngine` which handles the loop lifecycle
+        (signals, timing, checkpoints, teardown) while this class provides
+        the per-generation domain logic via :meth:`process_generation` and
+        :meth:`advance_generation`.
+        
         Args:
             resume_from: Optional path to a checkpoint file to resume from.
                         If provided, skips population initialization and continues
@@ -1896,741 +1900,341 @@ class GeneticAlgorithm:
         Returns:
             List of best individuals
         """
-        # Install signal handler for graceful shutdown (SIGINT = Ctrl+C, SIGTERM = kill)
-        original_sigint = signal.getsignal(signal.SIGINT)
-        original_sigterm = signal.getsignal(signal.SIGTERM)
-        
-        def _graceful_shutdown_handler(signum, frame):
-            if self._shutdown_requested:
-                # Second signal = force quit
-                self.logger.warning("[SHUTDOWN] Force quit requested")
-                signal.signal(signal.SIGINT, original_sigint)
-                raise KeyboardInterrupt
-            self.request_shutdown()
-        
-        signal.signal(signal.SIGINT, _graceful_shutdown_handler)
-        signal.signal(signal.SIGTERM, _graceful_shutdown_handler)
-        
-        try:
-            return self._evolve_inner(resume_from)
-        finally:
-            # Restore original signal handlers
-            signal.signal(signal.SIGINT, original_sigint)
-            signal.signal(signal.SIGTERM, original_sigterm)
+        from genetic_algorithm.engine.runner import RunEngine
+        engine = RunEngine(self)
+        return engine.run(resume_from)
     
-    def _evolve_inner(self, resume_from: Optional[str] = None) -> List[Individual]:
-        """Inner evolution loop with checkpoint/resume support."""
-        
-        # Start run diagnostics (CSV, timing, metadata)
-        self.diagnostics.start_run(self.config)
-        
-        # Start terminal monitor (live dashboard)
-        self.monitor.start(self.config)
-        
-        start_gen = 0
-        
-        if resume_from:
-            # Resume from checkpoint
-            self.logger.info("=" * 70)
-            self.logger.info("RESUMING EVOLUTION FROM CHECKPOINT")
-            self.logger.info("=" * 70)
-            population, start_gen = self.load_checkpoint(resume_from)
-            self.logger.info(f"  Resuming at generation {start_gen + 1}/{self.generations}")
-            self.logger.info(f"  Population: {len(population.individuals)} | Best so far: {self.best_fitness_ever:.4f}")
-            self.logger.info(f"  Mutation rate: {self.mutation_rate:.2%} | No-improvement: {self.no_improvement_count}")
-            self.logger.info("=" * 70)
-        else:
-            self.logger.info("=" * 70)
-            self.logger.info("GENETIC ALGORITHM STARTING")
-            self.logger.info("=" * 70)
-            self.logger.info(f"  Population: {self.population_size} | Generations: {self.generations}")
-            self.logger.info(f"  Mutation: {self.mutation_rate:.2%} | Crossover: {self.crossover_rate:.2%} ({self.crossover_method})")
-            self.logger.info(f"  Selection: {self.selection_method} | Elite size: {self.elite_size}")
-            self.logger.info("=" * 70)
-            
-            # Initialize population
-            population = self.initialize_population()
-        
-        # Incremental evolution: re-evaluate existing population on updated data
-        if self._incremental.enabled and not resume_from:
-            inc_pop = self._incremental.resume(self)
-            if inc_pop is not None:
-                population = inc_pop
-                start_gen = self.current_generation
-        
-        # Evolution loop
-        # Initialise Pareto archive (if NSGA-II + archive enabled)
-        archive_config = self.config.get('pareto_archive', {})
-        pareto_archive = None
-        if self.mode == 'nsga2' and archive_config.get('enabled', False):
-            from genetic_algorithm.core.pareto_archive import ParetoArchive
-            pareto_archive = ParetoArchive(
-                max_size=archive_config.get('max_size', 100),
-                decay_rate=archive_config.get('decay_rate', 0.95),
+    def process_generation(self, population: 'Population', gen: int,
+                           pareto_archive=None):
+        """Execute one generation of domain logic.
+
+        Evaluate → post-eval hooks (AOS, surrogate, MAP-Elites, culling,
+        WF validation, DSR, ranking) → stats → best tracking → holdout →
+        extras computation.
+
+        Called by :class:`~genetic_algorithm.engine.runner.RunEngine` each
+        iteration.
+
+        Returns:
+            :class:`~genetic_algorithm.engine.runner.GenerationResult`
+        """
+        from genetic_algorithm.engine.runner import GenerationResult
+
+        # ── Evaluation phase ──
+        self.diagnostics.start_phase('eval')
+        self.monitor.on_phase_start('eval')
+        self.evaluate_population(population)
+        self.diagnostics.end_phase('eval')
+        self.monitor.on_phase_end('eval', self.diagnostics.timing._phases.get('eval', 0.0))
+
+        # AOS credit recording
+        if self._aos.enabled:
+            for ind in population:
+                if not ind.evaluated or ind.fitness is None:
+                    continue
+                m = ind.metrics or {}
+                cx = m.pop('_aos_cx', None)
+                pf = m.pop('_aos_parent_fit', None)
+                if cx is not None and pf is not None:
+                    self._aos.record_outcome('crossover', cx, pf, ind.fitness)
+            self._aos.update_probabilities()
+
+        # Surrogate model training
+        if self._surrogate.enabled:
+            self._surrogate.add_training_data(population)
+            self._surrogate.maybe_retrain()
+
+        # MAP-Elites exploration bonus
+        if self._map_elites.enabled:
+            bonus_count = 0
+            for ind in population:
+                if ind.evaluated and ind.fitness is not None:
+                    bonus = self._map_elites.get_exploration_bonus(ind)
+                    if bonus > 0:
+                        ind.fitness += bonus
+                        bonus_count += 1
+            if bonus_count:
+                self.logger.info(f"[MAP-ELITES] Applied exploration bonus to {bonus_count} individuals")
+            self._map_elites.update(population)
+
+        # Strategy culling
+        if self.culler.enabled:
+            self.culler.cull_population(
+                population, generation=gen, elite_size=self.elite_size,
             )
-            self.logger.info(f"[ARCHIVE] Pareto archive enabled (max_size={pareto_archive.max_size}, decay={pareto_archive.decay_rate})")
 
-        _evolution_start_time = time.time()
-        if self.max_runtime_minutes:
-            self.logger.info(f"  Max runtime: {self.max_runtime_minutes} minutes")
+        # Post-hoc walk-forward validation
+        self._post_hoc_walk_forward_validation(population)
 
-        for gen in range(start_gen, self.generations):
-            self.current_generation = gen
+        # Recompute DSR penalties with global trial count
+        self._apply_global_dsr_penalties(population)
 
-            # ── Time limit check ──
-            if self.max_runtime_minutes:
-                elapsed_min = (time.time() - _evolution_start_time) / 60.0
-                if elapsed_min >= self.max_runtime_minutes:
-                    self.logger.info(
-                        f"[TIME LIMIT] Reached {elapsed_min:.1f} min "
-                        f"(limit: {self.max_runtime_minutes} min) — stopping evolution"
-                    )
-                    self.save_checkpoint(population, max(gen - 1, 0))
-                    break
-
-            # ── External control: stop check ──
-            if self._web_stop_event and self._web_stop_event.is_set():
-                self.logger.info("[WEB] Stop signal received — saving checkpoint and exiting")
-                self.save_checkpoint(population, max(gen - 1, 0))
-                break
-
-            # ── External control: pause check ──
-            if self._web_pause_event and self._web_pause_event.is_set():
-                self.logger.info("[WEB] Paused — waiting for resume signal...")
-                while self._web_pause_event.is_set():
-                    if self._web_stop_event and self._web_stop_event.is_set():
-                        break
-                    import time as _time
-                    _time.sleep(0.5)
-                self.logger.info("[WEB] Resumed")
-                # Re-check stop after resume
-                if self._web_stop_event and self._web_stop_event.is_set():
-                    self.save_checkpoint(population, max(gen - 1, 0))
-                    break
-
-            # ── External control: strategy injection ──
-            if self._web_injection_queue:
-                self._drain_injection_queue(population, gen)
-
-            self.logger.info("")
-            self.logger.info(f"{'─'*70}")
-            self.logger.info(f"GENERATION {gen + 1}/{self.generations}")
-            self.logger.info(f"{'─'*70}")
-            
-            # Start generation timing
-            self.diagnostics.start_generation(gen)
-            self.monitor.on_generation_start(gen, self.generations)
-            
-            # Step 1: Evaluate fitness
-            self.diagnostics.start_phase('eval')
-            self.monitor.on_phase_start('eval')
-            self.evaluate_population(population)
-            self.diagnostics.end_phase('eval')
-            self.monitor.on_phase_end('eval', self.diagnostics.timing._phases.get('eval', 0.0))
-            
-            # Step 1-AOS: Record AOS credits from newly-evaluated offspring
-            if self._aos.enabled:
-                for ind in population:
-                    if not ind.evaluated or ind.fitness is None:
-                        continue
-                    m = ind.metrics or {}
-                    cx = m.pop('_aos_cx', None)
-                    pf = m.pop('_aos_parent_fit', None)
-                    if cx is not None and pf is not None:
-                        self._aos.record_outcome('crossover', cx, pf, ind.fitness)
-                self._aos.update_probabilities()
-            
-            # Step 1-SUR: Feed evaluated strategies to surrogate model
-            if self._surrogate.enabled:
-                self._surrogate.add_training_data(population)
-                self._surrogate.maybe_retrain()
-            
-            # Step 1-MAP: Apply exploration bonus THEN update archive
-            # Bonus must be computed before update(), otherwise individuals
-            # that just filled a cell won't get the bonus (cell already occupied).
-            if self._map_elites.enabled:
-                bonus_count = 0
-                for ind in population:
-                    if ind.evaluated and ind.fitness is not None:
-                        bonus = self._map_elites.get_exploration_bonus(ind)
-                        if bonus > 0:
-                            ind.fitness += bonus
-                            bonus_count += 1
-                if bonus_count:
-                    self.logger.info(f"[MAP-ELITES] Applied exploration bonus to {bonus_count} individuals")
-                self._map_elites.update(population)
-            
-            # Step 1a: Strategy culling (after evaluation, before selection)
-            if self.culler.enabled:
-                self.culler.cull_population(
-                    population, generation=gen, elite_size=self.elite_size,
-                )
-            
-            # Step 1b: Post-hoc walk-forward validation on elites (when parallel + WF)
-            self._post_hoc_walk_forward_validation(population)
-            
-            # Step 1c: Recompute DSR penalties with global trial count
-            # (worker processes have isolated DSRTrackers with too few trials)
-            self._apply_global_dsr_penalties(population)
-            
-            # Step 2: Apply ranking based on mode
-            distance_matrix = None
-            
-            if self.mode == 'nsga2':
-                # NSGA-II: Non-dominated sorting + crowding distance
-                fronts = fast_non_dominated_sort(list(population.individuals))
-                for front in fronts:
-                    crowding_distance_assignment(front)
-                pareto_front = fronts[0] if fronts else []
-                self.logger.info(f"[NSGA-II] {len(fronts)} Pareto fronts, front 1 has {len(pareto_front)} individuals")
-                
-                # Update external archive if enabled
-                if pareto_archive is not None:
-                    pareto_archive.update(list(population.individuals), generation=gen)
-            else:
-                # Single-objective: Compute pairwise distances once for efficiency
-                if self.fitness_sharing or len(population.individuals) >= 2:
-                    distance_matrix = calculate_pairwise_distances(list(population.individuals))
-                
-                # Apply fitness sharing to preserve diversity
-                if self.fitness_sharing:
-                    apply_fitness_sharing(population, sigma_share=self.sharing_radius, 
-                                        distance_matrix=distance_matrix)
-                    self.logger.debug("[FITNESS SHARING] Applied successfully")
-            
-            # Get statistics (reuses distance matrix for genetic diversity)
-            stats = population.get_stats(distance_matrix=distance_matrix)
-            self.generation_stats.append(stats)
-            
-            # Log generation summary
-            summary_parts = [f"Best: {stats.best_fitness:.4f}", f"Avg: {stats.avg_fitness:.4f}"]
-            if stats.genetic_diversity is not None:
-                summary_parts.append(f"Diversity: {stats.genetic_diversity:.4f}")
-            
-            # Resource tracking — log RSS + CPU% for long-running server deployments
-            try:
-                from genetic_algorithm.evaluation.parallel import ParallelEvaluator
-                mem_mb = ParallelEvaluator.get_memory_usage_mb()
-                if mem_mb > 0:
-                    summary_parts.append(f"RSS: {mem_mb:.0f}MB")
-                    stats.memory_mb = mem_mb  # Attach to stats for CSV export
-            except Exception:
-                pass
-            try:
-                import psutil
-                cpu_pct = psutil.Process().cpu_percent(interval=0)
-                summary_parts.append(f"CPU: {cpu_pct:.0f}%")
-            except Exception:
-                pass
-            
-            self.logger.info(f"[STATS] {' | '.join(summary_parts)}")
-            
-            # Update visualization if enabled
-            if self.visualizer:
-                self.visualizer.update(gen, stats, population)
-            
-            # Update best individual
-            best = population.get_best(1)[0]
-            if self._should_update_best_individual(best):
-                self.best_individual = best
-                # Snapshot best_fitness_ever NOW, before holdout monitoring
-                # can modify raw_fitness in-place on this same object reference.
-                pre_penalty_raw = best.raw_fitness
-                if pre_penalty_raw is not None and pre_penalty_raw > self.best_fitness_ever:
-                    self.best_fitness_ever = pre_penalty_raw
-                    # Reset the stuck counter so adaptive mutation cools down
-                    # properly via the exponential decay branch.
-                    self.no_improvement_count = 0
-                    self._new_best_this_gen = True
-                    # Log [NEW BEST] only here — inside the genuine improvement block.
-                    # Previously this was outside the if, causing non-monotonic log entries
-                    # when holdout monitoring reduced raw_fitness in-place on the stored
-                    # best_individual reference, fooling the next-gen comparison.
-                    self.logger.info(f"[NEW BEST] {best.id} with fitness {best.fitness:.4f}")
-                    self.monitor.on_new_best(best)
-                    # Record for dashboard
-                    try:
-                        self._tracker.record_new_best(gen, best.fitness, best.metrics)
-                    except Exception:
-                        pass
-                
-                # Generate trade visualization on improvement
-                if self.trade_visualizer and self.trade_vis_mode == 'improvement':
-                    self._visualize_strategy_trades(best, gen, 0)
-            
-            # Generate trade visualization each generation (for top N)
-            if self.trade_visualizer and self.trade_vis_mode == 'each_generation':
-                top_individuals = population.get_best(self.trade_vis_top_n)
-                for idx, ind in enumerate(top_individuals):
-                    self._visualize_strategy_trades(ind, gen, idx)
-            
-            # Update feature importance tracking
-            try:
-                self.feature_tracker.update(population)
-                if (gen + 1) % 5 == 0 or gen == self.generations - 1:
-                    self.feature_tracker.log_summary(top_n=5)
-                
-                # Inject adaptive indicator weights into config for mutation
-                indicator_weights = self.feature_tracker.get_indicator_weights()
-                if indicator_weights:
-                    self.config['_indicator_weights'] = indicator_weights
-                    self.logger.debug(f"[FEATURE-IMPORTANCE] Updated indicator weights: "
-                                    f"{len(indicator_weights)} indicators")
-                    # Merge SIS enrichment weights
-                    if self._sis_integrator is not None:
-                        sis_weights = self._sis_integrator.get_indicator_weights(indicator_weights)
-                        self.config['_indicator_weights'] = sis_weights
-                        # v3: Inject synergy weights for context-aware mutation
-                        if hasattr(self._sis_integrator, 'get_synergy_weights'):
-                            # Compute synergy weights based on most common indicators
-                            common_inds = self._get_common_indicators(population, top_n=3)
-                            syn_w = self._sis_integrator.get_synergy_weights(common_inds)
-                            if syn_w:
-                                self.config['_synergy_weights'] = syn_w
-                        # Inject operator weights
-                        op_w = self._sis_integrator.get_operator_weights()
-                        if op_w:
-                            self.config['_operator_weights'] = op_w
-            except Exception as e:
-                self.logger.warning(f"Feature importance update failed: {e}")
-                self.monitor.on_error(f"Feature importance update failed: {e}")
-            
-            # Record LLM strategy performance for feedback loop
-            if self.llm_enabled and self.strategy_designer and self.strategy_designer.enabled:
-                try:
-                    self.strategy_designer.record_llm_performance(gen, population)
-                except Exception as e:
-                    self.logger.warning(f"LLM performance recording failed: {e}")
-            
-            try:
-                self.hall_of_fame.update(population, gen)
-            except Exception as e:
-                self.logger.warning(f"Hall of fame update failed: {e}")
-                self.monitor.on_error(f"Hall of fame update failed: {e}")
-            
-            # Update diversity references for correlation-aware fitness
-            self._update_diversity_references(population)
-            
-            # Holdout monitoring — read-only diagnostic (never affects selection)
-            # But CAN trigger early stopping if degradation consistently exceeds threshold
-            self.diagnostics.start_phase('holdout')
-            self.monitor.on_phase_start('holdout')
-            try:
-                self._run_holdout_monitoring(population, gen)
-                
-                # Check holdout-aware early stopping
-                if (self.holdout_early_stop and 
-                    self._holdout_consecutive_bad >= self.holdout_early_stop_checks):
-                    self.logger.info(
-                        f"[HOLDOUT EARLY STOP] Stopping: holdout degradation exceeded "
-                        f"{self.holdout_early_stop_threshold:.0%} for "
-                        f"{self._holdout_consecutive_bad} consecutive checks. "
-                        f"Further evolution is likely overfitting."
-                    )
-                    self.monitor.on_log(
-                        f"Holdout early stop at gen {gen+1}: degradation exceeded threshold "
-                        f"for {self._holdout_consecutive_bad} consecutive checks",
-                        "warning",
-                    )
-                    self.feature_tracker.log_summary()
-                    self.save_checkpoint(population, gen)
-                    break
-            except Exception as e:
-                self.logger.warning(f"Holdout monitoring failed: {e}")
-                self.monitor.on_error(f"Holdout monitoring failed: {e}")
-            self.diagnostics.end_phase('holdout')
-            self.monitor.on_phase_end('holdout', self.diagnostics.timing._phases.get('holdout', 0.0))
-            
-            # ── BUG-1 FIX: Refresh stats after holdout monitoring ──
-            # Holdout monitoring may modify individual fitness values (via penalty).
-            # Recompute stats so that CSV and dashboard reflect post-penalty values.
-            stats = population.get_stats(distance_matrix=distance_matrix)
-            self.generation_stats[-1] = stats  # Replace pre-holdout entry
-            
-            # Record generation diagnostics (CSV row + timing)
-            # Compute new-feature metrics for CSV tracking
-            _extras = {'mutation_rate': self.mutation_rate}
-            try:
-                all_inds = population.get_all() if hasattr(population, 'get_all') else []
-                # Holdout penalty stats
-                penalties = [ind.metrics.get('holdout_penalty', 0) for ind in all_inds if ind.metrics]
-                penalised = [p for p in penalties if p > 0]
-                _extras['holdout_penalties_applied'] = len(penalised)
-                _extras['avg_holdout_penalty'] = round(sum(penalised) / len(penalised), 4) if penalised else 0.0
-                # Unused indicator stats (from fitness eval, stored in metrics)
-                unused_counts = [ind.metrics.get('unused_indicators', 0) for ind in all_inds if ind.metrics]
-                _extras['avg_unused_indicators'] = round(sum(unused_counts) / max(len(unused_counts), 1), 2)
-                # LLM origin counts
-                origins = [ind.metrics.get('origin', '') for ind in all_inds if ind.metrics]
-                _extras['llm_seeds_count'] = sum(1 for o in origins if o == 'llm_seed')
-                _extras['llm_immigrants_count'] = sum(1 for o in origins if o == 'llm_immigrant')
-                # Deflated Sharpe Ratio penalty stats
-                dsr_penalties = [ind.metrics.get('dsr_penalty', 1.0) for ind in all_inds if ind.metrics]
-                if dsr_penalties:
-                    _extras['avg_dsr_penalty'] = round(sum(dsr_penalties) / len(dsr_penalties), 4)
-                    # Find DSR penalty for best individual
-                    best_inds = sorted(
-                        [ind for ind in all_inds if ind.fitness is not None],
-                        key=lambda x: x.fitness, reverse=True,
-                    )
-                    if best_inds:
-                        _extras['best_dsr_penalty'] = round(
-                            best_inds[0].metrics.get('dsr_penalty', 1.0), 4
-                        )
-            except Exception:
-                pass  # Non-critical diagnostics
-
-            # SIS health summary for dashboard
-            if self._sis_integrator is not None:
-                try:
-                    sis_status = self._sis_integrator.get_status_summary()
-                    _extras['sis'] = sis_status
-                    # Emit dedicated SIS event via web monitor
-                    if self._web_monitor and hasattr(self._web_monitor, 'on_sis_health_update'):
-                        self._web_monitor.on_sis_health_update(sis_status)
-                except Exception:
-                    pass  # Non-critical
-
-                # Online learning: feed generation results back
-                if self._sis_integrator is not None:
-                    try:
-                        all_inds_list = list(population.individuals) if hasattr(population, 'individuals') else list(population)
-                        self._sis_integrator.update_from_generation(gen, all_inds_list)
-                    except Exception as e:
-                        self.logger.debug(f"[SIS] Online learning update failed: {e}")
-
-            self.diagnostics.end_generation(
-                gen, stats, population,
-                extras=_extras,
-            )
-            
-            # Update terminal monitor with generation results
-            gen_timing = self.diagnostics.timing.history[-1] if self.diagnostics.timing.history else None
-            # Store population snapshot BEFORE on_generation_end so it's
-            # available when _persist_generation_snapshot runs inside the callback
-            if self._web_monitor and hasattr(self._web_monitor, 'store_population_snapshot'):
-                try:
-                    pop_dicts = [ind.to_dict() for ind in population.individuals]
-                    self._web_monitor.store_population_snapshot(pop_dicts)
-                except Exception as _snap_err:
-                    self.logger.debug(f"Population snapshot failed: {_snap_err}")
-
-            self.monitor.on_generation_end(
-                gen, stats, gen_timing, self.best_individual, extras=_extras
-            )
-            
-            # Persist generation snapshot for dashboard (ExperimentTracker)
-            try:
-                self._tracker.save_generation(gen, stats, population)
-            except Exception as _trk_err:
-                self.logger.debug(f"[TRACKER] Generation save failed: {_trk_err}")
-            
-            # Log walk-forward cache stats periodically
-            try:
-                if hasattr(self.fitness_evaluator, 'log_wf_cache_stats'):
-                    self.fitness_evaluator.log_wf_cache_stats()
-                elif hasattr(self.fitness_evaluator, 'base_evaluator'):
-                    # RegimeAwareEvaluator wraps a FitnessEvaluator
-                    base = self.fitness_evaluator.base_evaluator
-                    if hasattr(base, 'log_wf_cache_stats'):
-                        base.log_wf_cache_stats()
-            except Exception:
-                pass  # Non-critical
-            
-            # Save checkpoint at configured intervals
-            if self.checkpoint_interval > 0 and (gen + 1) % self.checkpoint_interval == 0:
-                self.save_checkpoint(population, gen)
-
-            # ── Disk space check (every generation) ──
-            try:
-                import shutil as _shutil
-                _disk = _shutil.disk_usage(str(self.checkpoint_dir))
-                _free_gb = _disk.free / (1024 ** 3)
-                _min_gb = self.config.get('storage', {}).get('min_disk_gb_runtime', 2.0)
-                if _free_gb < _min_gb:
-                    self.logger.warning(
-                        f"[DISK] Low disk space: {_free_gb:.1f} GB free "
-                        f"(threshold: {_min_gb:.1f} GB). "
-                        f"Saving checkpoint and pausing evolution."
-                    )
-                    checkpoint_path = self.save_checkpoint(population, gen)
-                    self.logger.warning(
-                        f"[DISK] Checkpoint saved: {checkpoint_path}. "
-                        f"Free up disk space and resume with: --resume {checkpoint_path}"
-                    )
-                    break
-            except Exception:
-                pass  # Don't crash on disk check failure
-
-            # Check for graceful shutdown request
-            if self._shutdown_requested:
-                self.logger.info("[SHUTDOWN] Saving checkpoint before shutdown...")
-                checkpoint_path = self.save_checkpoint(population, gen)
-                self.logger.info(f"[SHUTDOWN] Checkpoint saved: {checkpoint_path}")
-                self.logger.info(f"[SHUTDOWN] Resume with: --resume {checkpoint_path}")
-                break
-            
-            # Check convergence
-            if self.check_convergence(stats):
-                self.logger.info("[CONVERGENCE] Evolution converged early")
-                self.monitor.on_log(f"Evolution converged early at gen {gen+1}/{self.generations}", "warning")
-                self.monitor.on_convergence_warning(self.no_improvement_count, self.convergence_patience)
-                self.feature_tracker.log_summary()
-                # Save final checkpoint on convergence too
-                self.save_checkpoint(population, gen)
-                break
-            elif self.no_improvement_count >= self.convergence_patience // 2:
-                self.monitor.on_convergence_warning(self.no_improvement_count, self.convergence_patience)
-            
-            # Catastrophic restart: replace 40% of population with random individuals
-            if self._catastrophic_restart_needed:
-                self._catastrophic_restart_needed = False
-                replace_count = int(self.population_size * 0.4)
-                # Sort by fitness and replace worst 40%
-                sorted_inds = sorted(
-                    list(population.individuals),
-                    key=lambda ind: (ind.raw_fitness if ind.raw_fitness is not None else 0.0),
-                    reverse=True
-                )
-                # Keep the best 60%, replace the rest
-                keep_count = self.population_size - replace_count
-                kept = sorted_inds[:keep_count]
-                from genetic_algorithm.core.population import Population
-                new_pop = Population(size=self.population_size)
-                for ind in kept:
-                    new_pop.add_individual(ind)
-                for i in range(replace_count):
-                    rand_gene = self.strategy_generator.generate_random_strategy(
-                        generation=self.current_generation + 1,
-                        individual_id=keep_count + i
-                    )
-                    new_pop.add_individual(Individual(strategy_gene=rand_gene))
-                population = new_pop
-                # Reset stagnation counter so evolution continues
-                self.no_improvement_count = 0
-                self.mutation_rate = self.base_mutation_rate
-                self.logger.warning(
-                    f"[CATASTROPHIC RESTART] Replaced {replace_count}/{self.population_size} "
-                    f"individuals with random strategies, reset stagnation counter"
-                )
-            
-            # Create next generation
-            if gen < self.generations - 1:  # Don't create next gen on last iteration
-                # Reset per-generation LLM budget
-                if self.llm_enabled and self.strategy_designer.enabled:
-                    self.strategy_designer.reset_generation_budget()
-                
-                self.diagnostics.start_phase('selection')
-                self.monitor.on_phase_start('selection')
-                population = self.create_next_generation(population)
-                self.diagnostics.end_phase('selection')
-                self.monitor.on_phase_end('selection', self.diagnostics.timing._phases.get('selection', 0.0))
-        
-        # Final feature importance report
-        try:
-            self.feature_tracker.log_summary(top_n=10)
-        except Exception as e:
-            self.logger.warning(f"Final feature importance report failed: {e}")
-        
-        # Final hall of fame summary
-        try:
-            hof_summary = self.hall_of_fame.get_summary()
-            if hof_summary['size'] > 0:
-                self.logger.info("")
-                self.logger.info(f"[HALL OF FAME] {hof_summary['size']} strategies archived")
-                self.logger.info(f"  Best: {hof_summary['best_fitness']:.4f}  Avg: {hof_summary['avg_fitness']:.4f}")
-                for i, entry in enumerate(hof_summary['top_5']):
-                    self.logger.info(f"  #{i+1}: fitness={entry['fitness']:.4f}  profit={entry['profit']:.2f}%  sharpe={entry['sharpe']:.2f}")
-        except Exception as e:
-            self.logger.warning(f"Hall of fame summary failed: {e}")
-        
-        # LLM strategy designer summary
-        if self.llm_enabled and self.strategy_designer.enabled:
-            try:
-                llm_stats = self.strategy_designer.get_stats()
-                self.logger.info("")
-                self.logger.info("=" * 60)
-                self.logger.info("LLM USAGE REPORT")
-                self.logger.info("=" * 60)
-                self.logger.info(f"  Total API calls:  {llm_stats['total_requests']}")
-                self.logger.info(f"  Successful:       {llm_stats['successful']}")
-                self.logger.info(f"  Failed:           {llm_stats['failed']}")
-                self.logger.info(f"  Validation fixed: {llm_stats['validation_fixed']}")
-                self.logger.info(f"  Budget used:      {llm_stats.get('calls_this_run', 0)} / {llm_stats.get('budget_remaining', 0) + llm_stats.get('calls_this_run', 0)}")
-                
-                # Per-type breakdown
-                calls_by_type = llm_stats.get('calls_by_type', {})
-                if any(v > 0 for v in calls_by_type.values()):
-                    self.logger.info("  Calls by type:")
-                    for ctype, count in calls_by_type.items():
-                        if count > 0:
-                            self.logger.info(f"    {ctype}: {count}")
-                
-                # LLM vs Random performance comparison
-                perf = llm_stats.get('llm_performance', {})
-                gens_tracked = llm_stats.get('generations_tracked', 0)
-                if gens_tracked > 0:
-                    avg_llm = perf.get('avg_llm_fitness', 0)
-                    avg_rand = perf.get('avg_random_fitness', 0)
-                    best_llm = perf.get('best_llm_fitness', 0)
-                    best_gen = perf.get('best_llm_generation', -1)
-                    advantage = avg_llm - avg_rand
-                    
-                    self.logger.info(f"  [LLM vs RANDOM] Tracked over {gens_tracked} generations:")
-                    self.logger.info(f"    Avg LLM fitness:    {avg_llm:.4f}")
-                    self.logger.info(f"    Avg Random fitness: {avg_rand:.4f}")
-                    self.logger.info(f"    LLM advantage:      {'+' if advantage >= 0 else ''}{advantage:.4f}")
-                    self.logger.info(f"    Best LLM strategy:  {best_llm:.4f} (gen {best_gen})")
-                    
-                    if advantage > 0.05:
-                        self.logger.info("    --> LLM strategies are contributing meaningful value!")
-                    elif advantage < -0.05:
-                        self.logger.info("    --> LLM strategies are underperforming. Consider prompt tuning.")
-                    else:
-                        self.logger.info("    --> LLM strategies performing on par with random.")
-                
-                self.logger.info("=" * 60)
-            except Exception as e:
-                self.logger.warning(f"LLM stats summary failed: {e}")
-        
-        # Save final checkpoint
-        self.save_checkpoint(population, self.current_generation, 
-                            filepath=str(self.checkpoint_dir / "checkpoint_final.json"))
-        
-        # Final summary
-        self.logger.info("")
-        self.logger.info("=" * 70)
-        if self._shutdown_requested:
-            self.logger.info("EVOLUTION PAUSED (graceful shutdown)")
-        else:
-            self.logger.info("EVOLUTION COMPLETE")
-        self.logger.info("=" * 70)
-        self.logger.info(f"  Total generations: {self.current_generation + 1}")
-        
+        # ── Ranking ──
+        distance_matrix = None
         if self.mode == 'nsga2':
-            # NSGA-II: Show Pareto front summary
-            pareto_front = get_pareto_front(list(population.individuals))
-            self.logger.info(f"  Pareto front size: {len(pareto_front)}")
-            self.logger.info("  Top Pareto-optimal strategies:")
-            sorted_front = sorted(pareto_front, key=lambda x: x.objectives[0] if x.objectives else 0, reverse=True)
-            for i, ind in enumerate(sorted_front[:5]):
-                if ind.objectives and ind.metrics:
-                    m = ind.metrics
-                    self.logger.info(f"    {i+1}. {ind.id}: profit={m.get('profit', 0):.2f}%, drawdown={m.get('max_drawdown', 0):.1%}, sharpe={m.get('sharpe_ratio', 0):.2f}")
+            fronts = fast_non_dominated_sort(list(population.individuals))
+            for front in fronts:
+                crowding_distance_assignment(front)
+            pareto_front = fronts[0] if fronts else []
+            self.logger.info(f"[NSGA-II] {len(fronts)} Pareto fronts, front 1 has {len(pareto_front)} individuals")
+            if pareto_archive is not None:
+                pareto_archive.update(list(population.individuals), generation=gen)
         else:
-            # Single-objective: Show best individual
-            if self.best_individual:
-                self.logger.info(f"  Best individual: {self.best_individual.id}")
-                self.logger.info(f"  Best fitness: {self.best_individual.fitness:.4f}")
-                if self.best_individual.metrics:
-                    m = self.best_individual.metrics
-                    self.logger.info(f"  Best profit: {m.get('profit', 0):.2f}% | Win rate: {m.get('win_rate', 0):.1%}")
-        
-        self.logger.info("=" * 70)
-        
-        # Finalize run diagnostics (close CSV, save timing summary)
-        timing_summary = self.diagnostics.end_run(top_strategies=population.get_best(10) if population else None)
-        if timing_summary:
-            self.logger.info(f"[TIMING] {timing_summary}")
-        
-        # Close visualization if enabled
-        if self.visualizer:
-            self.visualizer.close()
-        
-        # Shutdown parallel evaluator pool (free worker processes)
-        if self.parallel_evaluator:
-            self.parallel_evaluator.shutdown()
-        
-        # Stop terminal monitor (prints final summary)
-        self.monitor.on_evolution_complete({
-            'generations': self.current_generation + 1,
-            'best_fitness': self.best_individual.fitness if self.best_individual else None,
-        })
-        
-        # Persist final results for dashboard
+            if self.fitness_sharing or len(population.individuals) >= 2:
+                distance_matrix = calculate_pairwise_distances(list(population.individuals))
+            if self.fitness_sharing:
+                apply_fitness_sharing(population, sigma_share=self.sharing_radius,
+                                    distance_matrix=distance_matrix)
+                self.logger.debug("[FITNESS SHARING] Applied successfully")
+
+        # ── Stats ──
+        stats = population.get_stats(distance_matrix=distance_matrix)
+        self.generation_stats.append(stats)
+
+        summary_parts = [f"Best: {stats.best_fitness:.4f}", f"Avg: {stats.avg_fitness:.4f}"]
+        if stats.genetic_diversity is not None:
+            summary_parts.append(f"Diversity: {stats.genetic_diversity:.4f}")
+
+        # Resource tracking
         try:
-            self._tracker.save_final_results(self.best_individual, self.generation_stats)
-        except Exception as _trk_err:
-            self.logger.debug(f"[TRACKER] Final results save failed: {_trk_err}")
-        
-        # Generate final trade visualizations for top strategies
-        if self.trade_visualizer and self.trade_vis_mode == 'final':
-            self.logger.info("[TRADE VIS] Generating trade charts for top strategies...")
+            from genetic_algorithm.evaluation.parallel import ParallelEvaluator
+            mem_mb = ParallelEvaluator.get_memory_usage_mb()
+            if mem_mb > 0:
+                summary_parts.append(f"RSS: {mem_mb:.0f}MB")
+                stats.memory_mb = mem_mb
+        except Exception:
+            pass
+        try:
+            import psutil
+            cpu_pct = psutil.Process().cpu_percent(interval=0)
+            summary_parts.append(f"CPU: {cpu_pct:.0f}%")
+        except Exception:
+            pass
+
+        self.logger.info(f"[STATS] {' | '.join(summary_parts)}")
+
+        if self.visualizer:
+            self.visualizer.update(gen, stats, population)
+
+        # ── Best individual tracking ──
+        best = population.get_best(1)[0]
+        if self._should_update_best_individual(best):
+            self.best_individual = best
+            pre_penalty_raw = best.raw_fitness
+            if pre_penalty_raw is not None and pre_penalty_raw > self.best_fitness_ever:
+                self.best_fitness_ever = pre_penalty_raw
+                self.no_improvement_count = 0
+                self._new_best_this_gen = True
+                self.logger.info(f"[NEW BEST] {best.id} with fitness {best.fitness:.4f}")
+                self.monitor.on_new_best(best)
+                try:
+                    self._tracker.record_new_best(gen, best.fitness, best.metrics)
+                except Exception:
+                    pass
+
+            if self.trade_visualizer and self.trade_vis_mode == 'improvement':
+                self._visualize_strategy_trades(best, gen, 0)
+
+        if self.trade_visualizer and self.trade_vis_mode == 'each_generation':
             top_individuals = population.get_best(self.trade_vis_top_n)
             for idx, ind in enumerate(top_individuals):
-                self._visualize_strategy_trades(ind, self.current_generation, idx)
-            self.logger.info(f"[TRADE VIS] Generated charts for {len(top_individuals)} strategies")
-        
-        # Run holdout test on best strategies (if configured)
-        holdout_config = self.config.get('holdout_test', {})
-        if holdout_config.get('enabled', False):
-            self._run_holdout_test(population, holdout_config)
-        
-        # Run CPCV post-evolution validation (if configured)
-        cpcv_config = self.config.get('cpcv', {})
-        if cpcv_config.get('enabled', False):
-            self._run_post_evolution_cpcv(population, cpcv_config)
-        
-        # Ensemble co-evolution (optional finishing phase)
-        ensemble_cfg = self.config.get('ensemble', {})
-        if ensemble_cfg.get('enabled', False):
+                self._visualize_strategy_trades(ind, gen, idx)
+
+        # ── Feature importance + SIS ──
+        try:
+            self.feature_tracker.update(population)
+            if (gen + 1) % 5 == 0 or gen == self.generations - 1:
+                self.feature_tracker.log_summary(top_n=5)
+            indicator_weights = self.feature_tracker.get_indicator_weights()
+            if indicator_weights:
+                self.config['_indicator_weights'] = indicator_weights
+                self.logger.debug(f"[FEATURE-IMPORTANCE] Updated indicator weights: "
+                                f"{len(indicator_weights)} indicators")
+                if self._sis_integrator is not None:
+                    sis_weights = self._sis_integrator.get_indicator_weights(indicator_weights)
+                    self.config['_indicator_weights'] = sis_weights
+                    if hasattr(self._sis_integrator, 'get_synergy_weights'):
+                        common_inds = self._get_common_indicators(population, top_n=3)
+                        syn_w = self._sis_integrator.get_synergy_weights(common_inds)
+                        if syn_w:
+                            self.config['_synergy_weights'] = syn_w
+                    op_w = self._sis_integrator.get_operator_weights()
+                    if op_w:
+                        self.config['_operator_weights'] = op_w
+        except Exception as e:
+            self.logger.warning(f"Feature importance update failed: {e}")
+            self.monitor.on_error(f"Feature importance update failed: {e}")
+
+        # LLM performance recording
+        if self.llm_enabled and self.strategy_designer and self.strategy_designer.enabled:
             try:
-                from genetic_algorithm.core.ensemble_evolution import EnsembleEvolver
-                candidates = population.get_best(ensemble_cfg.get('candidate_pool_size', 20))
-                evolver = EnsembleEvolver(self.config, candidates)
-                best_portfolio = evolver.run()
-                if best_portfolio:
-                    self.logger.info("")
-                    self.logger.info("=" * 60)
-                    self.logger.info("ENSEMBLE EVOLUTION RESULTS")
-                    self.logger.info("=" * 60)
-                    self.logger.info(f"  Strategies: {len(best_portfolio.strategy_ids)}")
-                    self.logger.info(f"  Portfolio fitness: {best_portfolio.fitness:.4f}")
-                    pm = best_portfolio.metrics
-                    self.logger.info(f"  Profit: {pm.get('total_profit_pct', 0):.2f}% | "
-                                   f"Sharpe: {pm.get('sharpe_ratio', 0):.2f} | "
-                                   f"Drawdown: {pm.get('max_drawdown', 0):.1%}")
-                    for sid, w in zip(best_portfolio.strategy_ids, best_portfolio.weights):
-                        self.logger.info(f"    {sid}: weight={w:.2%}")
-                    self.logger.info("=" * 60)
+                self.strategy_designer.record_llm_performance(gen, population)
             except Exception as e:
-                self.logger.warning(f"Ensemble co-evolution failed: {e}")
-        
-        # Coevolution finishing phase (optional)
-        if self._coevolution.enabled:
-            try:
-                template = population.get_best(1)[0].strategy_gene if population.individuals else None
-                coevo_genes = self._coevolution.run(template_gene=template)
-                if coevo_genes:
-                    self.logger.info(f"[COEVOLUTION] Produced {len(coevo_genes)} modular strategies")
-            except Exception as e:
-                self.logger.warning(f"Coevolution finishing phase failed: {e}")
-        
-        # Lifecycle manager: register top strategies for monitoring
-        if self._lifecycle.enabled:
-            try:
-                top = population.get_best(5) if population else []
-                for ind in top:
-                    self._lifecycle.register_strategy(
-                        strategy_id=ind.id,
-                        gene_dict=ind.strategy_gene.to_dict(),
-                        metrics=ind.metrics,
+                self.logger.warning(f"LLM performance recording failed: {e}")
+
+        # Hall of Fame
+        try:
+            self.hall_of_fame.update(population, gen)
+        except Exception as e:
+            self.logger.warning(f"Hall of fame update failed: {e}")
+            self.monitor.on_error(f"Hall of fame update failed: {e}")
+
+        # Diversity references
+        self._update_diversity_references(population)
+
+        # ── Holdout monitoring ──
+        should_break = False
+        break_reason = ''
+        self.diagnostics.start_phase('holdout')
+        self.monitor.on_phase_start('holdout')
+        try:
+            self._run_holdout_monitoring(population, gen)
+            if (self.holdout_early_stop and
+                    self._holdout_consecutive_bad >= self.holdout_early_stop_checks):
+                self.logger.info(
+                    f"[HOLDOUT EARLY STOP] Stopping: holdout degradation exceeded "
+                    f"{self.holdout_early_stop_threshold:.0%} for "
+                    f"{self._holdout_consecutive_bad} consecutive checks. "
+                    f"Further evolution is likely overfitting."
+                )
+                self.monitor.on_log(
+                    f"Holdout early stop at gen {gen+1}: degradation exceeded threshold "
+                    f"for {self._holdout_consecutive_bad} consecutive checks",
+                    "warning",
+                )
+                self.feature_tracker.log_summary()
+                self.save_checkpoint(population, gen)
+                should_break = True
+                break_reason = 'holdout_early_stop'
+        except Exception as e:
+            self.logger.warning(f"Holdout monitoring failed: {e}")
+            self.monitor.on_error(f"Holdout monitoring failed: {e}")
+        self.diagnostics.end_phase('holdout')
+        self.monitor.on_phase_end('holdout', self.diagnostics.timing._phases.get('holdout', 0.0))
+
+        # Refresh stats after holdout (penalties may have changed fitness)
+        stats = population.get_stats(distance_matrix=distance_matrix)
+        self.generation_stats[-1] = stats
+
+        # ── Extras for diagnostics CSV ──
+        _extras = {'mutation_rate': self.mutation_rate}
+        try:
+            all_inds = population.get_all() if hasattr(population, 'get_all') else []
+            penalties = [ind.metrics.get('holdout_penalty', 0) for ind in all_inds if ind.metrics]
+            penalised = [p for p in penalties if p > 0]
+            _extras['holdout_penalties_applied'] = len(penalised)
+            _extras['avg_holdout_penalty'] = round(sum(penalised) / len(penalised), 4) if penalised else 0.0
+            unused_counts = [ind.metrics.get('unused_indicators', 0) for ind in all_inds if ind.metrics]
+            _extras['avg_unused_indicators'] = round(sum(unused_counts) / max(len(unused_counts), 1), 2)
+            origins = [ind.metrics.get('origin', '') for ind in all_inds if ind.metrics]
+            _extras['llm_seeds_count'] = sum(1 for o in origins if o == 'llm_seed')
+            _extras['llm_immigrants_count'] = sum(1 for o in origins if o == 'llm_immigrant')
+            dsr_penalties = [ind.metrics.get('dsr_penalty', 1.0) for ind in all_inds if ind.metrics]
+            if dsr_penalties:
+                _extras['avg_dsr_penalty'] = round(sum(dsr_penalties) / len(dsr_penalties), 4)
+                best_inds = sorted(
+                    [ind for ind in all_inds if ind.fitness is not None],
+                    key=lambda x: x.fitness, reverse=True,
+                )
+                if best_inds:
+                    _extras['best_dsr_penalty'] = round(
+                        best_inds[0].metrics.get('dsr_penalty', 1.0), 4
                     )
-                self._lifecycle.save_state()
-                self.logger.info(f"[LIFECYCLE] Registered {len(top)} strategies for monitoring")
+        except Exception:
+            pass
+
+        # SIS health
+        if self._sis_integrator is not None:
+            try:
+                sis_status = self._sis_integrator.get_status_summary()
+                _extras['sis'] = sis_status
+                if self._web_monitor and hasattr(self._web_monitor, 'on_sis_health_update'):
+                    self._web_monitor.on_sis_health_update(sis_status)
+            except Exception:
+                pass
+            try:
+                all_inds_list = list(population.individuals) if hasattr(population, 'individuals') else list(population)
+                self._sis_integrator.update_from_generation(gen, all_inds_list)
             except Exception as e:
-                self.logger.warning(f"Lifecycle registration failed: {e}")
-        
-        # Return top strategies based on mode
-        if self.mode == 'nsga2':
-            # Prefer external archive if available
-            if pareto_archive is not None and pareto_archive.size > 0:
-                self.logger.info(f"[ARCHIVE] Returning {pareto_archive.size} archive members as final solution set")
-                return nsga2_crowded_comparison_sort(pareto_archive.get_archive())[:self.pareto_front_size]
-            # Fall back to last generation's Pareto front
-            pareto_front = get_pareto_front(list(population.individuals))
-            return nsga2_crowded_comparison_sort(pareto_front)[:self.pareto_front_size]
-        else:
-            # Return top by fitness
-            population.sort_by_fitness(reverse=True)
-            return population.get_best(10)
+                self.logger.debug(f"[SIS] Online learning update failed: {e}")
+
+        return GenerationResult(
+            population=population,
+            stats=stats,
+            should_break=should_break,
+            break_reason=break_reason,
+            extras=_extras,
+        )
+
+    def advance_generation(self, population: 'Population', gen: int,
+                           stats) -> tuple:
+        """Post-orchestration domain: convergence → catastrophic restart → next gen.
+
+        Called by :class:`~genetic_algorithm.engine.runner.RunEngine` after
+        post-generation orchestration (diagnostics, checkpoint, resource
+        checks).
+
+        Returns:
+            ``(population, should_break)`` — the (possibly new) population
+            and whether the loop should terminate.
+        """
+        # Convergence check
+        if self.check_convergence(stats):
+            self.logger.info("[CONVERGENCE] Evolution converged early")
+            self.monitor.on_log(
+                f"Evolution converged early at gen {gen+1}/{self.generations}", "warning",
+            )
+            self.monitor.on_convergence_warning(
+                self.no_improvement_count, self.convergence_patience,
+            )
+            self.feature_tracker.log_summary()
+            self.save_checkpoint(population, gen)
+            return population, True
+        elif self.no_improvement_count >= self.convergence_patience // 2:
+            self.monitor.on_convergence_warning(
+                self.no_improvement_count, self.convergence_patience,
+            )
+
+        # Catastrophic restart
+        if self._catastrophic_restart_needed:
+            self._catastrophic_restart_needed = False
+            replace_count = int(self.population_size * 0.4)
+            sorted_inds = sorted(
+                list(population.individuals),
+                key=lambda ind: (ind.raw_fitness if ind.raw_fitness is not None else 0.0),
+                reverse=True,
+            )
+            keep_count = self.population_size - replace_count
+            kept = sorted_inds[:keep_count]
+            from genetic_algorithm.core.population import Population as _Pop
+            new_pop = _Pop(size=self.population_size)
+            for ind in kept:
+                new_pop.add_individual(ind)
+            for i in range(replace_count):
+                rand_gene = self.strategy_generator.generate_random_strategy(
+                    generation=self.current_generation + 1,
+                    individual_id=keep_count + i,
+                )
+                new_pop.add_individual(Individual(strategy_gene=rand_gene))
+            population = new_pop
+            self.no_improvement_count = 0
+            self.mutation_rate = self.base_mutation_rate
+            self.logger.warning(
+                f"[CATASTROPHIC RESTART] Replaced {replace_count}/{self.population_size} "
+                f"individuals with random strategies, reset stagnation counter"
+            )
+
+        # Create next generation
+        if gen < self.generations - 1:
+            if self.llm_enabled and self.strategy_designer.enabled:
+                self.strategy_designer.reset_generation_budget()
+            self.diagnostics.start_phase('selection')
+            self.monitor.on_phase_start('selection')
+            population = self.create_next_generation(population)
+            self.diagnostics.end_phase('selection')
+            self.monitor.on_phase_end(
+                'selection',
+                self.diagnostics.timing._phases.get('selection', 0.0),
+            )
+
+        return population, False
