@@ -50,6 +50,7 @@ from genetic_algorithm.llm.designer import StrategyDesigner
 from genetic_algorithm.monitor import create_monitor
 from genetic_algorithm.engine.checkpoint import CheckpointManager
 from genetic_algorithm.engine.adaptive import AdaptiveController
+from genetic_algorithm.engine.generation import GenerationStep
 
 
 class GeneticAlgorithm:
@@ -228,6 +229,33 @@ class GeneticAlgorithm:
         from genetic_algorithm.core.experiment_tracker import ExperimentTracker
         self._tracker = ExperimentTracker(self.config)
         self._tracker.initialise()
+
+        # --- Generation step delegate ---
+        self._generation_step = GenerationStep(
+            population_size=self.population_size,
+            elite_size=self.elite_size,
+            mode=self.mode,
+            config=self.config,
+            logger=self.logger,
+            strategy_generator=self.strategy_generator,
+            fitness_evaluator=self.fitness_evaluator,
+            parallel_enabled=self.parallel_enabled,
+            parallel_evaluator=getattr(self, 'parallel_evaluator', None),
+            crossover_rate=self.crossover_rate,
+            crossover_method=self.crossover_method,
+            tournament_size=self.tournament_size,
+            selection_method=self.selection_method,
+            allow_self_crossover=self.allow_self_crossover,
+            adaptive_tournament=self.adaptive_tournament,
+            random_immigrants=self.random_immigrants,
+            diversity_threshold=self.diversity_threshold,
+            map_elites=self._map_elites,
+            aos=self._aos,
+            immigrant_provider=self._immigrant_provider,
+            llm_enabled=self.llm_enabled,
+            strategy_designer=getattr(self, 'strategy_designer', None),
+            feature_tracker=self.feature_tracker,
+        )
 
     # ------------------------------------------------------------------
     # Private setup helpers (extracted from __init__ for readability)
@@ -1767,574 +1795,41 @@ class GeneticAlgorithm:
             traceback.print_exc()
     
     def create_next_generation(self, population: Population) -> Population:
-        """
-        Create next generation through selection, crossover, and mutation.
+        """Create next generation through selection, crossover, and mutation.
 
-        Args:
-            population: Current population
-
-        Returns:
-            Next generation population
+        Delegates to :class:`GenerationStep` for the actual work.
         """
-        self.logger.info(f"[STEP] Creating generation {self.current_generation + 1}")
-        # Expose current population on self so immigrant_provider/SIS hooks can read it
+        # Expose current population on self so external hooks can read it
         self.population = population
-        
-        # Track GA operator usage
-        crossover_count = 0
-        mutation_count = 0
-        crossover_failures = 0
-        mutation_failures = 0
-        
-        # Sort by fitness
-        population.sort_by_fitness(reverse=True)
-        
-        # Create next generation
-        next_gen = Population(size=self.population_size, generation=self.current_generation + 1)
-        
-        # Step 1: Elitism - keep top performers
-        # Step 1: Elitism - keep top performers
-        # NSGA-II mode skips raw-fitness elitism: (μ+λ) environmental selection
-        # (_nsga2_environmental_selection) merges parents + offspring and
-        # preserves elite rank-1 individuals via Pareto sorting.  Adding elites
-        # to next_gen here would cause duplicates in the combined pool passed to
-        # environmental selection, biasing crowding distances.
-        if self.mode == 'nsga2':
-            self.logger.debug("[ELITISM] NSGA-II mode: skipping raw-fitness elitism (handled by environmental selection)")
-            elites: list = []
+
+        # Sync mutable state that may have changed since init
+        if self._immigrant_provider:
+            # Wrap (ga, generation) -> (generation) signature for GenerationStep
+            _ga_ref = self
+            _provider = self._immigrant_provider
+            self._generation_step.immigrant_provider = lambda gen: _provider(_ga_ref, gen)
         else:
-            # Use raw_fitness (not shared fitness) to select elites, because
-            # fitness sharing can push strong strategies down artificially.
-            # This ensures the truly best strategy is never lost to sharing noise.
-            self.logger.debug(f"[ELITISM] Preserving top {self.elite_size} individuals (by raw fitness)")
+            self._generation_step.immigrant_provider = None
+        self._generation_step.map_elites = self._map_elites
+        self._generation_step.aos = self._aos
+        self._generation_step.llm_enabled = self.llm_enabled
+        self._generation_step.strategy_designer = getattr(self, 'strategy_designer', None)
 
-            # Select elites by raw_fitness (the un-shared, un-adjusted fitness)
-            ranked_by_raw = sorted(
-                [ind for ind in population.individuals if ind.raw_fitness is not None],
-                key=lambda x: x.raw_fitness,
-                reverse=True,
-            )
-
-            # Diversity-aware elitism: greedily pick top candidates while
-            # ensuring no two elites are near-duplicates (distance < threshold).
-            # When a candidate is too close to an already-selected elite, skip
-            # it and try the next-best individual from the ranked list.
-            from genetic_algorithm.core.population import calculate_strategy_distance
-            diversity_threshold = self.config.get('elite_diversity_threshold', 0.15)
-            elites: list = []
-            for candidate in ranked_by_raw:
-                if len(elites) >= self.elite_size:
-                    break
-                too_close = False
-                for elite in elites:
-                    if calculate_strategy_distance(candidate, elite) < diversity_threshold:
-                        too_close = True
-                        break
-                if not too_close:
-                    elites.append(candidate)
-            # If not enough diverse candidates, fill remaining slots from top
-            if len(elites) < self.elite_size:
-                for candidate in ranked_by_raw:
-                    if len(elites) >= self.elite_size:
-                        break
-                    if candidate not in elites:
-                        elites.append(candidate)
-
-            for individual in elites:
-                gene_copy = individual.strategy_gene.copy()
-                gene_copy.generation = self.current_generation + 1
-                # Preserve self-adaptive mutation rate through elite carry-over
-                if getattr(individual.strategy_gene, 'self_mutation_rate', None) is not None:
-                    gene_copy.self_mutation_rate = individual.strategy_gene.self_mutation_rate
-                    gene_copy.self_crossover_pref = individual.strategy_gene.self_crossover_pref
-                elite_copy = Individual(strategy_gene=gene_copy)
-                # Carry over fitness and metrics to avoid re-evaluation.
-                # If holdout monitoring penalized raw_fitness, restore the
-                # pre-penalty value so that fitness sharing in the next gen
-                # starts from the un-penalized base — otherwise holdout
-                # penalties compound across generations.
-                pre_holdout = getattr(individual, '_pre_holdout_raw_fitness', None)
-                elite_copy.raw_fitness = pre_holdout if pre_holdout is not None else individual.raw_fitness
-                elite_copy.fitness = elite_copy.raw_fitness  # will be re-shared anyway
-                elite_copy.metrics = individual.metrics.copy() if individual.metrics else {}
-                elite_copy.evaluated = True
-                # Enforce min_entry_conditions on elite copies
-                _enforce_min_entry_conditions(elite_copy.strategy_gene, self.config)
-                next_gen.add_individual(elite_copy)
-            self.logger.info(f"[ELITISM] Preserved {self.elite_size} elite individuals")
-
-            # Step 1b: Parsimony pressure — try to simplify elites
-            parsimony_config = self.config.get('parsimony', {})
-            # Pass min_entry_conditions so parsimony respects the configured floor
-            indicator_config = self.config.get('indicators', {})
-            parsimony_config['min_entry_conditions'] = indicator_config.get('min_entry_conditions', 2)
-            if parsimony_config.get('enabled', False):
-                elite_list = list(next_gen.individuals)
-
-                if self.parallel_enabled:
-                    # Use parallel parsimony: evaluate all removal candidates
-                    # concurrently across all elites using ProcessPoolExecutor.
-                    from genetic_algorithm.evaluation.parallel import parallel_parsimony
-
-                    parallel_cfg = self.config.get('parallel_evaluation', {})
-                    num_workers = parallel_cfg.get('num_workers') or (os.cpu_count() - 1)
-                    bt_timeout = parallel_cfg.get('backtest_timeout', 120)
-
-                    removed = parallel_parsimony(
-                        elite_list, parsimony_config, self.config,
-                        num_workers=num_workers,
-                        backtest_timeout=bt_timeout,
-                        evaluator=self.parallel_evaluator,
-                    )
-                else:
-                    # Sequential fallback
-                    from genetic_algorithm.core.parsimony import apply_parsimony_to_elites
-
-                    def _eval_fn(gene):
-                        return self.fitness_evaluator.evaluate(gene)
-
-                    removed = apply_parsimony_to_elites(elite_list, _eval_fn, parsimony_config)
-
-                if removed > 0:
-                    self.logger.info(f"[PARSIMONY] Removed {removed} component(s) from elites")
-        
-        # Helper to calculate next available individual ID
-        def calculate_next_id():
-            return len(next_gen)
-        
-        # Step 2: Inject immigrants (external/LLM + random) to maintain diversity
-        # Get current generation stats to check diversity
-        stats = population.get_stats()
-        immigrant_count = self.random_immigrants
-        
-        # Double immigrant count if diversity is low
-        if stats.genetic_diversity is not None and stats.genetic_diversity < self.diversity_threshold:
-            immigrant_count = self.random_immigrants * 2
-            self.logger.warning(f"[DIVERSITY] Low diversity ({stats.genetic_diversity:.4f}), doubling immigrants to {immigrant_count}")
-        
-        # Collect external immigrants (from provider callback + queued)
+        # Collect and clear queued immigrants
         external_immigrants = list(self._external_immigrants)
         self._external_immigrants.clear()
-        
-        # MAP-Elites diverse injection: sample from underrepresented behavior cells
-        if self._map_elites.enabled and self._map_elites.filled_cells > 0:
-            me_diverse = self._map_elites.sample_diverse(n=self._map_elites.injection_count)
-            for ind in me_diverse:
-                clone = Individual(strategy_gene=ind.strategy_gene.copy())
-                clone.evaluated = False
-                clone.fitness = None
-                clone.raw_fitness = None
-                clone.metrics = {'origin': 'map_elites_injection'}
-                external_immigrants.append(clone)
-            if me_diverse:
-                self.logger.info(f"[MAP-ELITES] Injected {len(me_diverse)} diverse strategies as immigrants")
-        
-        if self._immigrant_provider:
-            try:
-                provider_immigrants = self._immigrant_provider(self, self.current_generation + 1)
-                if provider_immigrants:
-                    external_immigrants.extend(provider_immigrants)
-            except Exception as e:
-                self.logger.warning(f"[IMMIGRANTS] External provider failed: {e}")
-        
-        # LLM immigrants (configurable ratio of immigrant slots)
-        llm_immigrant_count = 0
-        if self.llm_enabled and self.strategy_designer.enabled:
-            llm_immigrant_count = max(1, int(immigrant_count * self.strategy_designer.immigrant_ratio))
-            
-            # Gather context for guided generation (filter out unevaluated individuals with None fitness)
-            top_inds = sorted([ind for ind in population.individuals if ind.fitness is not None],
-                            key=lambda x: x.fitness, reverse=True)[:5]
-            top_summaries = self.strategy_designer.get_top_performer_summaries(top_inds)
-            weaknesses = self.strategy_designer.get_population_weaknesses(top_inds)
-            
-            # Build feedback context for the LLM (performance history + feature importance)
-            feedback = None
-            try:
-                feature_report = self.feature_tracker.get_report()
-                
-                # Calculate plateau status
-                plateau_gens = 0
-                if len(self.generation_stats) >= 2:
-                    for i in range(len(self.generation_stats) - 1, 0, -1):
-                        if abs(self.generation_stats[i].best_fitness - self.generation_stats[i-1].best_fitness) < 0.001:
-                            plateau_gens += 1
-                        else:
-                            break
-                
-                evolution_progress = {
-                    'generation': self.current_generation + 1,
-                    'total_generations': self.generations,
-                    'best_fitness': self.best_fitness_ever,
-                    'plateau_generations': plateau_gens,
-                    'diversity': self.generation_stats[-1].genetic_diversity if self.generation_stats else None,
-                }
-                
-                feedback = self.strategy_designer.build_feedback_context(
-                    feature_report=feature_report,
-                    evolution_progress=evolution_progress,
-                )
-                self.logger.debug(f"[LLM FEEDBACK] Built feedback context with "
-                                f"{len(feedback.get('llm_strategy_results', []))} historical results, "
-                                f"{len(feedback.get('feature_importance', []))} feature scores")
-            except Exception as e:
-                self.logger.warning(f"[LLM FEEDBACK] Failed to build feedback context: {e}")
-            
-            # Use batch generation when enabled and count > 1
-            if self.strategy_designer.batch_enabled and llm_immigrant_count > 1:
-                llm_genes = self.strategy_designer.generate_immigrants_batch(
-                    count=llm_immigrant_count,
-                    generation=self.current_generation + 1,
-                    start_id=calculate_next_id(),
-                    top_performers=top_summaries,
-                    weaknesses=weaknesses,
-                    feedback=feedback,
-                )
-            else:
-                llm_genes = self.strategy_designer.generate_immigrants(
-                    count=llm_immigrant_count,
-                    generation=self.current_generation + 1,
-                    start_id=calculate_next_id(),
-                    top_performers=top_summaries,
-                    weaknesses=weaknesses,
-                    feedback=feedback,
-                )
-            for gene in llm_genes:
-                if len(next_gen) >= self.population_size:
-                    break
-                ind = Individual(strategy_gene=gene)
-                ind.metrics['origin'] = 'llm_immigrant'
-                # Track which LLM provider generated this individual
-                if self.strategy_designer and hasattr(self.strategy_designer, '_last_provider_used'):
-                    ind.metrics['llm_provider'] = self.strategy_designer._last_provider_used
-                external_immigrants.append(ind)
-            llm_immigrant_count = len(llm_genes)
-        
-        # Inject external immigrants first (LLM-generated, seed strategies, queued)
-        immigrants_before = len(next_gen)
-        external_injected = 0
-        for ext_ind in external_immigrants:
-            if len(next_gen) >= self.population_size or external_injected >= immigrant_count:
-                break
-            # Re-tag with current generation
-            ext_ind.strategy_gene.generation = self.current_generation + 1
-            ext_ind.strategy_gene.individual_id = calculate_next_id()
-            ext_ind.evaluated = False  # Force re-evaluation with current config
-            ext_ind.fitness = None
-            ext_ind.raw_fitness = None
-            next_gen.add_individual(ext_ind)
-            external_injected += 1
-        
-        # Fill remaining immigrant slots with random immigrants
-        random_immigrant_slots = max(0, immigrant_count - external_injected)
-        for _ in range(random_immigrant_slots):
-            if len(next_gen) >= self.population_size:
-                break
-            immigrant_gene = self.strategy_generator.generate_random_strategy(
-                generation=self.current_generation + 1,
-                individual_id=calculate_next_id()
-            )
-            next_gen.add_individual(Individual(strategy_gene=immigrant_gene))
-        
-        actual_immigrants_added = len(next_gen) - immigrants_before
-        parts = []
-        if llm_immigrant_count > 0:
-            parts.append(f"{llm_immigrant_count} LLM")
-        if external_injected - llm_immigrant_count > 0:
-            parts.append(f"{external_injected - llm_immigrant_count} external")
-        random_added = actual_immigrants_added - external_injected
-        if random_added > 0:
-            parts.append(f"{random_added} random")
-        self.logger.info(f"[IMMIGRANTS] Added {actual_immigrants_added} immigrants ({', '.join(parts)})")
-        
-        # Helper to create child from parent gene
-        def create_child(parent_gene, ind_id):
-            gene = parent_gene.copy()
-            gene.generation = self.current_generation + 1
-            gene.individual_id = ind_id
-            return Individual(strategy_gene=gene)
-        
-        # Step 3: Create offspring through selection, crossover, and mutation
-        self.logger.debug(f"[OFFSPRING] Creating offspring to fill remaining {self.population_size - len(next_gen)} slots")
-        offspring_count = 0
-        offspring_added = 0
-        
-        # --- Adaptive tournament size ---
-        # When enabled, adjusts selection pressure based on population diversity:
-        #   High diversity → larger tournament (exploit good solutions)
-        #   Low diversity  → smaller tournament (explore more broadly)
-        effective_tournament_size = self.tournament_size
-        if getattr(self, 'adaptive_tournament', False) and stats.genetic_diversity is not None:
-            if stats.genetic_diversity > 0.4:
-                effective_tournament_size = min(self.tournament_size + 2,
-                                                max(3, self.population_size // 2))
-            elif stats.genetic_diversity < self.diversity_threshold:
-                effective_tournament_size = max(2, self.tournament_size - 1)
-            if effective_tournament_size != self.tournament_size:
-                self.logger.info(
-                    f"[ADAPTIVE TOURNAMENT] diversity={stats.genetic_diversity:.3f} "
-                    f"→ tournament_size {self.tournament_size} → {effective_tournament_size}"
-                )
-        
-        max_offspring_attempts = self.population_size * 10
-        _offspring_loop_iter = 0
-        while len(next_gen) < self.population_size:
-            _offspring_loop_iter += 1
-            if _offspring_loop_iter > max_offspring_attempts:
-                self.logger.warning(
-                    f"[OFFSPRING] Reached max attempts ({max_offspring_attempts}). "
-                    f"Population has {len(next_gen)}/{self.population_size} individuals."
-                )
-                break
-            # Select parents using configured method
-            parent1, parent2 = select_parents(
-                population, num_parents=2,
-                method=self.selection_method,
-                tournament_size=effective_tournament_size,
-                allow_duplicates=self.allow_self_crossover
-            )
-            
-            # Pre-calculate IDs for both children before adding them
-            child1_id = len(next_gen)
-            child2_id = len(next_gen) + 1
-            
-            # AOS-driven crossover method selection
-            cx_method = self._aos.select_crossover() if self._aos.enabled else self.crossover_method
-            
-            # Crossover or copy
-            try:
-                if random.random() < self.crossover_rate:
-                    child1, child2 = crossover(
-                        parent1, parent2,
-                        generation=self.current_generation + 1,
-                        ind_id=child1_id,
-                        config=self.config,
-                        method=cx_method
-                    )
-                    crossover_count += 1
-                    # Tag operator for AOS credit tracking
-                    parent_fit = max(parent1.fitness or 0, parent2.fitness or 0)
-                    for c in (child1, child2):
-                        c.metrics['_aos_cx'] = cx_method
-                        c.metrics['_aos_parent_fit'] = parent_fit
-                else:
-                    child1 = create_child(parent1.strategy_gene, child1_id)
-                    child2 = create_child(parent2.strategy_gene, child2_id)
-            except (ValueError, KeyError, AttributeError, TypeError) as e:
-                # If crossover fails, use clones of parents instead
-                self.logger.debug(f"[CROSSOVER] Failed: {e}")
-                crossover_failures += 1
-                try:
-                    child1 = create_child(parent1.strategy_gene, child1_id)
-                    child2 = create_child(parent2.strategy_gene, child2_id)
-                except (ValueError, KeyError, AttributeError, TypeError) as e2:
-                    # Parent genes are corrupted — skip this pair entirely
-                    self.logger.debug(f"[CROSSOVER] Fallback clone also failed: {e2}")
-                    continue
-            
-            # Mutation - call unconditionally, mutate() handles internal probability checks
-            for child in [child1, child2]:
-                if len(next_gen) >= self.population_size:
-                    break
-                try:
-                    child = mutate(child, self.mutation_rate, self.config)
-                    mutation_count += 1
-                    # Validate operators and enforce min conditions after mutation
-                    _fix_invalid_operators(child.strategy_gene)
-                    _enforce_min_entry_conditions(child.strategy_gene, self.config)
-                    # Tag GA-origin for tracking
-                    if 'origin' not in child.metrics:
-                        child.metrics['origin'] = 'ga_offspring'
-                    next_gen.add_individual(child)
-                    offspring_added += 1
-                except (ValueError, KeyError, AttributeError, TypeError) as e:
-                    self.logger.debug(f"[MUTATION] Failed: {e}")
-                    mutation_failures += 1
-                    # Fallback: add unmutated clone to guarantee progress
-                    try:
-                        clone = create_child(child.strategy_gene, len(next_gen))
-                        _fix_invalid_operators(clone.strategy_gene)
-                        clone.metrics['origin'] = 'ga_offspring_unmutated'
-                        next_gen.add_individual(clone)
-                        offspring_added += 1
-                    except Exception:
-                        pass  # Last resort: skip this child entirely
-                    continue
-            
-            offspring_count += 2
-        
-        # Step 3b: Guarantee population size — fill any remaining slots
-        if len(next_gen) < self.population_size:
-            fill_needed = self.population_size - len(next_gen)
-            self.logger.warning(
-                f"[OFFSPRING] Population undersized ({len(next_gen)}/{self.population_size}). "
-                f"Filling {fill_needed} slots with random individuals."
-            )
-            for _fill_i in range(fill_needed):
-                try:
-                    filler_gene = self.strategy_generator.generate_random_strategy(
-                        generation=self.current_generation + 1,
-                        individual_id=len(next_gen),
-                    )
-                    filler_ind = Individual(strategy_gene=filler_gene)
-                    filler_ind.metrics['origin'] = 'random_fill'
-                    next_gen.add_individual(filler_ind)
-                except Exception as e:
-                    self.logger.debug(f"[FILL] Random fill failed: {e}")
-        
-        # Step 4: LLM-guided mutation on top-K offspring
-        # Apply targeted LLM patches to offspring from the best parents,
-        # especially when the GA is stagnating.
-        llm_mutation_count = 0
-        if (self.llm_enabled and self.strategy_designer.enabled
-                and self.strategy_designer.mutation_enabled
-                and self.no_improvement_count >= self.strategy_designer.mutation_stagnation_threshold):
-            # Select top-K elites for LLM-guided mutation
-            top_k = self.strategy_designer.mutation_top_k
-            mutation_prob = self.strategy_designer.mutation_probability
-            
-            # During stagnation escalation, increase mutation probability
-            effective_prob = mutation_prob
-            escalation_threshold = self.config.get('advanced', {}).get('llm', {}).get(
-                'escalation_threshold', 5
-            )
-            if self.no_improvement_count >= escalation_threshold:
-                escalation_prob = self.config.get('advanced', {}).get('llm', {}).get(
-                    'escalation_mutation_probability', 0.25
-                )
-                effective_prob = max(mutation_prob, escalation_prob)
-            
-            # Get top individuals for LLM mutation candidates
-            mutation_candidates = ranked_by_raw[:top_k]
-            
-            for elite in mutation_candidates:
-                if len(next_gen) >= self.population_size:
-                    break
-                if random.random() > effective_prob:
-                    continue
-                
-                try:
-                    metrics = getattr(elite, 'metrics', {}) or {}
-                    # Add strategy complexity info for diagnosis
-                    gene = elite.strategy_gene
-                    metrics_with_complexity = dict(metrics)
-                    metrics_with_complexity['indicator_count'] = len(gene.indicators)
-                    metrics_with_complexity['condition_count'] = (
-                        len(gene.entry_conditions) + len(gene.exit_conditions)
-                    )
-                    metrics_with_complexity['fitness'] = elite.raw_fitness or 0
-                    
-                    mutated_gene = self.strategy_designer.mutate_strategy(
-                        parent_gene=gene,
-                        metrics=metrics_with_complexity,
-                        generation=self.current_generation + 1,
-                        individual_id=len(next_gen),
-                    )
-                    if mutated_gene:
-                        mutated_ind = Individual(strategy_gene=mutated_gene)
-                        mutated_ind.metrics['origin'] = 'llm_mutation'
-                        mutated_ind.metrics['parent_id'] = elite.strategy_gene.individual_id
-                        if self.strategy_designer and hasattr(self.strategy_designer, '_last_provider_used'):
-                            mutated_ind.metrics['llm_provider'] = self.strategy_designer._last_provider_used
-                        next_gen.add_individual(mutated_ind)
-                        llm_mutation_count += 1
-                except Exception as e:
-                    self.logger.debug(f"[LLM MUTATION] Failed: {e}")
-                    # Fallback: apply standard GA mutation so the offspring slot isn't lost
-                    try:
-                        fallback_ind = mutate(elite, self.mutation_rate, self.config)
-                        fallback_ind.strategy_gene.generation = self.current_generation + 1
-                        fallback_ind.strategy_gene.individual_id = len(next_gen)
-                        fallback_ind.metrics = {'origin': 'llm_fallback_mutation'}
-                        next_gen.add_individual(fallback_ind)
-                        mutation_count += 1
-                        self.logger.info(f"[LLM MUTATION] Fell back to GA mutation for elite")
-                    except Exception as e2:
-                        self.logger.warning(f"[LLM MUTATION] GA fallback also failed: {e2}")
-            
-            if llm_mutation_count > 0:
-                self.logger.info(
-                    f"[LLM MUTATION] Applied {llm_mutation_count} LLM-guided mutations "
-                    f"(stagnation: {self.no_improvement_count} gens)"
-                )
-        
-        # Log generation summary
-        parts_log = [f"crossovers: {crossover_count}", f"mutations: {mutation_count}"]
-        if llm_mutation_count > 0:
-            parts_log.append(f"LLM mutations: {llm_mutation_count}")
-        self.logger.info(f"[OFFSPRING] Added {offspring_added} offspring ({', '.join(parts_log)})")
-        if crossover_failures > 0 or mutation_failures > 0:
-            self.logger.warning(f"[FAILURES] Crossover: {crossover_failures}, Mutation: {mutation_failures}")
-        
-        # ── NSGA-II environmental selection ──
-        # In NSGA-II mode, use Pareto-based (μ+λ) survivor selection instead
-        # of returning offspring directly.  Merge parent + offspring populations,
-        # apply non-dominated sorting + crowding distance, and keep the best μ.
-        if self.mode == 'nsga2':
-            next_gen = self._nsga2_environmental_selection(population, next_gen)
-        
-        return next_gen
-    
-    def _nsga2_environmental_selection(self, parents: 'Population', offspring: 'Population') -> 'Population':
-        """
-        NSGA-II (μ+λ) environmental selection.
 
-        Merges parent and offspring populations, performs non-dominated sorting
-        and crowding distance assignment, then selects the top μ individuals
-        using Pareto rank as primary criterion and crowding distance as
-        tie-breaker.  This preserves Pareto-front diversity across generations.
-
-        Args:
-            parents: Current generation population (μ evaluated individuals)
-            offspring: Newly created offspring population (λ individuals)
-
-        Returns:
-            Next-generation population of size self.population_size
-        """
-        # Merge parents + offspring — only include evaluated individuals
-        combined = [ind for ind in parents.individuals if ind.objectives is not None]
-        combined += [ind for ind in offspring.individuals if ind.objectives is not None]
-
-        # Also keep unevaluated offspring (they still need evaluation next gen)
-        unevaluated = [ind for ind in offspring.individuals if ind.objectives is None]
-
-        if not combined:
-            self.logger.warning("[NSGA-II ENV] No evaluated individuals — returning offspring as-is")
-            return offspring
-
-        # Non-dominated sorting on the combined population
-        fronts = fast_non_dominated_sort(combined)
-        for front in fronts:
-            crowding_distance_assignment(front)
-
-        # Fill next generation front-by-front
-        next_gen = Population(size=self.population_size, generation=offspring.generation)
-        for front in fronts:
-            if len(next_gen) + len(front) <= self.population_size:
-                # Entire front fits — add all
-                for ind in front:
-                    ind.strategy_gene.generation = offspring.generation
-                    next_gen.add_individual(ind)
-            else:
-                # Partial front — sort by crowding distance (descending) and fill
-                front_sorted = sorted(front, key=lambda x: x.crowding_distance, reverse=True)
-                remaining = self.population_size - len(next_gen)
-                for ind in front_sorted[:remaining]:
-                    ind.strategy_gene.generation = offspring.generation
-                    next_gen.add_individual(ind)
-                break
-
-        # If we still have room, add unevaluated offspring
-        for ind in unevaluated:
-            if len(next_gen) >= self.population_size:
-                break
-            next_gen.add_individual(ind)
-
-        self.logger.info(
-            f"[NSGA-II ENV] (μ+λ) selection: {len(combined)} combined → "
-            f"{len(next_gen)} survivors across {len(fronts)} fronts"
+        next_gen, _op_stats = self._generation_step.execute(
+            population,
+            current_generation=self.current_generation,
+            mutation_rate=self.mutation_rate,
+            external_immigrants=external_immigrants,
+            no_improvement_count=self.no_improvement_count,
+            best_fitness_ever=self.best_fitness_ever,
+            generation_stats=self.generation_stats,
         )
         return next_gen
+    
     
     def check_convergence(self, stats: PopulationStats) -> bool:
         """
