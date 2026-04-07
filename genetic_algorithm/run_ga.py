@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from genetic_algorithm.core.evolution import GeneticAlgorithm
 from genetic_algorithm.strategies.generator import StrategyGenerator
 import yaml
+from genetic_algorithm.config.schema import load_config as _schema_load_config
 
 
 # ============================================================================
@@ -129,23 +130,15 @@ def setup_logging(monitor_active: bool = False):
 
 def load_and_update_config(config_path) -> dict:
     """
-    Load configuration from YAML file.
+    Load configuration from YAML file, applying schema defaults.
     
     Args:
         config_path: Path to configuration file (string or Path object)
         
     Returns:
-        Configuration dictionary loaded from file
+        Configuration dictionary with defaults applied and validated
     """
-    config_path = Path(config_path)
-    
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    # All configuration is now read from the config file
-    # No more hardcoded overrides - edit the config file to change parameters
-    
-    return config
+    return _schema_load_config(config_path)
 
 
 def print_banner():
@@ -168,23 +161,28 @@ def print_configuration(config: dict):
     print("=" * 80)
     print()
     print("Genetic Algorithm Parameters:")
-    print(f"  Population Size:    {ga_config['population_size']}")
-    print(f"  Generations:        {ga_config['generations']}")
-    print(f"  Mutation Rate:      {ga_config['mutation_rate']:.2%}")
-    print(f"  Crossover Rate:     {ga_config['crossover_rate']:.2%}")
-    print(f"  Elite Size:         {ga_config['elite_size']}")
-    print(f"  Selection Method:   {ga_config['selection_method']}")
+    print(f"  Population Size:    {ga_config.get('population_size', 'N/A')}")
+    print(f"  Generations:        {ga_config.get('generations', 'N/A')}")
+    mutation_rate = ga_config.get('mutation_rate')
+    print(f"  Mutation Rate:      {mutation_rate:.2%}" if mutation_rate is not None else "  Mutation Rate:      (default)")
+    crossover_rate = ga_config.get('crossover_rate')
+    print(f"  Crossover Rate:     {crossover_rate:.2%}" if crossover_rate is not None else "  Crossover Rate:     (default)")
+    print(f"  Elite Size:         {ga_config.get('elite_size', 'N/A')}")
+    print(f"  Selection Method:   {ga_config.get('selection_method', 'tournament')}")
     print()
     
-    backtest_config = config['backtesting']
+    backtest_config = config.get('backtesting', {})
     print("Backtesting Configuration:")
-    print(f"  Trading Pairs:      {', '.join(backtest_config['pairs'])}")
-    print(f"  Stake Amount:       {backtest_config['stake_amount']}")
-    print(f"  Max Open Trades:    {backtest_config['max_open_trades']}")
-    print(f"  Fee:                {backtest_config['fee']:.3%}")
+    print(f"  Trading Pairs:      {', '.join(backtest_config.get('pairs', []))}")
+    stake = backtest_config.get('stake_amount')
+    print(f"  Stake Amount:       {stake}" if stake is not None else "  Stake Amount:       (default)")
+    fee = backtest_config.get('fee')
+    print(f"  Fee:                {fee:.3%}" if fee is not None else "  Fee:                (default)")
+    max_trades = backtest_config.get('max_open_trades')
+    print(f"  Max Open Trades:    {max_trades}" if max_trades is not None else "  Max Open Trades:    (default)")
     print()
     
-    fitness_weights = config['fitness_weights']
+    fitness_weights = config.get('fitness_weights', {})
     print("Fitness Weights:")
     for fw_key, fw_label in [
         ('profit', 'Profit'), ('profit_factor', 'Profit Factor'),

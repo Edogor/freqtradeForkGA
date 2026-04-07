@@ -94,8 +94,27 @@ DEFAULTS: Dict[str, Any] = {
         "pair_loss_threshold": -8.0,
     },
 
+    # === Indicators ===
+    "indicators": {
+        "available": [
+            "RSI", "MACD", "BBANDS", "EMA", "SMA", "ADX",
+            "SUPERTREND", "PSAR", "CMF",
+            "CDL_ENGULFING", "CDL_HAMMER", "CDL_DOJI",
+        ],
+        "min_per_strategy": 2,
+        "max_per_strategy": 5,
+        "min_entry_conditions": 2,
+        "max_entry_conditions": 4,
+        "min_exit_conditions": 1,
+        "max_exit_conditions": 3,
+    },
+
     # === Strategy constraints ===
     "strategy_constraints": {
+        "timeframes": ["5m", "15m", "1h"],
+        "stoploss_range": [-0.20, -0.05],
+        "roi_range": [0.01, 0.10],
+        "max_open_trades_range": [1, 5],
         "min_indicators": 2,
         "max_indicators": 8,
         "min_entry_conditions": 1,
