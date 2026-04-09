@@ -169,7 +169,7 @@ if [[ "$DRY_RUN" == true ]]; then
     echo ""
     echo "Would launch:"
     for i in "${!EXPERIMENT_NAMES[@]}"; do
-        echo "  python genetic_algorithm/run_ga.py --config ${CONFIG_FILES[$i]} --no-monitor --yes"
+        echo "  python -m genetic_algorithm run ${CONFIG_FILES[$i]} --no-monitor --yes"
     done
     echo ""
     echo -e "${GREEN}All configs validated. Ready to launch.${NC}"
@@ -209,8 +209,7 @@ for i in "${!CONFIG_FILES[@]}"; do
     export GA_OUTPUT_DIR="${exp_output}"
 
     # Launch in a new process group (setsid) so parent signals don't kill children
-    setsid python genetic_algorithm/run_ga.py \
-        --config "$config" \
+    setsid python -m genetic_algorithm run "$config" \
         --no-monitor --yes \
         > "${exp_log}" 2>&1 &
 

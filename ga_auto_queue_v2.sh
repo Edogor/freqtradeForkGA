@@ -392,8 +392,7 @@ launch_experiment() {
     # Launch with setsid for process isolation
     export GA_OUTPUT_DIR="${exp_output}"
 
-    setsid python genetic_algorithm/run_ga.py \
-        --config "$done_path" \
+    setsid python -m genetic_algorithm run "$done_path" \
         --no-monitor --yes \
         > "${exp_log}" 2>&1 &
 

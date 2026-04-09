@@ -74,8 +74,7 @@ if [[ -f "${VENV_DIR}/bin/activate" ]]; then
     source "${VENV_DIR}/bin/activate"
 fi
 
-setsid python genetic_algorithm/run_ga.py \
-    --config "${CONFIG}" \
+setsid python -m genetic_algorithm run "${CONFIG}" \
     --resume "${NEW_CKPT}" \
     --no-monitor --yes \
     > "${NEW_LOG}" 2>&1 &

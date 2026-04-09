@@ -104,8 +104,7 @@ run_single() {
     mkdir -p "$GA_OUTPUT_DIR"
 
     # Run the GA
-    python genetic_algorithm/run_ga.py \
-        --config "$config_file" \
+    python -m genetic_algorithm run "$config_file" \
         --no-monitor --yes \
         2>&1 | tee "${log_file}" || true
 

@@ -31,8 +31,7 @@ run_experiment() {
     echo "================================================================"
     echo ""
 
-    python genetic_algorithm/run_ga.py \
-        --config "$config" \
+    python -m genetic_algorithm run "$config" \
         --yes \
         --no-monitor \
         2>&1 | tee "$logfile"

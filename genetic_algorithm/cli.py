@@ -61,7 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     q_sub = p_queue.add_subparsers(dest="queue_cmd")
 
     q_add = q_sub.add_parser("add", help="Add configs to the queue")
-    q_add.add_argument("configs", nargs="+", help="Config files to queue")
+    q_add.add_argument("configs", nargs="*", help="Config files to queue")
+    q_add.add_argument("--dir", dest="config_dir", help="Queue all YAML files from a directory")
     q_add.add_argument("--tag", action="append", default=[], help="Tags for queued experiments")
     q_add.add_argument("--priority", type=int, default=50, help="Priority (lower = sooner)")
 
@@ -98,6 +99,21 @@ def main(argv: list[str] | None = None) -> int:
 
     d_sub.add_parser("backfill", help="Backfill registry from existing runs/ data")
 
+    # --- config ---
+    p_cfg = sub.add_parser("config", help="Config management and validation")
+    c_sub = p_cfg.add_subparsers(dest="config_cmd")
+
+    c_validate = c_sub.add_parser("validate", help="Validate a config file")
+    c_validate.add_argument("config", help="Path to YAML config file")
+    c_validate.add_argument("--strict", action="store_true", help="Treat warnings as errors")
+
+    c_list = c_sub.add_parser("list", help="List available presets and benchmark configs")
+    c_list.add_argument("--benchmarks", action="store_true", help="Include benchmark configs")
+    c_list.add_argument("--all", action="store_true", help="Include legacy ga_config_* files")
+
+    c_show = c_sub.add_parser("show", help="Show resolved config (defaults + preset + overrides)")
+    c_show.add_argument("config", help="Path or preset name")
+
     # --- serve ---
     p_serve = sub.add_parser("serve", help="Start web dashboard server")
     p_serve.add_argument("--host", default="0.0.0.0")
@@ -129,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_experiment(args)
         elif args.command == "data":
             return _cmd_data(args)
+        elif args.command == "config":
+            return _cmd_config(args)
         elif args.command == "serve":
             return _cmd_serve(args)
         else:
@@ -249,7 +267,21 @@ def _cmd_queue(args) -> int:
 
     if args.queue_cmd == "add":
         registry = ExperimentRegistry()
-        for config_path in args.configs:
+        config_files = list(args.configs or [])
+
+        # Discover configs from directory
+        if args.config_dir:
+            dir_path = Path(args.config_dir)
+            if not dir_path.is_dir():
+                print(f"  ERROR: {args.config_dir} is not a directory")
+                return 1
+            config_files.extend(str(p) for p in sorted(dir_path.glob("*.yaml")))
+
+        if not config_files:
+            print("  No configs specified. Use positional args or --dir.")
+            return 1
+
+        for config_path in config_files:
             path = Path(config_path)
             if not path.exists():
                 print(f"  WARNING: {config_path} not found, skipping")
@@ -397,6 +429,105 @@ def _cmd_serve(args) -> int:
     except ImportError as e:
         print(f"Web dependencies not installed: {e}")
         print("Install with: pip install uvicorn fastapi")
+        return 1
+
+
+def _cmd_config(args) -> int:
+    """Config management commands."""
+    if args.config_cmd == "validate":
+        from genetic_algorithm.config.schema import load_config, validate_config, resolve_preset, deep_merge, DEFAULTS
+        import yaml as _yaml
+
+        config_path = Path(args.config)
+        if not config_path.exists():
+            print(f"ERROR: {args.config} not found")
+            return 1
+
+        try:
+            with open(config_path) as fh:
+                raw = _yaml.safe_load(fh) or {}
+        except _yaml.YAMLError as e:
+            print(f"ERROR: Invalid YAML: {e}")
+            return 1
+
+        # Resolve preset + merge defaults, then validate
+        try:
+            resolved = resolve_preset(raw.copy())
+            config = deep_merge(DEFAULTS, resolved)
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}")
+            return 1
+
+        errors, warnings = validate_config(config)
+
+        # Also run preflight validator if available
+        try:
+            from genetic_algorithm.utils.config_validator import validate_ga_config
+            extra_errors, extra_warnings = validate_ga_config(config)
+            errors.extend(extra_errors)
+            warnings.extend(extra_warnings)
+        except ImportError:
+            pass
+
+        # Report
+        if not errors and not warnings:
+            print(f"✓ {args.config}: Valid (no errors, no warnings)")
+            return 0
+
+        if warnings:
+            print(f"⚠ {args.config}: {len(warnings)} warning(s)")
+            for w in warnings:
+                print(f"  WARN: {w}")
+
+        if errors:
+            print(f"✗ {args.config}: {len(errors)} error(s)")
+            for e in errors:
+                print(f"  ERROR: {e}")
+            return 1
+
+        return 1 if args.strict else 0
+
+    elif args.config_cmd == "list":
+        presets_dir = Path("genetic_algorithm/config/presets")
+        benchmark_dir = Path("genetic_algorithm/config/benchmark")
+        legacy_dir = Path("genetic_algorithm/config")
+
+        print("Presets (use with: python -m genetic_algorithm run <name>):")
+        for p in sorted(presets_dir.glob("*.yaml")):
+            print(f"  {p.stem:<20} {p}")
+
+        if args.benchmarks or args.all:
+            print("\nBenchmark configs:")
+            for p in sorted(benchmark_dir.glob("*.yaml")):
+                print(f"  {p.stem:<40} {p}")
+
+        if args.all:
+            print(f"\nLegacy configs ({legacy_dir}):")
+            for p in sorted(legacy_dir.glob("ga_config_*.yaml")):
+                print(f"  {p.name}")
+
+        return 0
+
+    elif args.config_cmd == "show":
+        from genetic_algorithm.config.schema import load_config
+        import yaml as _yaml
+
+        config_path = Path(args.config)
+        if not config_path.exists():
+            # Try as preset name
+            preset_path = Path("genetic_algorithm/config/presets") / f"{args.config}.yaml"
+            if preset_path.exists():
+                config_path = preset_path
+            else:
+                print(f"Config not found: {args.config}")
+                return 1
+
+        config = load_config(config_path)
+        print(_yaml.dump(config, default_flow_style=False, sort_keys=False))
+        return 0
+
+    else:
+        print("Usage: python -m genetic_algorithm config {validate|list|show}")
         return 1
 
 
