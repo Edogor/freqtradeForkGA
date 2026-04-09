@@ -100,10 +100,11 @@ class BacktestResult:
 
 class BacktestCache:
     """
-    Cache for backtest results with LRU disk eviction to prevent unbounded growth.
+    Cache for backtest results with LRU eviction for both memory and disk.
     """
     
-    def __init__(self, cache_dir: Optional[Path] = None, max_disk_mb: int = 5000):
+    def __init__(self, cache_dir: Optional[Path] = None, max_disk_mb: int = 5000,
+                 max_memory_entries: int = 300):
         """
         Initialize cache.
         
@@ -111,10 +112,14 @@ class BacktestCache:
             cache_dir: Directory to store cache files
             max_disk_mb: Maximum disk cache size in MB (default 5 GB).
                          When exceeded, oldest files are evicted.
+            max_memory_entries: Maximum number of results kept in RAM.
+                                When exceeded, least-recently-used entries are
+                                dropped (they remain on disk). Default 300.
         """
         self.cache_dir = cache_dir or Path("genetic_algorithm/data/cache")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.cache: Dict[str, BacktestResult] = {}
+        self.cache: OrderedDict[str, BacktestResult] = OrderedDict()
+        self.max_memory_entries = max_memory_entries
         self.max_disk_bytes = max_disk_mb * 1024 * 1024
         
     def _get_cache_key(self, strategy_code: str, config: Dict[str, Any]) -> str:
@@ -145,8 +150,9 @@ class BacktestCache:
         """
         cache_key = self._get_cache_key(strategy_code, config)
         
-        # Check memory cache
+        # Check memory cache — move to end to mark as recently used
         if cache_key in self.cache:
+            self.cache.move_to_end(cache_key)
             logger.debug(f"Cache hit (memory): {cache_key[:8]}...")
             return self.cache[cache_key]
         
@@ -157,13 +163,21 @@ class BacktestCache:
                 with open(cache_file, 'r') as f:
                     data = json.load(f)
                     result = BacktestResult(**data)
-                    self.cache[cache_key] = result
+                    self._memory_put(cache_key, result)
                     logger.debug(f"Cache hit (disk): {cache_key[:8]}...")
                     return result
             except Exception as e:
                 logger.warning(f"Failed to load cache file: {e}")
         
         return None
+    
+    def _memory_put(self, cache_key: str, result: BacktestResult):
+        """Insert into memory cache, evicting the LRU entry when over the limit."""
+        self.cache[cache_key] = result
+        self.cache.move_to_end(cache_key)
+        while len(self.cache) > self.max_memory_entries:
+            evicted_key, _ = self.cache.popitem(last=False)  # oldest entry
+            logger.debug(f"[CACHE] Evicted LRU memory entry: {evicted_key[:8]}…")
     
     def put(self, strategy_code: str, config: Dict[str, Any], result: BacktestResult):
         """
@@ -176,8 +190,8 @@ class BacktestCache:
         """
         cache_key = self._get_cache_key(strategy_code, config)
         
-        # Store in memory cache
-        self.cache[cache_key] = result
+        # Store in LRU-bounded memory cache
+        self._memory_put(cache_key, result)
         
         # Store in disk cache
         cache_file = self.cache_dir / f"{cache_key}.json"

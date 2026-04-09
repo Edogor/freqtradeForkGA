@@ -122,6 +122,8 @@ class MultiTargetPredictor:
         self._use_interactions: bool = True
         # Quartile thresholds for classification (saved for predict-time)
         self._quartile_thresholds: Dict[str, float] = {}
+        # Percentile anchors for regression normalization (p5, p95 from training data)
+        self._regression_percentiles: Dict[str, Tuple[float, float]] = {}
 
     @property
     def _all_feature_columns(self) -> List[str]:
@@ -288,6 +290,12 @@ class MultiTargetPredictor:
                 "n_train": n_train, "n_test": n_test, "type": "regression",
             }
             results[target] = self.metrics[target]
+
+            # Store p5/p95 from training predictions for absolute normalization
+            train_preds = model.predict(X_train[train_mask.values])
+            p5 = float(np.percentile(train_preds, 5))
+            p95 = float(np.percentile(train_preds, 95))
+            self._regression_percentiles[target] = (p5, p95)
 
             importances = model.feature_importances_
             fi_df = pd.DataFrame({
@@ -462,7 +470,12 @@ class MultiTargetPredictor:
         n_models = 0
 
         # Classification probabilities (0-1, already calibrated)
+        # clf_overfit_risk is excluded: it has AUC~0.50 in practice (near-random)
+        # and contributes noise rather than signal to the quality score.
+        _EXCLUDED_CLASSIFIERS = {"clf_overfit_risk"}
         for clf_name, clf_model in self.classifiers.items():
+            if clf_name in _EXCLUDED_CLASSIFIERS:
+                continue
             met = self.metrics.get(clf_name, {})
             auc = met.get("auc", 0.5)
             if auc <= 0.52:  # skip near-random classifiers
@@ -472,11 +485,7 @@ class MultiTargetPredictor:
                 # Weight by AUC quality: perfect AUC=1.0 gets weight 1.0,
                 # AUC=0.6 gets weight 0.2
                 weight = (auc - 0.5) * 2  # maps [0.5, 1.0] -> [0.0, 1.0]
-                if clf_name == "clf_overfit_risk":
-                    # For overfit risk, high prob = low risk = good
-                    scores += prob * weight
-                else:
-                    scores += prob * weight
+                scores += prob * weight
                 n_models += 1
             except Exception:
                 pass
@@ -489,10 +498,18 @@ class MultiTargetPredictor:
                 continue
             try:
                 pred = model.predict(X)
-                # Normalize to [0, 1]
-                pred_norm = np.clip(
-                    (pred - pred.min()) / (pred.max() - pred.min() + 1e-8), 0, 1
-                )
+                # Normalize to [0, 1] using stored training percentiles (absolute scaling)
+                # This avoids the per-batch min-max bug where single-row input → 0
+                p5, p95 = self._regression_percentiles.get(target, (None, None))
+                if p5 is not None and p95 is not None and (p95 - p5) > 1e-8:
+                    pred_norm = np.clip((pred - p5) / (p95 - p5), 0, 1)
+                else:
+                    # Fallback: per-batch (only when >1 sample)
+                    rng = pred.max() - pred.min()
+                    if rng > 1e-8:
+                        pred_norm = np.clip((pred - pred.min()) / rng, 0, 1)
+                    else:
+                        pred_norm = np.full_like(pred, 0.5)
                 # Find whether higher is better for this target
                 higher_is_better = True
                 for col, _, hib in TARGET_DEFINITIONS + DERIVED_TARGETS:
@@ -606,6 +623,9 @@ class MultiTargetPredictor:
             "feature_columns": self._feature_columns,
             "interaction_columns": self._interaction_columns,
             "quartile_thresholds": self._quartile_thresholds,
+            "regression_percentiles": {
+                k: list(v) for k, v in self._regression_percentiles.items()
+            },
         }
         with open(out_dir / "predictor_meta.json", "w") as f:
             json.dump(meta, f, indent=2)
@@ -630,6 +650,9 @@ class MultiTargetPredictor:
         self._interaction_columns = meta.get("interaction_columns", _get_interaction_features())
         self.metrics = meta.get("metrics", {})
         self._quartile_thresholds = meta.get("quartile_thresholds", {})
+        self._regression_percentiles = {
+            k: tuple(v) for k, v in meta.get("regression_percentiles", {}).items()
+        }
 
         for target in meta.get("targets", []):
             model_path = load_dir / f"predictor_{target}.pkl"

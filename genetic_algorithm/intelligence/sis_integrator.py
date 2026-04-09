@@ -155,7 +155,7 @@ class EvolutionState:
         elif self.state == self.STAGNATING:
             return {
                 "filter_strength": 0.3,     # Minimal filtering — need diversity
-                "immigrant_multiplier": 3.0,  # 3x more immigrants
+                "immigrant_multiplier": 2.0,  # 2x more immigrants (was 3x — capped by pop fraction)
                 "weight_bias_strength": 0.5,  # Flatten weights toward uniform
                 "exploration_bonus": 0.3,     # Boost underrepresented indicators
             }
@@ -201,6 +201,7 @@ class AdaptiveWeightTracker:
         self._prior_op = dict(prior_operator_weights)
         self._evidence_trust_max = evidence_trust_max
         self._evidence_trust_initial: float = min(0.2, evidence_trust_max * 0.25)
+        self._max_generations: Optional[int] = None  # set via configure_for_run_length()
         self._min_observations = min_observations
         self._observation_halflife = observation_halflife
         # Accumulate live evidence: indicator -> [(gen, rel_fitness), ...]
@@ -258,15 +259,32 @@ class AdaptiveWeightTracker:
             'evidence_trust': self._current_evidence_trust(),
         })
 
+    def configure_for_run_length(self, max_generations: int) -> None:
+        """Auto-scale trust ramp for short runs so weights have effect."""
+        self._max_generations = max_generations
+        if max_generations <= 20:
+            # Short run: start with higher initial trust so adaptation
+            # has real effect within the run window
+            self._evidence_trust_initial = min(0.4, self._evidence_trust_max * 0.5)
+        elif max_generations <= 40:
+            self._evidence_trust_initial = min(0.3, self._evidence_trust_max * 0.35)
+        # Also scale retrain interval so the predictor adapts mid-run.
+        # Default interval=10 fires only at gen 10 in a 10-gen run (too late).
+        # Rule: fire ~3× per run (min interval=2 to avoid thrashing).
+        if not self._sis_config.get('online_retrain_interval'):
+            self._online_retrain_interval = max(2, max_generations // 3)
+
     def _current_evidence_trust(self) -> float:
         """Adaptive evidence trust: ramps up with generation and observations."""
         if self._total_observations < self._min_observations * 3:
             return 0.0
         # Phase 1 (gen 0-10): ramp to initial trust
-        if self._generation <= 10:
-            return self._evidence_trust_initial * (self._generation / 10.0)
-        # Phase 2 (gen 10-40): ramp to max trust
-        progress = min(1.0, (self._generation - 10) / 30.0)
+        ramp_phase1 = 10 if self._max_generations is None or self._max_generations > 20 else 5
+        ramp_phase2 = 30 if self._max_generations is None or self._max_generations > 40 else 10
+        if self._generation <= ramp_phase1:
+            return self._evidence_trust_initial * (self._generation / ramp_phase1)
+        # Phase 2: ramp to max trust
+        progress = min(1.0, (self._generation - ramp_phase1) / ramp_phase2)
         return (self._evidence_trust_initial +
                 (self._evidence_trust_max - self._evidence_trust_initial) * progress)
 
@@ -396,13 +414,14 @@ class SISIntegrator:
         self._hook_skips: Dict[str, int] = {k: 0 for k in self._hook_enabled}
 
         # ── Configurable thresholds (with sensible defaults) ──────────────
-        self._quality_gate_threshold: float = self._sis_config.get('quality_gate_threshold', 0.10)
+        self._quality_gate_threshold: float = self._sis_config.get('quality_gate_threshold', 0.25)
         self._weight_cap: float = self._sis_config.get('weight_cap', 5.0)
         self._underrep_pct: float = self._sis_config.get('underrepresentation_pct', 0.02)
         self._evidence_trust_max: float = self._sis_config.get('evidence_trust_max', 0.85)
         self._min_observations: int = self._sis_config.get('min_observations', 5)
         self._observation_halflife: int = self._sis_config.get('observation_halflife', 15)
         self._online_retrain_interval: int = self._sis_config.get('online_retrain_interval', 10)
+        self._max_immigrants_fraction: float = self._sis_config.get('max_immigrants_fraction', 0.25)
 
         models_dir = Path(
             self._sis_config.get('models_dir', 'genetic_algorithm/ml/models')
@@ -776,7 +795,27 @@ class SISIntegrator:
 
         target_archetypes = list(missing_archetypes | underrepresented)
 
-        # v3: Regime-aware archetype prioritization
+        # v3.1: Filter out low-fitness archetypes
+        arch_stats = self._classifier.archetype_stats
+        all_fitness = [
+            s.get('fitness_mean', 0) or 0
+            for k, s in arch_stats.items() if k != -1
+        ]
+        global_mean_fitness = float(np.mean(all_fitness)) if all_fitness else 0
+        if global_mean_fitness > 0:
+            target_archetypes = [
+                a for a in target_archetypes
+                if (arch_stats.get(a, {}).get('fitness_mean', 0) or 0)
+                   >= global_mean_fitness * 0.7
+            ]
+
+        # v3.1: Sort by fitness_mean descending for deterministic, quality-first ordering
+        target_archetypes.sort(
+            key=lambda a: arch_stats.get(a, {}).get('fitness_mean', 0) or 0,
+            reverse=True
+        )
+
+        # v3: Regime-aware archetype prioritization (secondary sort on top)
         regime = self.config.get('_island_regime', '')
         if regime and self._regime_archetype_affinity.get(regime):
             affinity = self._regime_archetype_affinity[regime]
@@ -795,6 +834,15 @@ class SISIntegrator:
         state_params = self._evo_state.params
         base_immigrants: int = self._sis_config.get('immigrants_per_gen', 2)
         n_immigrants = max(1, int(base_immigrants * state_params["immigrant_multiplier"]))
+        # v3.1: Cap immigrants to fraction of population to prevent cold-restarts
+        pop_size = len(pop_inds)
+        max_immigrants = max(1, int(pop_size * self._max_immigrants_fraction))
+        if n_immigrants > max_immigrants:
+            self.logger.debug(
+                f"[SIS] Capping immigrants {n_immigrants} → {max_immigrants} "
+                f"(pop={pop_size}, cap={self._max_immigrants_fraction})"
+            )
+            n_immigrants = max_immigrants
 
         for arch_id in target_archetypes[:n_immigrants]:
             try:
@@ -918,6 +966,7 @@ class SISIntegrator:
             gene.timeframe = dom_timeframe
 
         # Override indicators to match archetype profile (up to 3)
+        # v3.1: Blend corpus archetype indicators with live indicator weights
         if top_indicators and gene.indicators:
             try:
                 from genetic_algorithm.evaluation.surrogate import _INDICATOR_TYPES
@@ -926,6 +975,21 @@ class SISIntegrator:
                     ind for ind in top_indicators
                     if ind in _INDICATOR_TYPES and (not _available or ind in _available)
                 ]
+
+                # Blend with live indicator weights: as evidence_trust increases,
+                # live weights get more say in which archetype indicators to use
+                evidence_trust = self._adaptive_weights._current_evidence_trust()
+                if evidence_trust > 0.05 and valid_top:
+                    live_weights = self._adaptive_weights.get_blended_indicator_weights()
+                    # Score each valid indicator by blended weight
+                    scored = []
+                    for i, ind in enumerate(valid_top):
+                        corpus_rank = 1.0 / (i + 1)  # rank-based: 1st=1.0, 2nd=0.5, ...
+                        live_w = live_weights.get(ind, 1.0)
+                        blended = (1.0 - evidence_trust) * corpus_rank + evidence_trust * live_w
+                        scored.append((ind, blended))
+                    scored.sort(key=lambda x: x[1], reverse=True)
+                    valid_top = [ind for ind, _ in scored]
 
                 # Replace first indicator with primary archetype indicator
                 if valid_top and len(gene.indicators) >= 1:
@@ -1450,7 +1514,52 @@ class SISIntegrator:
                 f"{n_live} live samples, {len(combined)} total, "
                 f"reliable models: {list(reliable.keys())}"
             )
+
+            # v3.1: Also refresh archetype_stats from live data
+            self._refresh_archetype_stats(live_df, generation)
         except Exception as e:
             self.logger.debug(
                 f"[SIS] Online retrain at gen {generation} failed: {e}"
             )
+
+    def _refresh_archetype_stats(
+        self, live_df: pd.DataFrame, generation: int
+    ) -> None:
+        """Re-classify live data and merge updated archetype stats.
+
+        Ensures immigrants use fresh indicator priors instead of frozen
+        gen-0 corpus statistics for the remainder of the run.
+        """
+        if not self._classifier_ready:
+            return
+        try:
+            feature_cols = self._classifier._feature_columns
+            feat_df = live_df[feature_cols].fillna(0)
+            if len(feat_df) < 10:
+                return
+            pred_df = self._classifier.predict(feat_df)
+            # Merge fitness into prediction for stats computation
+            pred_df['fitness'] = live_df['fitness'].values
+
+            updated_count = 0
+            for arch_id in set(pred_df['archetype'].unique()) - {-1}:
+                arch_rows = pred_df[pred_df['archetype'] == arch_id]
+                if len(arch_rows) < 3:
+                    continue
+                live_mean = float(arch_rows['fitness'].mean())
+                existing = self._classifier.archetype_stats.get(arch_id, {})
+                old_mean = existing.get('fitness_mean', 0) or 0
+                # Blend: 70% historical + 30% live (conservative update)
+                if old_mean > 0:
+                    existing['fitness_mean'] = 0.7 * old_mean + 0.3 * live_mean
+                else:
+                    existing['fitness_mean'] = live_mean
+                updated_count += 1
+
+            if updated_count > 0:
+                self.logger.info(
+                    f"[SIS] Refreshed archetype_stats for {updated_count} archetypes "
+                    f"from {len(live_df)} live samples at gen {generation}"
+                )
+        except Exception as e:
+            self.logger.debug(f"[SIS] archetype_stats refresh failed: {e}")

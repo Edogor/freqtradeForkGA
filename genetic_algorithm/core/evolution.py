@@ -408,6 +408,7 @@ class GeneticAlgorithm:
         try:
             from genetic_algorithm.intelligence.sis_integrator import SISIntegrator
             self._sis_integrator = SISIntegrator(self.config, self.logger)
+            self._sis_integrator._adaptive_weights.configure_for_run_length(self.generations)
             self.set_immigrant_provider(self._sis_integrator.immigrant_provider)
             self.logger.info("[SIS] Strategy Intelligence System initialized")
         except Exception as e:
