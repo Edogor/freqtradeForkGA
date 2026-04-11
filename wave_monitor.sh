@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ⚠️  DEPRECATED: Use 'ga_monitor_v2.sh --wave <N>' or 'python -m genetic_algorithm monitor --tag wave<N>' instead.
+# This script is kept for backward compatibility and will be removed in a future release.
 # ============================================================================
 # Wave Monitor — Live Status Dashboard for Parallel Wave Runs
 # ============================================================================

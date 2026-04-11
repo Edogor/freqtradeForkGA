@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ⚠️  DEPRECATED: Use 'ga_auto_queue_v2.sh --persistent' or 'python -m genetic_algorithm queue start' instead.
+# This script is kept for backward compatibility and will be removed in a future release.
 # ============================================================================
 # GA Auto-Queue Daemon — Keep the server busy with GA experiments 24/7
 # ============================================================================
