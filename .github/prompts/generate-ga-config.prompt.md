@@ -30,6 +30,7 @@ Create a production-ready YAML experiment config for the GA queue.
 - Enable with `sis.enabled: true` for production runs
 - SIS requires `genetic_algorithm/data/strategy_corpus.parquet` to exist
 - All 5 hooks are active by default when enabled
+- A/B testing available via `intelligence/ab_framework.py`
 
 **Fitness weights (proven ranges):**
 - `profit_weight`: 0.3-0.5

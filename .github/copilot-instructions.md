@@ -5,25 +5,34 @@ Autonomous evolution of cryptocurrency trading strategies using genetic algorith
 ## Architecture
 
 ```
-run_ga.py (entry)
-  ├─ GeneticAlgorithm | IslandModelEvolution   (evolution loop)
-  ├─ StrategyGenerator                          (gene → Python strategy code)
-  ├─ FitnessEvaluator → DirectBacktester        (FreqTrade Python API, cached)
-  ├─ ParallelEvaluator                          (ProcessPoolExecutor)
-  ├─ SISIntegrator                              (5 hooks: seed, immigrants, indicator bias, convergence, adaptive)
-  │   ├─ CorpusBuilder (65 features) → MultiTargetPredictor (LightGBM)
-  │   ├─ ArchetypeClassifier (HDBSCAN) → TemporalAnalyzer
-  │   └─ PatternMiner (indicator enrichment)
-  ├─ WalkForwardValidator / MonteCarloValidator  (robustness)
-  ├─ HallOfFame                                 (persistent JSON archive)
-  └─ Dashboard                                  (FastAPI + WebSocket)
+run_ga.py / cli.py (entry points)
+  ├─ core/        → backward-compat shims (real code in engine/ and advanced/)
+  ├─ engine/      → runner, generation, checkpoint, adaptive, hall_of_fame, islands, migration, population
+  ├─ advanced/    → coevolution, ensemble_evolution, incremental, MAP-Elites, lifecycle_manager
+  ├─ genome/      → gene definitions, codegen (gene→strategy code), indicators, seeds
+  ├─ evaluation/  → fitness, direct_backtester, parallel, cache, surrogate, regime_aware
+  │   └─ validation/ → monte_carlo, cpcv, deflated_sharpe, param_sensitivity
+  ├─ intelligence/ → SIS: corpus, predictors, archetypes, temporal, patterns, integrator, ab_framework
+  ├─ orchestration/ → ExperimentRegistry, DataLifecycle, Scheduler, Monitor
+  ├─ market/      → regime detection, shared memory
+  ├─ ml/          → regime detector/trainer (LightGBM)
+  ├─ llm/         → LLM strategy designer, injector, diagnostics
+  ├─ monitor/     → terminal_monitor, log_capture, key_listener
+  ├─ web/         → FastAPI + WebSocket + React dashboard
+  │   ├─ routers/ → runs, generations, strategies, config, data, sis, backtest, dry_run, ws
+  │   └─ services/ → data_service
+  └─ config/      → YAML experiments (queue/, done/{wave}/, benchmark_v2/, presets/)
 ```
 
 **Key directories:**
-- `genetic_algorithm/` — Core GA engine, intelligence (SIS), dashboard, tests
-- `genetic_algorithm/config/` — YAML experiment configs and queue/
+- `genetic_algorithm/engine/` — Core evolution loop, checkpoint, adaptive mutation, HoF
+- `genetic_algorithm/evaluation/` — Backtesting, fitness, parallel workers, validation
+- `genetic_algorithm/genome/` — Strategy gene definitions and code generation
+- `genetic_algorithm/intelligence/` — SIS: corpus, predictors, archetypes, A/B framework
+- `genetic_algorithm/orchestration/` — Experiment lifecycle (registry, data cleanup, scheduling)
+- `genetic_algorithm/web/` — FastAPI backend + React/TypeScript frontend dashboard
+- `genetic_algorithm/config/` — YAML experiment configs (`queue/`, `done/`, `benchmark_v2/`)
 - `genetic_algorithm/data/` — Results, hall of fame, checkpoints, corpus
-- `genetic_algorithm/intelligence/` — SIS: corpus, predictors, archetypes, temporal, patterns, integrator
 
 See [GA_SYSTEM_SUMMARY.md](../GA_SYSTEM_SUMMARY.md) for full architecture.
 See [genetic_algorithm/ARCHITECTURE.md](../genetic_algorithm/ARCHITECTURE.md) for component diagrams.
@@ -42,6 +51,13 @@ pytest tests/test_strategy_intelligence.py -v    # SIS tests
 
 # Run
 python genetic_algorithm/run_ga.py --config genetic_algorithm/config/<name>.yaml
+
+# CLI (preferred interface)
+python -m genetic_algorithm run --config <name>.yaml
+python -m genetic_algorithm monitor              # Live experiment monitor
+python -m genetic_algorithm queue start           # Start queue daemon
+python -m genetic_algorithm experiment list       # List registered experiments
+python -m genetic_algorithm data cleanup          # Lifecycle management
 
 # Automated queue (daemon, persistent monitoring)
 ./ga_auto_queue_v2.sh --wave <wave> --max <N> --persistent
@@ -116,12 +132,16 @@ sis:
 ## Code Conventions
 
 - **Python 3.11+**, type hints on public APIs
-- GA core in `genetic_algorithm/`, FreqTrade core in `freqtrade/`
-- Strategy genes defined in `strategy_gene.py`, converted to code by `generator.py`
+- GA system in `genetic_algorithm/`, FreqTrade core in `freqtrade/`
+- `core/` files are backward-compat shims — real code lives in `engine/`, `advanced/`, `evaluation/`, `genome/`
+- Strategy genes in `genome/gene.py`, code generation in `genome/codegen.py`
 - All backtest evaluation goes through `FitnessEvaluator` → `DirectBacktester` (never shell out to freqtrade CLI)
 - Configs are YAML (not JSON) for GA experiments
-- SIS integration points live in `evolution.py` (search for `sis_integrator`)
-- Checkpoint every 5 generations; resume with `--checkpoint`
+- SIS integration points live in `engine/runner.py` (search for `sis_integrator`)
+- Checkpoint every 5 generations; resume with `--resume`
+- Experiment lifecycle managed by `ExperimentRegistry` (register → start → complete/fail/cancel)
+- Prefer `python -m genetic_algorithm` CLI over raw shell scripts
+- Terminal monitor (`monitor/terminal_monitor.py`) provides rich live feedback during evolution
 
 ## Documentation Index
 
