@@ -99,6 +99,8 @@ class BacktestResult:
         }
 
 
+
+
 class DirectBacktester:
     """
     Direct backtester that uses FreqTrade's Python API with mocked exchange.

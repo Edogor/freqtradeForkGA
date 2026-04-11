@@ -2,7 +2,7 @@
 
 All notable changes to the Freqtrade Genetic Algorithm fork.
 
-## [0.4.0] - 2026-04-09
+## [0.4.0] - 2026-04-12
 
 ### Strategy Intelligence System (SIS)
 - **SIS v3** — Full ML-driven feedback loop for evolution guidance
@@ -19,6 +19,17 @@ All notable changes to the Freqtrade Genetic Algorithm fork.
     5. Adaptive weights — shift fitness emphasis based on population state
   - A/B evaluation framework for measuring SIS impact
   - Full test suite (1400+ tests passing)
+- **SIS v3.1** (merged from `fix/sis-v3`)
+  - Fixed regression normalization bug in `predictors.py` (single-row prediction always returned 0)
+  - Excluded `clf_overfit_risk` from quality score (AUC ≈ 0.50 = noise)
+  - Reduced stagnation immigrant multiplier 3x → 2x with cap
+  - Added `configure_for_run_length()` for short-run auto-scaling
+  - Immigrant population cap (`max_immigrants_fraction`, default 25%)
+  - Low-fitness archetype filter (below 70% of global mean)
+  - Indicator blending by evidence trust (corpus-rank vs live weights)
+  - Online archetype retrain with 70% history + 30% live blending
+  - LRU memory cache in `BacktestCache` (max 300 entries, prevents RAM growth)
+  - `quality_gate_threshold` raised 0.10 → 0.25
 
 ### Infrastructure Redesign (Phase 1–5)
 - **Phase 1**: Extracted `CheckpointManager`, `AdaptiveController`, `GenerationStep` from monolithic `GeneticAlgorithm`
@@ -38,14 +49,16 @@ All notable changes to the Freqtrade Genetic Algorithm fork.
 - Shell scripts migrated to use `python -m genetic_algorithm.cli`
 - Queue daemon (`ga_auto_queue_v2.sh`) with persistent monitoring and wave management
 - Rich live dashboards: `ga_current.sh`, `ga_monitor_v2.sh`, `wave_dual_monitor.sh`
+- `launch_sis_production.sh` for SIS A/B production test orchestration
 
 ### Copilot Agent Customization
 - Project-level `copilot-instructions.md` with architecture overview and conventions
-- 4 domain-specific instruction files: `ga-core`, `ga-config`, `dashboard`, `sis-intelligence`
+- 6 domain-specific instruction files: `ga-core`, `ga-config`, `genome`, `dashboard`, `sis-intelligence`, `orchestration`
 - `ga-operator` agent for hands-off server operations
-- 3 reusable prompt templates: `analyze-ga-results`, `generate-ga-config`, `plan-next-wave`
-- `sis-corpus-rebuild` skill with step-by-step workflow
-- GA config validation hook (`validate_ga_config.py`)
+- `ga-analyst` agent for post-experiment analysis and diagnosis
+- 5 reusable prompt templates for results analysis, config generation, and wave planning
+- `sis-corpus-rebuild` and `launch-wave` skills with step-by-step workflows
+- GA config validation hook (`validate_ga_config.py`) + PostToolUse YAML format advisory
 
 ### Testing
 - 61 new tests for infrastructure modules (`test_cli.py`, `test_config_schema.py`, `test_registry.py`)
@@ -54,6 +67,7 @@ All notable changes to the Freqtrade Genetic Algorithm fork.
 - `test_runner.py` — RunEngine orchestrator tests (463 lines)
 - `test_island_coordinator.py` — Island model unification tests (334 lines)
 - `test_orchestration.py` — Scheduler, monitor, lifecycle tests (409 lines)
+- `test_phase12_fixes.py` — 23 tests for Phase 1-2 bug fixes
 - SIS smoke tests + full strategy intelligence test suite
 
 ### Bug Fixes
@@ -61,6 +75,7 @@ All notable changes to the Freqtrade Genetic Algorithm fork.
 - `cli.py` wrong kwargs passing + `_load_config` schema defaults application
 - Schema defaults for `indicators` and `timeframes` preventing KeyError crashes
 - Private name re-exports in 6 backward-compatibility shims fixing import errors
+- 11 Phase 1-2 bug fixes: convergence_patience typo, adaptive mutation condition, crowding distance, mutable default, cpu_count None, empty predictions, numpy scalar, missing cleanup
 
 ### Documentation
 - GA Infrastructure Guide (963 lines) — tutorial + reference

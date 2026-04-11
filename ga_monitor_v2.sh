@@ -10,16 +10,20 @@
 #   - Daemon status integration (shows auto_queue_v2 state)
 #   - Discovers ALL log patterns (wave*, queue_*, ga_run_*, C*_*)
 #   - Configurable detail level (compact/normal/detailed)
+#   - --live / -l  : show only running experiments + filtered log tail
+#   - HoF block    : when --wave WAVENAME given, shows best-strategy per-exp:
+#                    fitness | T.profit | V.profit | T/V gap | pair_gen ratio
 #
 # Usage:
 #   ./ga_monitor_v2.sh                       # auto-detect all running
-#   ./ga_monitor_v2.sh wave16                # monitor specific wave only
-#   ./ga_monitor_v2.sh --all                 # show completed experiments too
+#   ./ga_monitor_v2.sh wave32                # monitor specific wave only
+#   ./ga_monitor_v2.sh wave32 --live         # live log tails for running exps
+#   ./ga_monitor_v2.sh wave32 --all          # show completed experiments too
 #   ./ga_monitor_v2.sh --queue               # show queue contents
 #   ./ga_monitor_v2.sh --summary             # show overall summary only
 #   ./ga_monitor_v2.sh --once                # print once and exit
 #   ./ga_monitor_v2.sh --interval 10         # refresh every 10 seconds
-#   ./ga_monitor_v2.sh --detail compact      # compact view (less columns)
+#   ./ga_monitor_v2.sh --detail compact      # compact view (fewer columns)
 #   ./ga_monitor_v2.sh --detail detailed     # show extra metrics
 # ============================================================================
 
@@ -30,6 +34,7 @@ LOG_DIR="${REPO_DIR}/genetic_algorithm/logs"
 QUEUE_DIR="${REPO_DIR}/genetic_algorithm/config/queue"
 DONE_BASE="${REPO_DIR}/genetic_algorithm/config/done"
 STATE_FILE="${LOG_DIR}/auto_queue_state.json"
+HOF_BASE="${REPO_DIR}/genetic_algorithm/data"
 WAVE_FILTER=""
 INTERVAL=5
 ONCE=false
@@ -37,6 +42,7 @@ SHOW_ALL=false
 SHOW_QUEUE=false
 SHOW_SUMMARY_ONLY=false
 DETAIL_LEVEL="normal"  # compact, normal, detailed
+LIVE_MODE=false        # --live: only running experiments + log tails
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -46,16 +52,21 @@ while [[ $# -gt 0 ]]; do
         --summary)      SHOW_SUMMARY_ONLY=true; ONCE=true ;;
         --detail)       DETAIL_LEVEL="${2:-normal}"; shift ;;
         --interval)     INTERVAL="${2:-5}"; shift ;;
+        --live|-l)      LIVE_MODE=true ;;
         --help|-h)
             echo "Usage: $0 [wave_name] [OPTIONS]"
             echo ""
-            echo "  wave_name           Filter to specific wave (e.g. wave16)"
+            echo "  wave_name           Filter to specific wave (e.g. wave32)"
             echo "  --all               Show completed experiments too"
+            echo "  --live, -l          Live mode: only running experiments + log tail"
             echo "  --queue             Show queue contents"
             echo "  --summary           Show overall summary stats only"
             echo "  --detail LEVEL      Detail level: compact, normal, detailed"
             echo "  --once              Print status once and exit"
             echo "  --interval N        Refresh interval in seconds (default: 5)"
+            echo ""
+            echo "  When a wave filter is given, completed experiments show HoF data:"
+            echo "    fitness | train profit | val profit | T/V gap | pair_gen ratio"
             exit 0
             ;;
         -*)         echo "Unknown option: $1"; exit 1 ;;
@@ -101,6 +112,66 @@ MAGENTA='\e[35m'
 BOLD='\e[1m'
 DIM='\e[2m'
 NC='\e[0m'
+
+# ── Read best-strategy data from Hall-of-Fame JSON ──
+# Args: wave_name exp_suffix (e.g. read_hof_data "wave32" "A")
+# Outputs pipe-delimited: fitness|train_profit|val_profit|tv_gap_pct|pair_gen|hof_count
+read_hof_data() {
+    local wave="$1" exp="$2"
+    local hof_json="${HOF_BASE}/hall_of_fame_${wave}_${exp}/hall_of_fame.json"
+    [[ ! -f "$hof_json" ]] && echo "—|—|—|—|—|0" && return
+
+    python3 - "$hof_json" 2>/dev/null <<'PYEOF' || echo "—|—|—|—|—|0"
+import json, sys
+data = json.load(open(sys.argv[1]))
+entries = data.get('entries', [])
+n = len(entries)
+if not entries:
+    print("—|—|—|—|—|0"); sys.exit(0)
+best = max(entries, key=lambda e: e.get('fitness', 0))
+m = best.get('metrics', {})
+fit  = best.get('fitness', 0)
+tp   = m.get('profit', 0)          # already in % (e.g. 1.79)
+vp   = m.get('val_profit', 0)      # already in %
+gap  = m.get('train_val_gap', 0) * 100  # fraction → %
+pgr  = m.get('pair_generalization_ratio', 0)
+print(f"{fit:.4f}|{tp:+.2f}%|{vp:+.2f}%|{gap:+.1f}%|{pgr:.3f}|{n}")
+PYEOF
+}
+
+# ── Print last N key log lines for a running experiment (live tail) ──
+# Args: log_path [n_lines=15]
+print_live_tail() {
+    local logf="$1" nlines="${2:-15}"
+    [[ ! -f "$logf" ]] && return
+
+    echo -e "  ${DIM}── live log tail: $(basename "$logf") ──────────────────────────────────────────────${NC}"
+
+    # Filter to informative lines: NEW BEST, GENERATION/SUMMARY, EVAL, ERROR, WARN
+    local filtered
+    filtered=$(grep -E 'NEW BEST|GENERATION|SUMMARY|EVAL Complete|EVOLUTION COMPLETE|ERROR|FATAL|WARN|island_[0-9]+.*best=' \
+        "$logf" 2>/dev/null | tail -"$nlines")
+
+    if [[ -z "$filtered" ]]; then
+        # Fallback: just last N raw lines
+        tail -"$nlines" "$logf" 2>/dev/null | while IFS= read -r line; do
+            echo -e "    ${DIM}${line}${NC}"
+        done
+    else
+        while IFS= read -r line; do
+            local colour="$DIM"
+            [[ "$line" == *"NEW BEST"* ]]            && colour="$GREEN"
+            [[ "$line" == *"ERROR"* || "$line" == *"FATAL"* ]] && colour="$RED"
+            [[ "$line" == *"WARN"* ]]                && colour="$YELLOW"
+            [[ "$line" == *"EVOLUTION COMPLETE"* ]]  && colour="${BOLD}${GREEN}"
+            # Clip to terminal width-ish to avoid wrapping
+            local clipped
+            clipped=$(echo "$line" | cut -c1-120)
+            echo -e "    ${colour}${clipped}${NC}"
+        done <<< "$filtered"
+    fi
+    echo ""
+}
 
 # ── Discover running GA processes ──
 declare -A RUNNING_PIDS=()
@@ -565,10 +636,12 @@ print_dashboard() {
     local n_run=0 n_done=0 n_crash=0 n_hidden=0
     local global_best_fitness=0 global_best_exp=""
     local total_elapsed=0 completed_with_time=0
+    local -a live_tail_logs=()
 
     # ── Title bar ──
     local title="GA EVOLUTION MONITOR"
     [[ -n "$WAVE_FILTER" ]] && title="GA MONITOR — ${WAVE_FILTER}"
+    [[ "$LIVE_MODE" == true ]] && title+=' [LIVE]'
 
     echo ""
     echo -e "  ${CYAN}╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗${NC}"
@@ -712,6 +785,15 @@ print_dashboard() {
             fi
         fi
 
+        # LIVE_MODE: only running experiments get a table row
+        if [[ "$LIVE_MODE" == true && "$status" != "RUNNING" ]]; then
+            case "$status" in
+                DONE)    ((n_done++)) ;;
+                CRASHED) ((n_crash++)) ;;
+            esac
+            continue
+        fi
+
         # Visibility filter
         if [[ "$SHOW_ALL" == false && "$status" == "DONE" ]]; then
             if [[ -n "$WAVE_FILTER" ]]; then
@@ -723,7 +805,7 @@ print_dashboard() {
 
         case "$status" in
             DONE)    ((n_done++)) ;;
-            RUNNING) ((n_run++)) ;;
+            RUNNING) ((n_run++)); [[ "$LIVE_MODE" == true ]] && live_tail_logs+=("$lf") ;;
             CRASHED) ((n_crash++)) ;;
         esac
 
@@ -843,6 +925,106 @@ print_dashboard() {
 
     echo ""
 
+    # ── Live log tails (only in LIVE_MODE) ──
+    if [[ "$LIVE_MODE" == true ]]; then
+        if [[ ${#live_tail_logs[@]} -gt 0 ]]; then
+            for lf in "${live_tail_logs[@]}"; do
+                print_live_tail "$lf" 15
+            done
+        else
+            echo -e "  ${DIM}No experiments currently running.${NC}"
+            echo -e "  ${DIM}Use '$0 ${WAVE_FILTER:+${WAVE_FILTER} }--all' to see completed results, or check --queue for pending.${NC}"
+            echo ""
+        fi
+    fi
+
+    # ── HoF Results block (when wave filter given and not in live mode) ──
+    if [[ -n "$WAVE_FILTER" && "$LIVE_MODE" == false ]]; then
+        local -a hof_rows=()
+        for lf in "${logs[@]}"; do
+            # Derive canonical key from log basename to handle nested logs correctly:
+            #   wave32_A.log                      → canonical = wave32_A
+            #   wave31_wave32_A_island_name.log   → canonical = wave32_A
+            local h_bn h_canonical
+            h_bn=$(basename "$lf" .log)
+            if [[ "$h_bn" =~ ^wave[0-9]+_(wave[0-9]+_[A-Z][0-9]*)(_.*)?$ ]]; then
+                h_canonical="${BASH_REMATCH[1]}"
+            elif [[ "$h_bn" =~ ^(wave[0-9]+_[A-Z][0-9]*)(_.+)?$ ]]; then
+                h_canonical="${BASH_REMATCH[1]}"
+            else
+                continue
+            fi
+            local hof_wave hof_suffix
+            hof_wave="${h_canonical%%_*}"    # e.g. wave32
+            hof_suffix="${h_canonical##*_}"  # e.g. A
+            [[ "$hof_wave" != "$WAVE_FILTER" ]] && continue
+            local hof_json="${HOF_BASE}/hall_of_fame_${hof_wave}_${hof_suffix}/hall_of_fame.json"
+            [[ ! -f "$hof_json" ]] && continue
+            hof_rows+=("${hof_suffix}|${hof_wave}")
+        done
+
+        if [[ ${#hof_rows[@]} -gt 0 ]]; then
+            echo -e "  ${CYAN}── HoF Results — ${WAVE_FILTER} ──────────────────────────────────────────────────────────${NC}"
+            echo -ne "  "
+            apad "${BOLD}EXPERIMENT${NC}"  14; echo -n "  "
+            apad "${BOLD}FITNESS${NC}"      8; echo -n "  "
+            apad "${BOLD}T.PROFIT${NC}"     9; echo -n "  "
+            apad "${BOLD}V.PROFIT${NC}"     9; echo -n "  "
+            apad "${BOLD}T/V GAP${NC}"      8; echo -n "  "
+            apad "${BOLD}PAIR_GEN${NC}"     8; echo -n "  "
+            echo -e "${BOLD}HoF N${NC}"
+            echo -e "  ${DIM}──────────────  ────────  ─────────  ─────────  ────────  ────────  ─────${NC}"
+
+            for row in "${hof_rows[@]}"; do
+                local h_exp2="${row%%|*}"
+                local h_wave2="${row#*|}"
+                local hof_data
+                hof_data=$(read_hof_data "$h_wave2" "$h_exp2")
+                IFS='|' read -r hof_fit hof_tp hof_vp hof_gap hof_pgr hof_n <<< "$hof_data"
+
+                local c_fit c_tp c_vp c_gap c_pgr
+                # Fitness color
+                if [[ "$hof_fit" == "—" ]]; then c_fit="${DIM}—${NC}"
+                elif awk "BEGIN{exit(!($hof_fit + 0 >= 0.30))}" 2>/dev/null; then c_fit="${GREEN}${hof_fit}${NC}"
+                elif awk "BEGIN{exit(!($hof_fit + 0 >= 0.15))}" 2>/dev/null; then c_fit="${YELLOW}${hof_fit}${NC}"
+                else c_fit="${RED}${hof_fit}${NC}"; fi
+                # Train profit color (starts with + or -)
+                if [[ "$hof_tp" == "—" ]]; then c_tp="${DIM}—${NC}"
+                elif [[ "$hof_tp" == -* ]]; then c_tp="${RED}${hof_tp}${NC}"
+                else c_tp="${GREEN}${hof_tp}${NC}"; fi
+                # Val profit color
+                if [[ "$hof_vp" == "—" ]]; then c_vp="${DIM}—${NC}"
+                elif [[ "$hof_vp" == -* ]]; then c_vp="${RED}${hof_vp}${NC}"
+                else c_vp="${GREEN}${hof_vp}${NC}"; fi
+                # T/V gap color (absolute value: >20% red, >10% yellow, else green)
+                if [[ "$hof_gap" == "—" ]]; then c_gap="${DIM}—${NC}"
+                else
+                    local gap_abs="${hof_gap#+}"; gap_abs="${gap_abs#-}"
+                    if awk "BEGIN{exit(!(${gap_abs//[!0-9.]/} + 0 > 20))}" 2>/dev/null; then c_gap="${RED}${hof_gap}${NC}"
+                    elif awk "BEGIN{exit(!(${gap_abs//[!0-9.]/} + 0 > 10))}" 2>/dev/null; then c_gap="${YELLOW}${hof_gap}${NC}"
+                    else c_gap="${GREEN}${hof_gap}${NC}"; fi
+                fi
+                # Pair gen color
+                if [[ "$hof_pgr" == "—" ]]; then c_pgr="${DIM}—${NC}"
+                elif awk "BEGIN{exit(!($hof_pgr + 0 >= 0.90))}" 2>/dev/null; then c_pgr="${GREEN}${hof_pgr}${NC}"
+                elif awk "BEGIN{exit(!($hof_pgr + 0 >= 0.75))}" 2>/dev/null; then c_pgr="${YELLOW}${hof_pgr}${NC}"
+                else c_pgr="${RED}${hof_pgr}${NC}"; fi
+
+                local clipped_h
+                clipped_h=$(clip "${h_wave2}_${h_exp2}" 13)
+                echo -ne "  "
+                apad "$clipped_h"  14; echo -n "  "
+                apad "$c_fit"       8; echo -n "  "
+                apad "$c_tp"        9; echo -n "  "
+                apad "$c_vp"        9; echo -n "  "
+                apad "$c_gap"       8; echo -n "  "
+                apad "$c_pgr"       8; echo -n "  "
+                echo -e "${DIM}${hof_n}${NC}"
+            done
+            echo ""
+        fi
+    fi
+
     # ── Queue peek ──
     if [[ "$SHOW_QUEUE" != true ]]; then
         local queued
@@ -876,7 +1058,7 @@ print_dashboard() {
     [[ $n_hidden -gt 0 ]] && echo -e "  ${DIM}${n_hidden} completed experiments hidden (use --all to show)${NC}"
 
     if [[ "$ONCE" == false ]]; then
-        echo -e "  ${DIM}Refreshing ${INTERVAL}s · Ctrl+C to stop · --queue to see pending · --detail compact|detailed${NC}"
+        echo -e "  ${DIM}Refreshing ${INTERVAL}s · Ctrl+C to stop · --live for log tails · --queue for pending · --detail compact|detailed${NC}"
     fi
     echo ""
 }
