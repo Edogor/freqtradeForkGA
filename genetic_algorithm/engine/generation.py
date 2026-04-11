@@ -628,6 +628,20 @@ class GenerationStep:
             f"(crossovers: {crossover_count}, mutations: {mutation_count})"
         )
 
+        # Warn when failure rates exceed 10%
+        total_cx = crossover_count + crossover_failures
+        total_mut = mutation_count + mutation_failures
+        if total_cx > 0 and crossover_failures / total_cx > 0.10:
+            self.logger.warning(
+                f"[OFFSPRING] High crossover failure rate: "
+                f"{crossover_failures}/{total_cx} ({crossover_failures/total_cx:.0%})"
+            )
+        if total_mut > 0 and mutation_failures / total_mut > 0.10:
+            self.logger.warning(
+                f"[OFFSPRING] High mutation failure rate: "
+                f"{mutation_failures}/{total_mut} ({mutation_failures/total_mut:.0%})"
+            )
+
         return {
             "offspring_added": offspring_added,
             "crossover_count": crossover_count,

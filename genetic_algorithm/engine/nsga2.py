@@ -389,8 +389,10 @@ def _hypervolume_nd(points: List[List[float]], reference_point: List[float]) -> 
             # Since sorted ascending, these are indices i onward.
             remaining_points = [p[1:] for p in sorted_points[i:]]
             remaining_ref = reference_point[1:]
-            
-            if len(remaining_ref) == 1:
+
+            if not remaining_points:
+                slice_hv = 0.0
+            elif len(remaining_ref) == 1:
                 # Base case: 1D remaining
                 slice_hv = max(max(p[0] for p in remaining_points) - remaining_ref[0], 0.0)
             else:
@@ -442,6 +444,10 @@ def extract_objectives_from_metrics(
         # Return worst-case objectives so these individuals sink to the
         # bottom of NSGA-II ranking without being discarded entirely
         # (they can still mutate into something useful).
+        # AP-7 fix: use large negative values for maximize objectives
+        # so degenerate strategies are always dominated by any real strategy.
+        # Previous 0.0 values caused near-zero fitness across entire population
+        # because Pareto sorting couldn't distinguish degenerate from marginal.
         worst_objectives = []
         for obj_cfg in objective_config:
             obj_type = obj_cfg.get('type', 'maximize')
@@ -451,7 +457,8 @@ def extract_objectives_from_metrics(
                 # worst case = large penalty value (e.g. -1.0 after negation)
                 worst_objectives.append(-1.0 / scale)
             else:
-                worst_objectives.append(0.0)
+                # AP-7: large negative ensures these are always dominated
+                worst_objectives.append(-1e6)
         return worst_objectives
 
     objectives = []

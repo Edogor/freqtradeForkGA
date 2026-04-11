@@ -474,10 +474,20 @@ class RegimeAwareEvaluator:
         
         elif self.aggregation_method == 'harmonic_mean':
             # Penalizes inconsistency (geometric interpretation: average rate)
-            try:
-                aggregated_fitness = harmonic_mean(fitness_values)
-            except Exception:
-                aggregated_fitness = sum(fitness_values) / len(fitness_values)
+            # harmonic_mean requires ALL values > 0; negative/zero fitness values
+            # cause StatisticsError. Filter to positive values, fall back to
+            # weighted mean if not enough positive values remain.
+            positive_scores = [(s, w) for s, w in weighted_scores if s > 0]
+            if len(positive_scores) >= 2:
+                try:
+                    aggregated_fitness = harmonic_mean([s for s, _ in positive_scores])
+                except Exception:
+                    total_weight = sum(w for _, w in positive_scores)
+                    aggregated_fitness = sum(s * w for s, w in positive_scores) / total_weight
+            else:
+                # Not enough positive values for harmonic_mean — use weighted mean
+                total_weight = sum(w for _, w in weighted_scores)
+                aggregated_fitness = sum(s * w for s, w in weighted_scores) / total_weight
         
         elif self.aggregation_method == 'cvar':
             # Conditional Value at Risk: average of worst alpha% outcomes

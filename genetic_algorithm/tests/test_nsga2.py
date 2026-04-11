@@ -413,9 +413,10 @@ class TestExtractObjectivesFromMetrics:
     def test_min_trades_gate(self):
         metrics = {'profit': 100.0, 'sharpe_ratio': 3.0, 'max_drawdown': 0.01, 'num_trades': 2}
         objectives = extract_objectives_from_metrics(metrics, DEFAULT_OBJECTIVES, min_trades=5)
-        # Should return worst-case values
-        assert objectives[0] == 0.0  # maximize profit
-        assert objectives[2] == 0.0  # maximize sharpe
+        # Should return worst-case values (AP-7 fix: -1e6 for maximize, -1.0 for minimize)
+        assert objectives[0] == -1e6  # maximize profit → large negative
+        assert objectives[1] == -1.0  # minimize drawdown → -1.0
+        assert objectives[2] == -1e6  # maximize sharpe → large negative
 
     def test_missing_metric_defaults_to_zero(self):
         metrics = {'num_trades': 20}  # missing profit, sharpe, drawdown

@@ -67,11 +67,12 @@ TOP_STRATEGIES_COUNT = 5
 
 # Output configuration
 SAVE_STRATEGIES = True        # Save top strategies to files
-OUTPUT_DIR = Path("genetic_algorithm/output")  # Directory for output files
-LOG_DIR = Path("genetic_algorithm/logs")       # Directory for log files
+_BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = _BASE_DIR / "output"   # Directory for output files
+LOG_DIR = _BASE_DIR / "logs"        # Directory for log files
 
 # Configuration file path
-CONFIG_FILE = Path("genetic_algorithm/config/ga_config.yaml")
+CONFIG_FILE = _BASE_DIR / "config" / "ga_config.yaml"
 
 # Timestamp format for files and logs
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
@@ -85,8 +86,8 @@ def _prune_old_logs(log_dir: Path, keep: int = 20):
         log_files = sorted(log_dir.glob('ga_run_*.log'), key=lambda f: f.stat().st_mtime)
         for old_log in log_files[:-keep]:
             old_log.unlink()
-    except Exception:
-        pass  # Best-effort cleanup
+    except Exception as e:
+        logger.debug(f"Log pruning failed: {e}")  # Best-effort cleanup
 
 
 def setup_logging(monitor_active: bool = False):
@@ -818,8 +819,40 @@ def main():
         print("✅ Config validation passed!")
         return 0
     
+    # ── Register experiment in registry ──
+    experiment_id = None
+    registry = None
+    try:
+        import hashlib as _hl
+        from genetic_algorithm.orchestration.registry import ExperimentRegistry
+        registry = ExperimentRegistry()
+        _ts = datetime.now().strftime(TIMESTAMP_FORMAT)
+        _short = _hl.md5(str(config_file).encode()).hexdigest()[:4]
+        experiment_id = f"run_{_ts}_{_short}"
+        _ga_type = "standard"
+        if config.get('generic_island_model', {}).get('enabled'):
+            _ga_type = "generic_island"
+        elif config.get('island_model', {}).get('enabled'):
+            _ga_type = "island"
+        registry.register(
+            experiment_id,
+            config_path=str(config_file),
+            ga_type=_ga_type,
+        )
+        logger.info(f"Registered experiment: {experiment_id}")
+    except Exception as e:
+        logger.debug(f"Experiment registration skipped: {e}")
+        registry = None
+
     # Print configuration
     print_configuration(config)
+    
+    # Clean up stale shared memory from previous crashed runs
+    try:
+        from genetic_algorithm.market.shared_memory import cleanup_stale_shared_memory
+        cleanup_stale_shared_memory()
+    except Exception as e:
+        logger.debug(f"Shared memory cleanup skipped: {e}")
     
     # Print visualization info
     if args.visualize:
@@ -862,6 +895,19 @@ def main():
     print("=" * 80)
     print()
     
+    # Mark experiment as running in registry
+    if registry and experiment_id:
+        try:
+            registry.start(
+                experiment_id,
+                pid=os.getpid(),
+                log_path=str(LOG_DIR / f"ga_run_{datetime.now().strftime(TIMESTAMP_FORMAT)}.log"),
+                data_dir=str(output_dir),
+                generations_total=config.get('genetic_algorithm', {}).get('generations'),
+            )
+        except Exception as e:
+            logger.debug(f"Registry start update failed: {e}")
+
     # Initialize and run GA
     tmp_config_path = None
     try:
@@ -992,6 +1038,11 @@ def main():
         print("\n\n" + "=" * 80)
         print("EVOLUTION INTERRUPTED BY USER")
         print("=" * 80)
+        if registry and experiment_id:
+            try:
+                registry.cancel(experiment_id)
+            except Exception:
+                pass
         return 0
     except Exception as e:
         import traceback
@@ -1001,6 +1052,11 @@ def main():
         print(f"\n{e}")
         traceback.print_exc()
         logger.exception("Evolution failed")
+        if registry and experiment_id:
+            try:
+                registry.fail(experiment_id, error=str(e))
+            except Exception:
+                pass
         return 1
     finally:
         # Always clean up temporary config file, even on crash
@@ -1268,7 +1324,31 @@ def main():
         # Save evolution_stats.json (for visualize_evolution.py)
         if _gen_stats and config.get('output', {}).get('save_stats', False):
             _save_evolution_stats(output_dir, config, _gen_stats, _gen_holdout)
-    
+
+        # ── Register completion in experiment registry ──
+        if registry and experiment_id:
+            try:
+                _best_fitness = top_strategies[0].fitness if top_strategies else None
+                _best_profit = (top_strategies[0].metrics or {}).get('profit') if top_strategies else None
+                registry.complete(experiment_id, best_fitness=_best_fitness, best_profit=_best_profit)
+            except Exception as _re:
+                logger.debug(f"Registry completion update failed: {_re}")
+
+        # ── SIS corpus auto-rebuild trigger ──
+        sis_cfg = config.get('sis', {})
+        if sis_cfg.get('enabled') and sis_cfg.get('auto_rebuild', False) and top_strategies:
+            try:
+                from genetic_algorithm.intelligence.corpus import CorpusBuilder
+                logger.info("SIS auto-rebuild: rebuilding strategy corpus...")
+                corpus_builder = CorpusBuilder()
+                df = corpus_builder.build()
+                if len(df) > 0:
+                    corpus_builder.save(df)
+                    logger.info(f"SIS corpus rebuilt: {len(df)} strategies")
+                    print(f"  ✓ SIS corpus rebuilt with {len(df)} strategies")
+            except Exception as _ce:
+                logger.warning(f"SIS corpus auto-rebuild failed: {_ce}")
+
         # Final summary
         print("\n" + "=" * 80)
         print("NEXT STEPS")
@@ -1297,6 +1377,11 @@ def main():
         traceback.print_exc()
         sys.stdout.flush()
         sys.stderr.flush()
+        if registry and experiment_id:
+            try:
+                registry.fail(experiment_id, error=f"Post-evolution: {e}")
+            except Exception:
+                pass
         # Still return 1 to indicate failure, but evolution results are saved
         return 1
 

@@ -58,14 +58,32 @@ class BacktestCache:
             try:
                 from genetic_algorithm.evaluation.direct_backtester import BacktestResult
 
-                with open(cache_file, "r") as f:
-                    data = json.load(f)
-                    result = BacktestResult(**data)
-                    self.cache[cache_key] = result
-                    logger.debug(f"Cache hit (disk): {cache_key[:8]}...")
-                    return result
+                raw_bytes = cache_file.read_bytes()
+
+                # Verify checksum if present
+                checksum_file = self.cache_dir / f"{cache_key}.sha256"
+                if checksum_file.exists():
+                    expected = checksum_file.read_text().strip()
+                    actual = hashlib.sha256(raw_bytes).hexdigest()
+                    if expected != actual:
+                        logger.warning(
+                            f"Cache corruption detected for {cache_key[:8]}..., "
+                            f"removing entry"
+                        )
+                        cache_file.unlink(missing_ok=True)
+                        checksum_file.unlink(missing_ok=True)
+                        return None
+
+                data = json.loads(raw_bytes)
+                result = BacktestResult(**data)
+                self.cache[cache_key] = result
+                logger.debug(f"Cache hit (disk): {cache_key[:8]}...")
+                return result
             except Exception as e:
-                logger.warning(f"Failed to load cache file: {e}")
+                logger.warning(f"Failed to load cache file {cache_key[:8]}...: {e}, removing")
+                cache_file.unlink(missing_ok=True)
+                checksum_path = self.cache_dir / f"{cache_key}.sha256"
+                checksum_path.unlink(missing_ok=True)
 
         return None
 
@@ -93,6 +111,11 @@ class BacktestCache:
                 with os.fdopen(fd, "w") as f:
                     json.dump(result.to_dict(), f)
                 os.replace(tmp_path, str(cache_file))  # atomic on POSIX
+
+                # Write checksum for corruption detection
+                content_hash = hashlib.sha256(cache_file.read_bytes()).hexdigest()
+                checksum_file = self.cache_dir / f"{cache_key}.sha256"
+                checksum_file.write_text(content_hash)
             except Exception:
                 try:
                     os.unlink(tmp_path)

@@ -511,7 +511,7 @@ class GeneticAlgorithm:
                 json.dump(checkpoint, f, indent=2, default=str)
             temp_path.rename(checkpoint_path)
         except Exception as e:
-            self.logger.debug(f"[CHECKPOINT] Legacy checkpoint write failed: {e}")
+            self.logger.error(f"[CHECKPOINT] Legacy checkpoint write failed: {e}")
             if temp_path.exists():
                 temp_path.unlink()
     
@@ -901,7 +901,7 @@ class GeneticAlgorithm:
             if warm_injected > 0:
                 self.logger.info(f"[WARM-START] Injected {warm_injected} strategies from previous experiment")
         except Exception as e:
-            self.logger.debug(f"[WARM-START] Skipped: {e}")
+            self.logger.warning(f"[WARM-START] Skipped: {e}")
         
         # Seed 15% of population with known-good archetype strategies
         seed_count = max(1, int(self.population_size * 0.15))

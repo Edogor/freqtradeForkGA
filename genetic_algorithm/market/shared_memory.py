@@ -25,7 +25,9 @@ Memory savings:
 
 import atexit
 import logging
+import threading
 import time
+import uuid
 from multiprocessing import shared_memory
 from typing import Any, Dict, List, Tuple
 
@@ -36,34 +38,65 @@ logger = logging.getLogger(__name__)
 
 # Module-level registry of SharedMemory objects for cleanup (main process: created blocks)
 _shared_blocks: List[shared_memory.SharedMemory] = []
+_shared_blocks_lock = threading.Lock()
 
 # Worker-side: attached SharedMemory objects (kept alive for numpy view lifetime)
 _worker_shm_blocks: List[shared_memory.SharedMemory] = []
+_worker_shm_lock = threading.Lock()
 
 
 def _cleanup_shared_memory():
     """Unlink all shared memory blocks created by this process (main only)."""
-    for shm in _shared_blocks:
-        try:
-            shm.close()
-            shm.unlink()
-        except Exception:
-            pass
-    _shared_blocks.clear()
+    with _shared_blocks_lock:
+        for shm in _shared_blocks:
+            try:
+                shm.close()
+                shm.unlink()
+            except Exception:
+                pass
+        _shared_blocks.clear()
 
 
 def _cleanup_worker_shm():
     """Close (but don't unlink) shared memory attached by worker processes."""
-    for shm in _worker_shm_blocks:
-        try:
-            shm.close()
-        except Exception:
-            pass
-    _worker_shm_blocks.clear()
+    with _worker_shm_lock:
+        for shm in _worker_shm_blocks:
+            try:
+                shm.close()
+            except Exception:
+                pass
+        _worker_shm_blocks.clear()
 
 
 atexit.register(_cleanup_shared_memory)
 atexit.register(_cleanup_worker_shm)
+
+
+def cleanup_stale_shared_memory():
+    """Remove stale shared memory blocks from previous crashed GA runs.
+
+    Scans /dev/shm for blocks matching the ``ga_ohlcv_`` prefix and unlinks
+    any that don't belong to a currently running process.  Safe to call at
+    startup before creating new blocks.
+    """
+    import pathlib
+    shm_dir = pathlib.Path('/dev/shm')
+    if not shm_dir.exists():
+        return
+
+    removed = 0
+    for entry in shm_dir.iterdir():
+        if entry.name.startswith('ga_ohlcv_'):
+            try:
+                old_shm = shared_memory.SharedMemory(name=entry.name, create=False)
+                old_shm.close()
+                old_shm.unlink()
+                removed += 1
+            except Exception:
+                # Block may already be gone or in use
+                pass
+    if removed:
+        logger.info(f"[SHARED] Cleaned up {removed} stale shared memory block(s) from /dev/shm")
 
 
 # ─── Column layout for shared OHLCV arrays ───────────────────────────────────
@@ -92,6 +125,8 @@ class SharedDataManager:
         self._shm_blocks: Dict[str, shared_memory.SharedMemory] = {}
         self._metadata: Dict[str, Any] = {}
         self._loaded = False
+        self._load_lock = threading.Lock()
+        self._instance_id = uuid.uuid4().hex[:12]
 
     def load_and_share(self, config: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
         """
@@ -104,9 +139,16 @@ class SharedDataManager:
         Returns:
             Dict[pair_name, DataFrame] — the loaded data (also now in shared memory)
         """
-        if self._loaded:
-            logger.warning("[SHARED] Data already loaded, skipping reload")
-            return {}
+        with self._load_lock:
+            if self._loaded:
+                logger.warning("[SHARED] Data already loaded, skipping reload")
+                return {}
+            return self._load_and_share_locked(config)
+
+    def _load_and_share_locked(self, config: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
+        """
+        Internal load implementation called under lock.
+        """
 
         bt_config = config.get('backtesting', {})
         pairs = bt_config.get('pairs', [])
@@ -166,8 +208,9 @@ class SharedDataManager:
             except Exception as e:
                 logger.debug(f"[SHARED] Cleanup error for {pair}: {e}")
             # Remove from module-level atexit list too
-            if shm in _shared_blocks:
-                _shared_blocks.remove(shm)
+            with _shared_blocks_lock:
+                if shm in _shared_blocks:
+                    _shared_blocks.remove(shm)
         self._shm_blocks.clear()
         self._loaded = False
 
@@ -239,26 +282,43 @@ class SharedDataManager:
         # Extract date as int64 nanoseconds
         date_values = df[DATE_COL].values.astype('datetime64[ns]').astype(np.int64)
 
-        # Extract float columns
+        # Extract float columns — always include all SHARED_FLOAT_COLS for
+        # deterministic layout; pad with zeros if a column is unexpectedly absent.
         float_arrays = []
         actual_float_cols = []
         for col in SHARED_FLOAT_COLS:
             if col in df.columns:
                 float_arrays.append(df[col].values.astype(np.float64))
-                actual_float_cols.append(col)
+            else:
+                logger.warning(f"[SHARED] Column '{col}' missing for {pair}, padding with zeros")
+                float_arrays.append(np.zeros(n_rows, dtype=np.float64))
+            actual_float_cols.append(col)
 
         # Calculate total size needed
         date_bytes = date_values.nbytes  # n_rows * 8
         float_bytes = sum(a.nbytes for a in float_arrays)  # n_rows * 8 * n_cols
         total_bytes = date_bytes + float_bytes
 
-        # Create shared memory block
+        # Create shared memory block with unique name (uuid avoids collisions)
         safe_pair = pair.replace('/', '_')
-        shm_name = f"ga_ohlcv_{safe_pair}_{id(self)}"
+        shm_name = f"ga_ohlcv_{safe_pair}_{self._instance_id}"
 
-        shm = shared_memory.SharedMemory(name=shm_name, create=True, size=total_bytes)
+        # Handle stale blocks from previous crashed runs
+        try:
+            shm = shared_memory.SharedMemory(name=shm_name, create=True, size=total_bytes)
+        except FileExistsError:
+            logger.warning(f"[SHARED] Stale block '{shm_name}' found, unlinking and recreating")
+            try:
+                old_shm = shared_memory.SharedMemory(name=shm_name, create=False)
+                old_shm.close()
+                old_shm.unlink()
+            except Exception as e:
+                logger.debug(f"[SHARED] Error unlinking stale block: {e}")
+            shm = shared_memory.SharedMemory(name=shm_name, create=True, size=total_bytes)
+
         self._shm_blocks[pair] = shm
-        _shared_blocks.append(shm)
+        with _shared_blocks_lock:
+            _shared_blocks.append(shm)
 
         # Copy data into shared memory
         offset = 0
@@ -310,7 +370,8 @@ def attach_shared_data(metadata: Dict[str, Any]) -> Dict[str, pd.DataFrame]:
     for pair, meta in metadata['pairs'].items():
         try:
             shm = shared_memory.SharedMemory(name=meta['shm_name'], create=False)
-            _worker_shm_blocks.append(shm)  # Keep alive for view lifetime
+            with _worker_shm_lock:
+                _worker_shm_blocks.append(shm)  # Keep alive for view lifetime
 
             n_rows = meta['n_rows']
             float_cols = meta['float_cols']
