@@ -268,11 +268,7 @@ class AdaptiveWeightTracker:
             self._evidence_trust_initial = min(0.4, self._evidence_trust_max * 0.5)
         elif max_generations <= 40:
             self._evidence_trust_initial = min(0.3, self._evidence_trust_max * 0.35)
-        # Also scale retrain interval so the predictor adapts mid-run.
-        # Default interval=10 fires only at gen 10 in a 10-gen run (too late).
-        # Rule: fire ~3× per run (min interval=2 to avoid thrashing).
-        if not self._sis_config.get('online_retrain_interval'):
-            self._online_retrain_interval = max(2, max_generations // 3)
+        # Note: retrain interval scaling is handled by SISIntegrator
 
     def _current_evidence_trust(self) -> float:
         """Adaptive evidence trust: ramps up with generation and observations."""
