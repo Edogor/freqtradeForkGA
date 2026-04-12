@@ -392,7 +392,10 @@ class SISIntegrator:
 
     def __init__(self, config: dict, logger_inst: logging.Logger):
         self.config = config
-        self.logger = logger_inst
+        # Use module-level logger so messages propagate to root logger
+        # and appear in the log file. The passed-in logger_inst is the
+        # GeneticAlgorithm logger which has propagate=False and no file handler.
+        self.logger = logger
         self._sis_config: Dict[str, Any] = config.get('sis', {})
 
         # ── Per-hook enable/disable toggles ──────────────────────────────
