@@ -4,11 +4,12 @@ import { ArrowLeft, Code, Copy, Check, Shield, AlertTriangle, Syringe, Download,
 import { StrategyNarrativeCard } from '../components/StrategyNarrativeCard';
 import { StrategyParameterEditor } from '../components/StrategyParameterEditor';
 import { ChartBacktestPanel } from '../components/ChartBacktestPanel';
+import { StrategyGeneTree } from '../components/StrategyGeneTree';
+import type { IndicatorPreview } from '../components/StrategyGeneTree';
 import { api } from '../api/client';
 import { useStore } from '../store/useStore';
 import { LoadingState, ErrorState } from '../components/StateDisplays';
 import { MetricsCard } from '../components/MetricsCard';
-import { StrategyGeneTree } from '../components/StrategyGeneTree';
 import { CandlestickChart, parseOHLCVCandles } from '../components/CandlestickChart';
 import type { StrategyDetail, RunSummary, PairInfo, OHLCVResponse, BacktestTrade, BacktestTradesResponse, LineageNode } from '../types';
 import type { Candle, IndicatorLine } from '../components/CandlestickChart';
@@ -74,6 +75,12 @@ export function StrategyPage() {
   const [testRunning, setTestRunning] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const testPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // T3-6: Indicator preview state — clicking a gene indicator highlights it on the chart
+  const [activeIndicator, setActiveIndicator] = useState<IndicatorPreview | null>(null);
+  const handleIndicatorClick = (ind: IndicatorPreview) => {
+    setActiveIndicator((prev) => prev?.type === ind.type ? null : ind);
+  };
   const navigate = useNavigate();
   const runsMap = useStore((s) => s.runs);
   const activeRuns = Array.from(runsMap.values()).filter(
@@ -609,7 +616,13 @@ export function StrategyPage() {
       )}
 
       {/* Strategy Gene Tree */}
-      {strategy.gene && <StrategyGeneTree gene={strategy.gene} />}
+      {strategy.gene && (
+        <StrategyGeneTree
+          gene={strategy.gene}
+          onIndicatorClick={handleIndicatorClick}
+          activeIndicator={activeIndicator?.type ?? null}
+        />
+      )}
 
       {/* Price Data / OHLCV Chart + Interactive Backtest */}
       {strategy.gene && (
@@ -625,6 +638,7 @@ export function StrategyPage() {
               defaultPair={selectedPair}
               defaultTimeframe={selectedTimeframe}
               defaultExchange={btExchange}
+              highlightIndicator={activeIndicator}
               onTradesLoaded={(t, id) => {
                 setBacktestTrades(t);
                 setLastBacktestId(id);

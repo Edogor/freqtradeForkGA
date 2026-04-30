@@ -3,8 +3,9 @@ import { Outlet, useLocation, Link } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { ToastContainer } from './Toast';
 import { ErrorBoundary } from './ErrorBoundary';
+import { NotificationCenter } from './NotificationCenter';
 import { useStore } from '../store/useStore';
-import { ChevronRight, WifiOff, Menu, X } from 'lucide-react';
+import { ChevronRight, WifiOff, Menu } from 'lucide-react';
 
 function Breadcrumbs() {
   const location = useLocation();
@@ -72,7 +73,13 @@ export function Layout() {
           >
             <Menu className="w-5 h-5" />
           </button>
-          <span className="font-semibold text-sm text-gray-200">GA Dashboard</span>
+          <span className="font-semibold text-sm text-gray-200 flex-1">GA Dashboard</span>
+          <NotificationCenter />
+        </div>
+
+        {/* Desktop top bar — notification bell right-aligned */}
+        <div className="hidden lg:flex items-center justify-end mb-2 -mt-2">
+          <NotificationCenter />
         </div>
 
         {/* Reconnection banner */}

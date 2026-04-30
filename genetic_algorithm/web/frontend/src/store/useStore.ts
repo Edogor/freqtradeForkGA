@@ -12,6 +12,16 @@ import type { WSEvent, RunSummary, GenerationStats } from '../types';
 
 const MAX_EVENTS = 2000;
 const MAX_TOASTS = 5;
+const MAX_NOTIFICATIONS = 50;
+
+export interface Notification {
+  id: string;
+  type: 'success' | 'error' | 'info' | 'warning';
+  title: string;
+  message?: string;
+  timestamp: number;  // unix ms
+  read: boolean;
+}
 
 export interface Toast {
   id: string;
@@ -51,6 +61,12 @@ interface DashboardState {
   toasts: Toast[];
   addToast: (toast: Omit<Toast, 'id'>) => void;
   removeToast: (id: string) => void;
+
+  // Persistent notification history
+  notifications: Notification[];
+  unreadCount: number;
+  markAllRead: () => void;
+  clearNotifications: () => void;
 }
 
 export const useStore = create<DashboardState>((set, get) => ({
@@ -173,20 +189,43 @@ export const useStore = create<DashboardState>((set, get) => ({
 
     set({ events, runs, generationStats: genStats, runPhases: phases, runEvalProgress: evalProgress });
 
-    // Auto-toast for notable events
+  // Auto-toast for notable events
     const addToast = get().addToast;
+    const addNotif = (n: Omit<Notification, 'id' | 'timestamp' | 'read'>) => {
+      const id = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const full: Notification = { ...n, id, timestamp: Date.now(), read: false };
+      set((state) => ({
+        notifications: [full, ...state.notifications].slice(0, MAX_NOTIFICATIONS),
+        unreadCount: state.unreadCount + 1,
+      }));
+    };
     if (e.type === 'new_best') {
       const data = e.data as Record<string, unknown>;
       const ind = (data.individual as Record<string, unknown>) || data;
       const fitness = (ind.fitness as number)?.toFixed(4) ?? '?';
       addToast({ type: 'success', title: 'New Best Found', message: `Fitness: ${fitness} (${e.run_id})` });
+      addNotif({ type: 'success', title: 'New Best Found', message: `Fitness: ${fitness} — run ${e.run_id}` });
     } else if (e.type === 'evolution.complete' || e.type === 'run.completed') {
       addToast({ type: 'info', title: 'Run Completed', message: e.run_id });
+      addNotif({ type: 'info', title: 'Run Completed', message: e.run_id });
     } else if (e.type === 'run.error') {
       const data = e.data as Record<string, unknown>;
       addToast({ type: 'error', title: 'Run Error', message: (data.error as string) || e.run_id, duration: 10000 });
+      addNotif({ type: 'error', title: 'Run Error', message: (data.error as string) || e.run_id });
     } else if (e.type === 'run.stopped') {
       addToast({ type: 'warning', title: 'Run Stopped', message: e.run_id });
+      addNotif({ type: 'warning', title: 'Run Stopped', message: e.run_id });
+    } else if (e.type === 'hof.updated') {
+      const data = e.data as Record<string, unknown>;
+      const fitness = (data.fitness as number)?.toFixed(4) ?? '?';
+      addToast({ type: 'success', title: 'Hall of Fame Updated', message: `New entry: fitness ${fitness}` });
+      addNotif({ type: 'success', title: 'Hall of Fame Updated', message: `New entry: fitness ${fitness} — run ${e.run_id}` });
+    } else if (e.type === 'overfitting.detected') {
+      const data = e.data as Record<string, unknown>;
+      addToast({ type: 'warning', title: 'Overfitting Detected', message: (data.message as string) || e.run_id, duration: 8000 });
+      addNotif({ type: 'warning', title: 'Overfitting Detected', message: (data.message as string) || `Run ${e.run_id}` });
+    } else if (e.type === 'stagnation.detected') {
+      addNotif({ type: 'warning', title: 'Evolution Stagnated', message: `No improvement — run ${e.run_id}` });
     }
   },
   clearEvents: () => set({ events: [] }),
@@ -243,4 +282,14 @@ export const useStore = create<DashboardState>((set, get) => ({
   },
   removeToast: (id) =>
     set((state) => ({ toasts: state.toasts.filter((t) => t.id !== id) })),
+
+  // ── Notifications ────────────────────────────────────────────
+  notifications: [],
+  unreadCount: 0,
+  markAllRead: () =>
+    set((state) => ({
+      notifications: state.notifications.map((n) => ({ ...n, read: true })),
+      unreadCount: 0,
+    })),
+  clearNotifications: () => set({ notifications: [], unreadCount: 0 }),
 }));

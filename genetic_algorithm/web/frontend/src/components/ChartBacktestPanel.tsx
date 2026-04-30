@@ -16,7 +16,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play, Loader2, Check, ChevronDown, ChevronUp,
   Crosshair, RotateCcw, TrendingUp, TrendingDown,
-  BarChart3, Calendar, DollarSign, ShieldAlert,
+  BarChart3, Calendar, DollarSign, ShieldAlert, Eye,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { CandlestickChart, parseOHLCVCandles } from './CandlestickChart';
@@ -70,6 +70,8 @@ function StatChip({
   );
 }
 
+import type { IndicatorPreview } from './StrategyGeneTree';
+
 // ── Props ─────────────────────────────────────────────────────
 
 interface ChartBacktestPanelProps {
@@ -80,6 +82,8 @@ interface ChartBacktestPanelProps {
   defaultExchange?: string;
   /** Called when a backtest completes — passes back trades for cross-card use */
   onTradesLoaded?: (trades: BacktestTrade[], backtestId: string) => void;
+  /** If set, a specific indicator is highlighted/focused on the chart */
+  highlightIndicator?: IndicatorPreview | null;
 }
 
 // ── Component ─────────────────────────────────────────────────
@@ -91,6 +95,7 @@ export function ChartBacktestPanel({
   defaultTimeframe = '',
   defaultExchange = 'binance',
   onTradesLoaded,
+  highlightIndicator,
 }: ChartBacktestPanelProps) {
 
   // ── Chart data ──────────────────────────────────────────────
@@ -180,6 +185,15 @@ export function ChartBacktestPanel({
       })
       .catch(() => setIndicatorLines([]));
   }, [selectedPair, selectedTimeframe, selectedExchange, gene.indicators]);
+
+  // ── Highlighted indicator lines (T3-6) ──────────────────────
+  // When a specific indicator is highlighted, give it a thicker line
+  const visibleIndicatorLines: IndicatorLine[] = highlightIndicator
+    ? indicatorLines.map((l) => {
+        const nameMatch = l.name.toLowerCase().startsWith(highlightIndicator.type.toLowerCase());
+        return nameMatch ? { ...l, lineWidth: 3 } : { ...l, lineWidth: 1 };
+      })
+    : indicatorLines;
 
   // ── Candle click handler ────────────────────────────────────
   const handleCandleClick = useCallback((unixSec: number) => {
@@ -362,14 +376,25 @@ export function ChartBacktestPanel({
       )}
 
       {!chartLoading && candles.length > 0 && (
-        <CandlestickChart
-          candles={candles}
-          trades={currentPairTrades}
-          indicators={indicatorLines}
-          height={400}
-          onCandleClick={rangeMode !== 'off' ? handleCandleClick : undefined}
-          selectionRange={selectionRange}
-        />
+        <>
+          {highlightIndicator && (
+            <div className="flex items-center gap-2 px-2 py-1 mb-1 rounded-lg bg-accent/10 border border-accent/20 text-xs text-accent">
+              <Eye className="w-3 h-3 flex-shrink-0" />
+              Previewing <span className="font-mono font-semibold">{highlightIndicator.type}</span>
+              <span className="text-gray-500">
+                ({Object.entries(highlightIndicator.parameters).map(([k,v]) => `${k}=${v}`).join(', ')})
+              </span>
+            </div>
+          )}
+          <CandlestickChart
+            candles={candles}
+            trades={currentPairTrades}
+            indicators={visibleIndicatorLines}
+            height={400}
+            onCandleClick={rangeMode !== 'off' ? handleCandleClick : undefined}
+            selectionRange={selectionRange}
+          />
+        </>
       )}
 
       {!chartLoading && candles.length === 0 && selectedPair && (
