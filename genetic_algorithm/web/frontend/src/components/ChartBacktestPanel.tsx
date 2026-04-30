@@ -135,6 +135,11 @@ export function ChartBacktestPanel({
   const [btError, setBtError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ── Infinite scroll state ───────────────────────────────────
+  const [moreDataLoading, setMoreDataLoading] = useState(false);
+  const [noMoreData, setNoMoreData] = useState(false);
+  const oldestCandleTimeRef = useRef<number>(0);
+
   // ── Sync defaults when parent props change ──────────────────
   useEffect(() => { if (defaultPair && !selectedPair) setSelectedPair(defaultPair); }, [defaultPair]);
   useEffect(() => { if (defaultExchange) setSelectedExchange(defaultExchange); }, [defaultExchange]);
@@ -144,13 +149,19 @@ export function ChartBacktestPanel({
     if (!selectedPair || !selectedTimeframe) return;
     setChartLoading(true);
     setCandles([]);
+    setNoMoreData(false);
+    oldestCandleTimeRef.current = 0;
     api.getOHLCV({
       pair: selectedPair,
       timeframe: selectedTimeframe,
       exchange: selectedExchange,
-      limit: 1000,
+      limit: 5000,
     })
-      .then((r) => setCandles(parseOHLCVCandles(r.candles)))
+      .then((r) => {
+        const parsed = parseOHLCVCandles(r.candles);
+        setCandles(parsed);
+        if (parsed.length > 0) oldestCandleTimeRef.current = parsed[0].time;
+      })
       .catch(() => {})
       .finally(() => setChartLoading(false));
   }, [selectedPair, selectedTimeframe, selectedExchange]);
@@ -217,6 +228,66 @@ export function ChartBacktestPanel({
   const selectionRange: SelectionRange | null =
     rangeStart != null
       ? { start: rangeStart, end: rangeEnd ?? rangeStart }
+
+        // ── Infinite scroll: load older candles ────────────────────
+        const handleNeedMoreData = useCallback(async () => {
+          if (moreDataLoading || noMoreData || !oldestCandleTimeRef.current || !selectedPair || !selectedTimeframe) return;
+          setMoreDataLoading(true);
+          try {
+            // Fetch candles ending one day before our oldest candle
+            const endStr = unixToYYYYMMDD(oldestCandleTimeRef.current - 86400);
+            const [ohlcvResp, indResp] = await Promise.all([
+              api.getOHLCV({ pair: selectedPair, timeframe: selectedTimeframe, exchange: selectedExchange, end: endStr, limit: 3000 }),
+              gene.indicators?.length
+                ? api.getIndicators({
+                    pair: selectedPair,
+                    timeframe: selectedTimeframe,
+                    exchange: selectedExchange,
+                    indicators: gene.indicators.map((i) => i.type).join(','),
+                    end: endStr,
+                    limit: 3000,
+                  })
+                : Promise.resolve(null),
+            ]);
+
+            const newCandles = parseOHLCVCandles(ohlcvResp.candles);
+            if (newCandles.length === 0) {
+              setNoMoreData(true);
+              return;
+            }
+
+            // Prepend (deduplication by time)
+            setCandles((prev) => {
+              const existingTimes = new Set(prev.map((c) => c.time));
+              const fresh = newCandles.filter((c) => !existingTimes.has(c.time));
+              if (fresh.length === 0) { setNoMoreData(true); return prev; }
+              const merged = [...fresh, ...prev];
+              oldestCandleTimeRef.current = merged[0].time;
+              return merged;
+            });
+
+            // Merge indicator data for older range
+            if (indResp) {
+              const newLines: IndicatorLine[] = Object.entries(indResp.indicators || {}).map(([name, data]) => ({
+                name,
+                data: (data as [number, number][]).map(([ts, v]) => ({ time: Math.floor(ts / 1000), value: v })),
+                pane: 'price' as const,
+              }));
+              setIndicatorLines((prev) =>
+                prev.map((existing) => {
+                  const fresh = newLines.find((l) => l.name === existing.name);
+                  if (!fresh) return existing;
+                  const existingTimes = new Set(existing.data.map((d) => d.time));
+                  return { ...existing, data: [...fresh.data.filter((d) => !existingTimes.has(d.time)), ...existing.data] };
+                }),
+              );
+            }
+
+            if (newCandles.length < 50) setNoMoreData(true);
+          } catch { /* ignore */ } finally {
+            setMoreDataLoading(false);
+          }
+        }, [moreDataLoading, noMoreData, selectedPair, selectedTimeframe, selectedExchange, gene.indicators]);
       : null;
 
   // ── Backtest polling ────────────────────────────────────────
@@ -393,6 +464,8 @@ export function ChartBacktestPanel({
             height={400}
             onCandleClick={rangeMode !== 'off' ? handleCandleClick : undefined}
             selectionRange={selectionRange}
+            onNeedMoreData={handleNeedMoreData}
+            moreDataLoading={moreDataLoading}
           />
         </>
       )}
