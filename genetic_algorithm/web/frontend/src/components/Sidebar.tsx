@@ -10,6 +10,7 @@ import {
   GitCompare,
   Brain,
   Layers,
+  X,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useStore } from '../store/useStore';
@@ -25,7 +26,11 @@ const navItems = [
   { to: '/config',        icon: Settings,   label: 'Config' },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  onClose?: () => void;
+}
+
+export function Sidebar({ onClose }: SidebarProps) {
   const connected = useStore((s) => s.connected);
   const runsMap = useStore((s) => s.runs);
   const activeRuns = Array.from(runsMap.values()).filter(
@@ -34,10 +39,19 @@ export function Sidebar() {
 
   return (
     <aside className="w-56 bg-surface-1 border-r border-white/5 flex flex-col h-screen sticky top-0">
-      {/* Logo */}
+      {/* Logo + close button */}
       <div className="flex items-center gap-2 px-4 py-4 border-b border-white/5">
         <BarChart3 className="w-6 h-6 text-accent" />
         <span className="font-semibold text-sm tracking-tight">GA Dashboard</span>
+        {onClose && (
+          <button
+            onClick={onClose}
+            className="ml-auto p-1 rounded text-gray-500 hover:text-gray-200 transition-colors lg:hidden"
+            aria-label="Close menu"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        )}
       </div>
 
       {/* Nav */}
@@ -46,6 +60,7 @@ export function Sidebar() {
           <NavLink
             key={to}
             to={to}
+            onClick={onClose}
             className={({ isActive }) =>
               clsx(
                 'flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors',

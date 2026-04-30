@@ -128,11 +128,26 @@ def _run_backtest(backtest_id: str, body: BacktestRequest) -> None:
         config["backtesting"]["timerange"] = body.timerange
         if body.pairs:
             config["backtesting"]["pairs"] = body.pairs
-        config["backtesting"]["stake_amount"] = body.stake_amount
         config["backtesting"]["exchange"] = body.exchange
 
         # Build strategy
         gene = StrategyGene.from_dict(body.strategy_gene)
+
+        # Apply optional risk param overrides directly on the gene
+        if body.stoploss is not None:
+            gene.stoploss = body.stoploss
+        if body.max_open_trades is not None:
+            gene.max_open_trades = body.max_open_trades
+        if body.trailing_stop is not None:
+            gene.trailing_stop = body.trailing_stop
+        if body.trailing_stop_positive is not None:
+            gene.trailing_stop_positive = body.trailing_stop_positive
+        if body.trailing_stop_positive_offset is not None:
+            gene.trailing_stop_positive_offset = body.trailing_stop_positive_offset
+
+        # Also push stake_amount into config (gene doesn't carry stake)
+        config["backtesting"]["stake_amount"] = body.stake_amount
+
         generator = StrategyGenerator(config)
         code = generator.generate_strategy_code(gene)
         strategy_name = f"BacktestOnDemand_{backtest_id}"

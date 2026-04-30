@@ -88,6 +88,12 @@ export const api = {
     pairs?: string[];
     timeframe?: string;
     exchange?: string;
+    stake_amount?: number;
+    stoploss?: number;
+    max_open_trades?: number;
+    trailing_stop?: boolean;
+    trailing_stop_positive?: number;
+    trailing_stop_positive_offset?: number;
   }) =>
     request<BacktestResult>('/api/backtest', {
       method: 'POST',
@@ -154,6 +160,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  // Interactive strategy test (re-backtest with modified params)
+  testStrategy: (
+    runId: string,
+    strategyId: string,
+    body: {
+      gene_overrides?: Record<string, unknown>;
+      timerange?: string;
+      pairs?: string[];
+      exchange?: string;
+    },
+  ) =>
+    request<{ backtest_id: string; status: string }>(
+      `/api/runs/${runId}/strategies/${strategyId}/test`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 
   // Run config
   getRunConfig: (runId: string) =>

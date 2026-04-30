@@ -103,7 +103,7 @@ This roadmap documents all planned fixes, improvements, and new features for the
 
 ## TIER 2 — High-Value Features
 
-### T2-1: Interactive Strategy Testing Panel ⭐ (Core Request)
+### T2-1: ✅ Interactive Strategy Testing Panel ⭐ (Core Request)
 **Goal:** Let the user tweak strategy parameters (indicator periods, thresholds, entry/exit conditions) in a UI form, submit, and see re-backtest results displayed on the chart — all without leaving the page.
 
 **Components needed:**
@@ -412,7 +412,7 @@ Phase A — Quick Wins (1-2 days total)
 
 Phase B — Core Interactive Features (1 week)
   T1-5  Mobile responsive layout
-  T2-1  Interactive strategy testing panel ⭐
+  T2-1  ✅ Interactive strategy testing panel ⭐
   T2-3  Pareto front visualization
   T2-8  Notifications system
   T2-5  Evolution replay scrubber

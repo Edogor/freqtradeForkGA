@@ -743,14 +743,21 @@ class DirectBacktester:
                             evicted_key, _ = self._bt_data_cache.popitem(last=False)
                             logger.debug(f"[CACHE] Evicted LRU data cache entry: {evicted_key[:2]}…")
                     
-                    # Run backtest with timeout safety net
+                    # Run backtest with timeout safety net.
+                    # signal.alarm / SIGALRM only work on the main thread;
+                    # skip them when called from a worker thread (e.g. web dashboard).
+                    import threading as _threading
+                    _is_main_thread = _threading.current_thread() is _threading.main_thread()
+
                     def _timeout_handler(signum, frame):
                         raise TimeoutError(f"Backtest exceeded {self.backtest_timeout}s timeout")
-                    
+
                     old_handler = None
-                    if self.backtest_timeout > 0 and hasattr(signal, 'SIGALRM'):
+                    _alarm_set = False
+                    if self.backtest_timeout > 0 and hasattr(signal, 'SIGALRM') and _is_main_thread:
                         old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
                         signal.alarm(self.backtest_timeout)
+                        _alarm_set = True
                     try:
                         strat = backtesting.strategylist[0]
                         min_date, max_date = backtesting.backtest_one_strategy(
@@ -771,7 +778,7 @@ class DirectBacktester:
                             error_message=f"Backtest timed out after {self.backtest_timeout}s"
                         )
                     finally:
-                        if old_handler is not None:
+                        if _alarm_set and old_handler is not None:
                             signal.alarm(0)
                             signal.signal(signal.SIGALRM, old_handler)
                     

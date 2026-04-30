@@ -42,16 +42,29 @@ export interface IndicatorLine {
   pane?: 'price' | 'separate';  // 'price' overlays on candlestick pane
 }
 
+interface SelectionRange {
+  start: number;  // unix seconds
+  end: number;    // unix seconds
+}
+
 interface CandlestickChartProps {
   candles: Candle[];
   trades?: BacktestTrade[];
+  /** Test trades (from interactive panel) — rendered in purple */
+  testTrades?: BacktestTrade[];
   indicators?: IndicatorLine[];
   height?: number;
   /** Show volume histogram below candles */
   showVolume?: boolean;
   /** Called when user clicks "Set as Backtest Range" with the visible time range (YYYYMMDD strings) */
   onTimeRangeSelect?: (start: string, end: string) => void;
+  /** Called when user clicks a candle — receives unix seconds */
+  onCandleClick?: (unixSeconds: number) => void;
+  /** Highlight a selected time range on the chart (unix seconds) */
+  selectionRange?: SelectionRange | null;
 }
+
+export type { SelectionRange };
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -80,16 +93,23 @@ const INDICATOR_COLORS = [
 export const CandlestickChart = memo(function CandlestickChart({
   candles,
   trades,
+  testTrades,
   indicators,
   height = 500,
   showVolume = true,
   onTimeRangeSelect,
+  onCandleClick,
+  selectionRange,
 }: CandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const indicatorSeriesRefs = useRef<ISeriesApi<'Line'>[]>([]);
+  const selectionOverlayRef = useRef<HTMLDivElement>(null);
+  // Keep latest callback in a ref to avoid re-subscribing on every render
+  const onCandleClickRef = useRef(onCandleClick);
+  useEffect(() => { onCandleClickRef.current = onCandleClick; }, [onCandleClick]);
 
   // Create chart on mount
   useEffect(() => {
@@ -147,6 +167,13 @@ export const CandlestickChart = memo(function CandlestickChart({
 
     chartRef.current = chart;
 
+    // Click handler — passes clicked candle time to parent
+    chart.subscribeClick((param) => {
+      if (param.time != null) {
+        onCandleClickRef.current?.(param.time as number);
+      }
+    });
+
     // Responsive resize
     const resizeHandler = () => {
       if (containerRef.current && chartRef.current) {
@@ -195,40 +222,52 @@ export const CandlestickChart = memo(function CandlestickChart({
     chartRef.current?.timeScale().fitContent();
   }, [candles]);
 
-  // Update trade markers
+  // Update trade markers (original + test overlay)
   useEffect(() => {
-    if (!candleSeriesRef.current || !trades || trades.length === 0) return;
+    if (!candleSeriesRef.current) return;
 
     const markers: SeriesMarker<Time>[] = [];
 
-    for (const t of trades) {
-      const openTime = parseDateToUnix(t.open_date);
-      const closeTime = parseDateToUnix(t.close_date);
-      const profitable = t.profit_ratio > 0;
+    const addMarkers = (tradeList: BacktestTrade[], isTest: boolean) => {
+      for (const t of tradeList) {
+        const openTime = parseDateToUnix(t.open_date);
+        const closeTime = parseDateToUnix(t.close_date);
+        const profitable = t.profit_ratio > 0;
 
-      // Entry marker
-      markers.push({
-        time: toTime(openTime),
-        position: t.is_short ? 'aboveBar' : 'belowBar',
-        color: t.is_short ? '#8b5cf6' : '#3b82f6',
-        shape: t.is_short ? 'arrowDown' : 'arrowUp',
-        text: t.is_short ? 'S' : 'B',
-      });
+        // Test trades use purple; regular use blue/green/red
+        const entryColor = isTest ? '#a855f7' : (t.is_short ? '#8b5cf6' : '#3b82f6');
+        const exitColor = isTest ? (profitable ? '#c084fc' : '#f472b6') : (profitable ? '#22c55e' : '#ef4444');
 
-      // Exit marker
-      markers.push({
-        time: toTime(closeTime),
-        position: t.is_short ? 'belowBar' : 'aboveBar',
-        color: profitable ? '#22c55e' : '#ef4444',
-        shape: t.is_short ? 'arrowUp' : 'arrowDown',
-        text: `${profitable ? '+' : ''}${(t.profit_ratio * 100).toFixed(1)}%`,
-      });
+        markers.push({
+          time: toTime(openTime),
+          position: t.is_short ? 'aboveBar' : 'belowBar',
+          color: entryColor,
+          shape: t.is_short ? 'arrowDown' : 'arrowUp',
+          text: isTest ? '◆' : (t.is_short ? 'S' : 'B'),
+        });
+
+        markers.push({
+          time: toTime(closeTime),
+          position: t.is_short ? 'belowBar' : 'aboveBar',
+          color: exitColor,
+          shape: t.is_short ? 'arrowUp' : 'arrowDown',
+          text: `${profitable ? '+' : ''}${(t.profit_ratio * 100).toFixed(1)}%`,
+        });
+      }
+    };
+
+    if (trades && trades.length > 0) addMarkers(trades, false);
+    if (testTrades && testTrades.length > 0) addMarkers(testTrades, true);
+
+    if (markers.length === 0) {
+      candleSeriesRef.current.setMarkers([]);
+      return;
     }
 
     // Sort by time (required by lightweight-charts)
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     candleSeriesRef.current.setMarkers(markers);
-  }, [trades]);
+  }, [trades, testTrades]);
 
   // Update indicator overlays
   useEffect(() => {
@@ -269,6 +308,38 @@ export const CandlestickChart = memo(function CandlestickChart({
     });
   }, [indicators]);
 
+  // Selection range overlay — position an absolutely-placed highlight div
+  useEffect(() => {
+    const overlay = selectionOverlayRef.current;
+    const chart = chartRef.current;
+    if (!overlay || !chart) return;
+
+    if (!selectionRange) {
+      overlay.style.display = 'none';
+      return;
+    }
+
+    const positionOverlay = () => {
+      const ts = chart.timeScale();
+      const xStart = ts.timeToCoordinate(toTime(selectionRange.start));
+      const xEnd   = ts.timeToCoordinate(toTime(selectionRange.end));
+      if (xStart == null || xEnd == null) {
+        overlay.style.display = 'none';
+        return;
+      }
+      const left  = Math.min(xStart, xEnd);
+      const width = Math.abs(xEnd - xStart);
+      overlay.style.display = 'block';
+      overlay.style.left   = `${left}px`;
+      overlay.style.width  = `${width}px`;
+    };
+
+    positionOverlay();
+    // Re-position when the user scrolls/zooms
+    chart.timeScale().subscribeVisibleTimeRangeChange(positionOverlay);
+    return () => { chart.timeScale().unsubscribeVisibleTimeRangeChange(positionOverlay); };
+  }, [selectionRange]);
+
   return (
     <div className="relative">
       {onTimeRangeSelect && candles.length > 0 && (
@@ -291,10 +362,21 @@ export const CandlestickChart = memo(function CandlestickChart({
           Set as Backtest Range
         </button>
       )}
+      {/* Selection range highlight overlay */}
+      <div
+        ref={selectionOverlayRef}
+        className="absolute top-0 bottom-0 pointer-events-none z-10"
+        style={{
+          display: 'none',
+          background: 'rgba(99,102,241,0.15)',
+          borderLeft: '2px solid rgba(99,102,241,0.6)',
+          borderRight: '2px solid rgba(99,102,241,0.6)',
+        }}
+      />
       <div
         ref={containerRef}
         className="w-full rounded-lg overflow-hidden border border-white/5"
-        style={{ minHeight: height }}
+        style={{ minHeight: height, cursor: onCandleClick ? 'crosshair' : 'default' }}
       />
     </div>
   );
