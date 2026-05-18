@@ -100,10 +100,10 @@ if [[ "$MODE" == "dashboard" ]]; then
     GA_CMD="cd ${REPO_DIR} && source ${VENV_DIR}/bin/activate && python -m genetic_algorithm.web.server"
     TAIL_CMD="echo 'Dashboard running at http://0.0.0.0:8501'"
 elif [[ "$MODE" == "resume" ]]; then
-    GA_CMD="cd ${REPO_DIR} && source ${VENV_DIR}/bin/activate && python genetic_algorithm/run_ga.py --config ${CONFIG} --no-monitor --yes --resume ${RESUME_PATH} 2>&1 | tee -a ${LOG_FILE}"
+    GA_CMD="cd ${REPO_DIR} && source ${VENV_DIR}/bin/activate && python -m genetic_algorithm run ${CONFIG} --no-monitor --yes --resume ${RESUME_PATH} 2>&1 | tee -a ${LOG_FILE}"
     TAIL_CMD="tail -f ${LOG_FILE}"
 else
-    GA_CMD="cd ${REPO_DIR} && source ${VENV_DIR}/bin/activate && python genetic_algorithm/run_ga.py --config ${CONFIG} --no-monitor --yes 2>&1 | tee -a ${LOG_FILE}"
+    GA_CMD="cd ${REPO_DIR} && source ${VENV_DIR}/bin/activate && python -m genetic_algorithm run ${CONFIG} --no-monitor --yes 2>&1 | tee -a ${LOG_FILE}"
     TAIL_CMD="tail -f ${LOG_FILE}"
 fi
 

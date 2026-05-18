@@ -1,0 +1,39 @@
+# Island — multi-island GA with ring migration
+# Runs N independent populations that exchange top strategies periodically.
+
+backtesting:
+  pairs: [BTC/USDT, ETH/USDT]
+  timerange: "20240601-20260201"
+  max_open_trades: 3
+
+genetic_algorithm:
+  population_size: 10  # per island
+  generations: 12
+  elite_size: 2
+  mutation_rate: 0.20
+  crossover_rate: 0.75
+  selection_method: tournament
+  adaptive_mutation: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 6
+  population_per_island: 10
+  migration:
+    topology: ring
+    interval: 3
+    rate: 0.2
+
+parallel_evaluation:
+  enabled: true
+
+holdout_validation:
+  enabled: true
+  holdout_pct: 0.15
+
+holdout_monitoring:
+  enabled: true
+  interval: 3
+
+deflated_sharpe:
+  enabled: true

@@ -1,11 +1,22 @@
 import type { StrategyGene } from '../types';
 import { clsx } from 'clsx';
+import { Eye, EyeOff } from 'lucide-react';
+import { useState } from 'react';
+
+export interface IndicatorPreview {
+  type: string;
+  parameters: Record<string, unknown>;
+}
 
 interface StrategyGeneTreeProps {
   gene: StrategyGene;
+  /** Called when user clicks an indicator node to preview it on the chart */
+  onIndicatorClick?: (ind: IndicatorPreview) => void;
+  /** Currently highlighted indicator type (shown with active state) */
+  activeIndicator?: string | null;
 }
 
-export function StrategyGeneTree({ gene }: StrategyGeneTreeProps) {
+export function StrategyGeneTree({ gene, onIndicatorClick, activeIndicator }: StrategyGeneTreeProps) {
   return (
     <div className="card space-y-4">
       <h3 className="text-sm font-medium text-gray-300">Strategy Gene</h3>
@@ -20,20 +31,49 @@ export function StrategyGeneTree({ gene }: StrategyGeneTreeProps) {
 
       {/* Indicators */}
       <Section title={`Indicators (${gene.indicators.length})`}>
+        {onIndicatorClick && (
+          <p className="text-[10px] text-gray-500 mb-1.5">
+            Click an indicator to preview it on the chart ↓
+          </p>
+        )}
         <div className="space-y-1.5">
-          {gene.indicators.map((ind, i) => (
-            <div key={i} className="flex items-center gap-2 text-xs px-2 py-1.5 bg-surface-2 rounded-lg">
-              <span className="text-accent font-mono font-medium">{ind.type}</span>
-              <span className="text-gray-500">
-                {Object.entries(ind.parameters)
-                  .map(([k, v]) => `${k}=${v}`)
-                  .join(', ')}
-              </span>
-              {ind.timeframe && (
-                <span className="ml-auto text-gray-600 text-[10px]">{ind.timeframe}</span>
-              )}
-            </div>
-          ))}
+          {gene.indicators.map((ind, i) => {
+            const isActive = activeIndicator === ind.type;
+            return (
+              <div
+                key={i}
+                onClick={() => onIndicatorClick?.({ type: ind.type, parameters: ind.parameters })}
+                className={clsx(
+                  'flex items-center gap-2 text-xs px-2 py-1.5 rounded-lg transition-colors',
+                  onIndicatorClick
+                    ? 'cursor-pointer select-none'
+                    : '',
+                  isActive
+                    ? 'bg-accent/20 border border-accent/40'
+                    : 'bg-surface-2 hover:bg-surface-2/80',
+                )}
+              >
+                <span className={clsx('font-mono font-medium', isActive ? 'text-accent' : 'text-accent')}>
+                  {ind.type}
+                </span>
+                <span className="text-gray-500">
+                  {Object.entries(ind.parameters)
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join(', ')}
+                </span>
+                {ind.timeframe && (
+                  <span className="text-gray-600 text-[10px]">{ind.timeframe}</span>
+                )}
+                {onIndicatorClick && (
+                  <span className="ml-auto flex-shrink-0">
+                    {isActive
+                      ? <EyeOff className="w-3 h-3 text-accent" />
+                      : <Eye className="w-3 h-3 text-gray-600" />}
+                  </span>
+                )}
+              </div>
+            );
+          })}
         </div>
       </Section>
 

@@ -123,6 +123,13 @@ def extract_features(strategy_gene) -> List[float]:
     features.append(float(len(gene.informative_timeframes)))
     features.append(1.0 if gene.can_short else 0.0)
 
+    # Defensive check: this should ALWAYS be exactly 65 features
+    # 26 (indicator one-hot) + 4 (counts) + 8 (entry ops) + 8 (exit ops) +
+    # 6 (params) + 5 (risk) + 4 (thresholds) + 2 (logic) + 2 (mtf) = 65
+    assert len(features) == 65, (
+        f"Surrogate feature vector length mismatch: expected 65, got {len(features)}"
+    )
+
     return features  # Total: 26 + 4 + 8 + 8 + 6 + 5 + 4 + 2 + 2 = 65 features
 
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ⚠️  DEPRECATED: Use 'ga_monitor_v2.sh --live' or 'python -m genetic_algorithm monitor' instead.
+# This script is kept for backward compatibility and will be removed in a future release.
 # ============================================================================
 # GA Evolution Monitor v2 — Live Dashboard for All Running Experiments
 # ============================================================================

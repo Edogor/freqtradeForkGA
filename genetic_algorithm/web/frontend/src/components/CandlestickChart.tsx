@@ -18,6 +18,7 @@ import {
   type LineData,
   type SeriesMarker,
   type Time,
+  type LogicalRange,
   ColorType,
   CrosshairMode,
 } from 'lightweight-charts';
@@ -42,16 +43,35 @@ export interface IndicatorLine {
   pane?: 'price' | 'separate';  // 'price' overlays on candlestick pane
 }
 
+interface SelectionRange {
+  start: number;  // unix seconds
+  end: number;    // unix seconds
+}
+
 interface CandlestickChartProps {
   candles: Candle[];
   trades?: BacktestTrade[];
+  /** Test trades (from interactive panel) — rendered in purple */
+  testTrades?: BacktestTrade[];
   indicators?: IndicatorLine[];
   height?: number;
   /** Show volume histogram below candles */
   showVolume?: boolean;
   /** Called when user clicks "Set as Backtest Range" with the visible time range (YYYYMMDD strings) */
   onTimeRangeSelect?: (start: string, end: string) => void;
+  /** Called when user clicks a candle — receives unix seconds */
+  onCandleClick?: (unixSeconds: number) => void;
+  /** Highlight a selected time range on the chart (unix seconds) */
+  selectionRange?: SelectionRange | null;
+  /** Called when user scrolls near the left edge — parent should fetch older candles */
+  onNeedMoreData?: () => void;
+  /** Called when user scrolls near the right edge — parent should fetch newer candles */
+  onNeedNewerData?: () => void;
+  /** Show a "Loading older data…" spinner overlay in top-left */
+  moreDataLoading?: boolean;
 }
+
+export type { SelectionRange };
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -80,16 +100,39 @@ const INDICATOR_COLORS = [
 export const CandlestickChart = memo(function CandlestickChart({
   candles,
   trades,
+  testTrades,
   indicators,
   height = 500,
   showVolume = true,
   onTimeRangeSelect,
+  onCandleClick,
+  selectionRange,
+  onNeedMoreData,
+  onNeedNewerData,
+  moreDataLoading = false,
 }: CandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const indicatorSeriesRefs = useRef<ISeriesApi<'Line'>[]>([]);
+  const selectionOverlayRef = useRef<HTMLDivElement>(null);
+  // Keep latest callback in a ref to avoid re-subscribing on every render
+  const onCandleClickRef = useRef(onCandleClick);
+  useEffect(() => { onCandleClickRef.current = onCandleClick; }, [onCandleClick]);
+
+  // Infinite scroll — left-edge detection refs
+  const onNeedMoreDataRef = useRef(onNeedMoreData);
+  useEffect(() => { onNeedMoreDataRef.current = onNeedMoreData; }, [onNeedMoreData]);
+  const onNeedNewerDataRef = useRef(onNeedNewerData);
+  useEffect(() => { onNeedNewerDataRef.current = onNeedNewerData; }, [onNeedNewerData]);
+  const needMoreDataCooldownRef = useRef(false);
+  const needNewerDataCooldownRef = useRef(false);
+  const logicalRangeHandlerRef = useRef<((r: LogicalRange | null) => void) | null>(null);
+  const totalCandlesRef = useRef<number>(candles.length);
+  useEffect(() => { totalCandlesRef.current = candles.length; }, [candles.length]);
+  // Track oldest candle time to detect prepend vs full refresh
+  const prevOldestTimeRef = useRef<number>(0);
 
   // Create chart on mount
   useEffect(() => {
@@ -147,6 +190,13 @@ export const CandlestickChart = memo(function CandlestickChart({
 
     chartRef.current = chart;
 
+    // Click handler — passes clicked candle time to parent
+    chart.subscribeClick((param) => {
+      if (param.time != null) {
+        onCandleClickRef.current?.(param.time as number);
+      }
+    });
+
     // Responsive resize
     const resizeHandler = () => {
       if (containerRef.current && chartRef.current) {
@@ -156,7 +206,30 @@ export const CandlestickChart = memo(function CandlestickChart({
     const ro = new ResizeObserver(resizeHandler);
     ro.observe(containerRef.current);
 
+    // Edge scroll detection — load older on left edge and newer on right edge
+    const logicalRangeHandler = (range: LogicalRange | null) => {
+      if (!range) return;
+
+      if (range.from <= 50 && !needMoreDataCooldownRef.current) {
+        needMoreDataCooldownRef.current = true;
+        onNeedMoreDataRef.current?.();
+        setTimeout(() => { needMoreDataCooldownRef.current = false; }, 3000);
+      }
+
+      const total = totalCandlesRef.current;
+      if (total > 0 && range.to >= Math.max(0, total - 50) && !needNewerDataCooldownRef.current) {
+        needNewerDataCooldownRef.current = true;
+        onNeedNewerDataRef.current?.();
+        setTimeout(() => { needNewerDataCooldownRef.current = false; }, 3000);
+      }
+    };
+    logicalRangeHandlerRef.current = logicalRangeHandler;
+    chart.timeScale().subscribeVisibleLogicalRangeChange(logicalRangeHandler);
+
     return () => {
+      if (logicalRangeHandlerRef.current) {
+        chart.timeScale().unsubscribeVisibleLogicalRangeChange(logicalRangeHandlerRef.current);
+      }
       ro.disconnect();
       chart.remove();
       chartRef.current = null;
@@ -179,6 +252,12 @@ export const CandlestickChart = memo(function CandlestickChart({
     }));
     candleSeriesRef.current.setData(candleData);
 
+  // Detect prepend: if the new oldest candle is older than previous oldest,
+  // this is a backwards data load — preserve viewport instead of fitContent
+  const newOldest = candles[0].time;
+  const isPrepend = prevOldestTimeRef.current > 0 && newOldest < prevOldestTimeRef.current;
+  prevOldestTimeRef.current = newOldest;
+
     // Volume
     if (volumeSeriesRef.current) {
       const volumeData: HistogramData[] = candles.map((c) => ({
@@ -191,44 +270,58 @@ export const CandlestickChart = memo(function CandlestickChart({
       volumeSeriesRef.current.setData(volumeData);
     }
 
-    // Fit content
-    chartRef.current?.timeScale().fitContent();
+    // Only fit content on initial/full load, not when prepending older candles
+    if (!isPrepend) {
+      chartRef.current?.timeScale().fitContent();
+    }
   }, [candles]);
 
-  // Update trade markers
+  // Update trade markers (original + test overlay)
   useEffect(() => {
-    if (!candleSeriesRef.current || !trades || trades.length === 0) return;
+    if (!candleSeriesRef.current) return;
 
     const markers: SeriesMarker<Time>[] = [];
 
-    for (const t of trades) {
-      const openTime = parseDateToUnix(t.open_date);
-      const closeTime = parseDateToUnix(t.close_date);
-      const profitable = t.profit_ratio > 0;
+    const addMarkers = (tradeList: BacktestTrade[], isTest: boolean) => {
+      for (const t of tradeList) {
+        const openTime = parseDateToUnix(t.open_date);
+        const closeTime = parseDateToUnix(t.close_date);
+        const profitable = t.profit_ratio > 0;
 
-      // Entry marker
-      markers.push({
-        time: toTime(openTime),
-        position: t.is_short ? 'aboveBar' : 'belowBar',
-        color: t.is_short ? '#8b5cf6' : '#3b82f6',
-        shape: t.is_short ? 'arrowDown' : 'arrowUp',
-        text: t.is_short ? 'S' : 'B',
-      });
+        // Test trades use purple; regular use blue/green/red
+        const entryColor = isTest ? '#a855f7' : (t.is_short ? '#8b5cf6' : '#3b82f6');
+        const exitColor = isTest ? (profitable ? '#c084fc' : '#f472b6') : (profitable ? '#22c55e' : '#ef4444');
 
-      // Exit marker
-      markers.push({
-        time: toTime(closeTime),
-        position: t.is_short ? 'belowBar' : 'aboveBar',
-        color: profitable ? '#22c55e' : '#ef4444',
-        shape: t.is_short ? 'arrowUp' : 'arrowDown',
-        text: `${profitable ? '+' : ''}${(t.profit_ratio * 100).toFixed(1)}%`,
-      });
+        markers.push({
+          time: toTime(openTime),
+          position: t.is_short ? 'aboveBar' : 'belowBar',
+          color: entryColor,
+          shape: t.is_short ? 'arrowDown' : 'arrowUp',
+          text: isTest ? '◆' : (t.is_short ? 'S' : 'B'),
+        });
+
+        markers.push({
+          time: toTime(closeTime),
+          position: t.is_short ? 'belowBar' : 'aboveBar',
+          color: exitColor,
+          shape: t.is_short ? 'arrowUp' : 'arrowDown',
+          text: `${profitable ? '+' : ''}${(t.profit_ratio * 100).toFixed(1)}%`,
+        });
+      }
+    };
+
+    if (trades && trades.length > 0) addMarkers(trades, false);
+    if (testTrades && testTrades.length > 0) addMarkers(testTrades, true);
+
+    if (markers.length === 0) {
+      candleSeriesRef.current.setMarkers([]);
+      return;
     }
 
     // Sort by time (required by lightweight-charts)
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     candleSeriesRef.current.setMarkers(markers);
-  }, [trades]);
+  }, [trades, testTrades]);
 
   // Update indicator overlays
   useEffect(() => {
@@ -269,8 +362,48 @@ export const CandlestickChart = memo(function CandlestickChart({
     });
   }, [indicators]);
 
+  // Selection range overlay — position an absolutely-placed highlight div
+  useEffect(() => {
+    const overlay = selectionOverlayRef.current;
+    const chart = chartRef.current;
+    if (!overlay || !chart) return;
+
+    if (!selectionRange) {
+      overlay.style.display = 'none';
+      return;
+    }
+
+    const positionOverlay = () => {
+      const ts = chart.timeScale();
+      const xStart = ts.timeToCoordinate(toTime(selectionRange.start));
+      const xEnd   = ts.timeToCoordinate(toTime(selectionRange.end));
+      if (xStart == null || xEnd == null) {
+        overlay.style.display = 'none';
+        return;
+      }
+      const left  = Math.min(xStart, xEnd);
+      const width = Math.abs(xEnd - xStart);
+      overlay.style.display = 'block';
+      overlay.style.left   = `${left}px`;
+      overlay.style.width  = `${width}px`;
+    };
+
+    positionOverlay();
+    // Re-position when the user scrolls/zooms
+    chart.timeScale().subscribeVisibleTimeRangeChange(positionOverlay);
+    return () => { chart.timeScale().unsubscribeVisibleTimeRangeChange(positionOverlay); };
+  }, [selectionRange]);
+
   return (
     <div className="relative">
+      {/* Loading older data indicator (top-left) */}
+      {moreDataLoading && (
+        <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5 px-2 py-1 rounded bg-black/60 text-gray-400 text-[10px] pointer-events-none">
+          <span className="w-2.5 h-2.5 border-2 border-gray-500/60 border-t-gray-300 rounded-full animate-spin flex-shrink-0" />
+          Loading older data…
+        </div>
+      )}
+      {/* "Set as Backtest Range" button (top-right) */}
       {onTimeRangeSelect && candles.length > 0 && (
         <button
           onClick={() => {
@@ -291,10 +424,21 @@ export const CandlestickChart = memo(function CandlestickChart({
           Set as Backtest Range
         </button>
       )}
+      {/* Selection range highlight overlay */}
+      <div
+        ref={selectionOverlayRef}
+        className="absolute top-0 bottom-0 pointer-events-none z-10"
+        style={{
+          display: 'none',
+          background: 'rgba(99,102,241,0.15)',
+          borderLeft: '2px solid rgba(99,102,241,0.6)',
+          borderRight: '2px solid rgba(99,102,241,0.6)',
+        }}
+      />
       <div
         ref={containerRef}
         className="w-full rounded-lg overflow-hidden border border-white/5"
-        style={{ minHeight: height }}
+        style={{ minHeight: height, cursor: onCandleClick ? 'crosshair' : 'default' }}
       />
     </div>
   );

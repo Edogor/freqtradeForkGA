@@ -45,9 +45,13 @@ def _cleanup_executors():
     """Shutdown all active process pool executors on exit."""
     for executor in _active_executors:
         try:
-            executor.shutdown(wait=False, cancel_futures=True)
+            executor.shutdown(wait=True, cancel_futures=True)
         except Exception:
             logger.debug("[PARALLEL] Exception during executor shutdown (cleanup)", exc_info=True)
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
     _active_executors.clear()
 
 
@@ -582,11 +586,7 @@ def parallel_walk_forward_validation(
         try:
             executor.shutdown(wait=True, cancel_futures=True)
         except Exception:
-            logger.debug("[WF-POSTHOC] Graceful shutdown failed, forcing", exc_info=True)
-            try:
-                executor.shutdown(wait=False, cancel_futures=True)
-            except Exception:
-                logger.debug("[WF-POSTHOC] Forced shutdown also failed", exc_info=True)
+            logger.debug("[WF-POSTHOC] Shutdown failed, force-killing workers", exc_info=True)
         if executor in _active_executors:
             _active_executors.remove(executor)
         # Kill any lingering worker processes

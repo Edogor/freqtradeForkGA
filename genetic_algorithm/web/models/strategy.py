@@ -92,6 +92,12 @@ class BacktestRequest(BaseModel):
     timeframe: str = "5m"
     stake_amount: float = 100.0
     exchange: str = "binance"
+    # Optional risk param overrides — if set, these override the gene's defaults
+    stoploss: Optional[float] = None            # e.g. -0.05 for 5%
+    max_open_trades: Optional[int] = None       # e.g. 3
+    trailing_stop: Optional[bool] = None        # True/False
+    trailing_stop_positive: Optional[float] = None
+    trailing_stop_positive_offset: Optional[float] = None
 
 
 class BacktestResultModel(BaseModel):

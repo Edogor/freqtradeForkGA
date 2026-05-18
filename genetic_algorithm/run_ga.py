@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from genetic_algorithm.core.evolution import GeneticAlgorithm
 from genetic_algorithm.strategies.generator import StrategyGenerator
 import yaml
+from genetic_algorithm.config.schema import load_config as _schema_load_config
 
 
 # ============================================================================
@@ -66,11 +67,12 @@ TOP_STRATEGIES_COUNT = 5
 
 # Output configuration
 SAVE_STRATEGIES = True        # Save top strategies to files
-OUTPUT_DIR = Path("genetic_algorithm/output")  # Directory for output files
-LOG_DIR = Path("genetic_algorithm/logs")       # Directory for log files
+_BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = _BASE_DIR / "output"   # Directory for output files
+LOG_DIR = _BASE_DIR / "logs"        # Directory for log files
 
 # Configuration file path
-CONFIG_FILE = Path("genetic_algorithm/config/ga_config.yaml")
+CONFIG_FILE = _BASE_DIR / "config" / "ga_config.yaml"
 
 # Timestamp format for files and logs
 TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
@@ -84,8 +86,8 @@ def _prune_old_logs(log_dir: Path, keep: int = 20):
         log_files = sorted(log_dir.glob('ga_run_*.log'), key=lambda f: f.stat().st_mtime)
         for old_log in log_files[:-keep]:
             old_log.unlink()
-    except Exception:
-        pass  # Best-effort cleanup
+    except Exception as e:
+        logger.debug(f"Log pruning failed: {e}")  # Best-effort cleanup
 
 
 def setup_logging(monitor_active: bool = False):
@@ -129,23 +131,15 @@ def setup_logging(monitor_active: bool = False):
 
 def load_and_update_config(config_path) -> dict:
     """
-    Load configuration from YAML file.
+    Load configuration from YAML file, applying schema defaults.
     
     Args:
         config_path: Path to configuration file (string or Path object)
         
     Returns:
-        Configuration dictionary loaded from file
+        Configuration dictionary with defaults applied and validated
     """
-    config_path = Path(config_path)
-    
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    # All configuration is now read from the config file
-    # No more hardcoded overrides - edit the config file to change parameters
-    
-    return config
+    return _schema_load_config(config_path)
 
 
 def print_banner():
@@ -168,23 +162,28 @@ def print_configuration(config: dict):
     print("=" * 80)
     print()
     print("Genetic Algorithm Parameters:")
-    print(f"  Population Size:    {ga_config['population_size']}")
-    print(f"  Generations:        {ga_config['generations']}")
-    print(f"  Mutation Rate:      {ga_config['mutation_rate']:.2%}")
-    print(f"  Crossover Rate:     {ga_config['crossover_rate']:.2%}")
-    print(f"  Elite Size:         {ga_config['elite_size']}")
-    print(f"  Selection Method:   {ga_config['selection_method']}")
+    print(f"  Population Size:    {ga_config.get('population_size', 'N/A')}")
+    print(f"  Generations:        {ga_config.get('generations', 'N/A')}")
+    mutation_rate = ga_config.get('mutation_rate')
+    print(f"  Mutation Rate:      {mutation_rate:.2%}" if mutation_rate is not None else "  Mutation Rate:      (default)")
+    crossover_rate = ga_config.get('crossover_rate')
+    print(f"  Crossover Rate:     {crossover_rate:.2%}" if crossover_rate is not None else "  Crossover Rate:     (default)")
+    print(f"  Elite Size:         {ga_config.get('elite_size', 'N/A')}")
+    print(f"  Selection Method:   {ga_config.get('selection_method', 'tournament')}")
     print()
     
-    backtest_config = config['backtesting']
+    backtest_config = config.get('backtesting', {})
     print("Backtesting Configuration:")
-    print(f"  Trading Pairs:      {', '.join(backtest_config['pairs'])}")
-    print(f"  Stake Amount:       {backtest_config['stake_amount']}")
-    print(f"  Max Open Trades:    {backtest_config['max_open_trades']}")
-    print(f"  Fee:                {backtest_config['fee']:.3%}")
+    print(f"  Trading Pairs:      {', '.join(backtest_config.get('pairs', []))}")
+    stake = backtest_config.get('stake_amount')
+    print(f"  Stake Amount:       {stake}" if stake is not None else "  Stake Amount:       (default)")
+    fee = backtest_config.get('fee')
+    print(f"  Fee:                {fee:.3%}" if fee is not None else "  Fee:                (default)")
+    max_trades = backtest_config.get('max_open_trades')
+    print(f"  Max Open Trades:    {max_trades}" if max_trades is not None else "  Max Open Trades:    (default)")
     print()
     
-    fitness_weights = config['fitness_weights']
+    fitness_weights = config.get('fitness_weights', {})
     print("Fitness Weights:")
     for fw_key, fw_label in [
         ('profit', 'Profit'), ('profit_factor', 'Profit Factor'),
@@ -820,8 +819,40 @@ def main():
         print("✅ Config validation passed!")
         return 0
     
+    # ── Register experiment in registry ──
+    experiment_id = None
+    registry = None
+    try:
+        import hashlib as _hl
+        from genetic_algorithm.orchestration.registry import ExperimentRegistry
+        registry = ExperimentRegistry()
+        _ts = datetime.now().strftime(TIMESTAMP_FORMAT)
+        _short = _hl.md5(str(config_file).encode()).hexdigest()[:4]
+        experiment_id = f"run_{_ts}_{_short}"
+        _ga_type = "standard"
+        if config.get('generic_island_model', {}).get('enabled'):
+            _ga_type = "generic_island"
+        elif config.get('island_model', {}).get('enabled'):
+            _ga_type = "island"
+        registry.register(
+            experiment_id,
+            config_path=str(config_file),
+            ga_type=_ga_type,
+        )
+        logger.info(f"Registered experiment: {experiment_id}")
+    except Exception as e:
+        logger.debug(f"Experiment registration skipped: {e}")
+        registry = None
+
     # Print configuration
     print_configuration(config)
+    
+    # Clean up stale shared memory from previous crashed runs
+    try:
+        from genetic_algorithm.market.shared_memory import cleanup_stale_shared_memory
+        cleanup_stale_shared_memory()
+    except Exception as e:
+        logger.debug(f"Shared memory cleanup skipped: {e}")
     
     # Print visualization info
     if args.visualize:
@@ -864,6 +895,19 @@ def main():
     print("=" * 80)
     print()
     
+    # Mark experiment as running in registry
+    if registry and experiment_id:
+        try:
+            registry.start(
+                experiment_id,
+                pid=os.getpid(),
+                log_path=str(LOG_DIR / f"ga_run_{datetime.now().strftime(TIMESTAMP_FORMAT)}.log"),
+                data_dir=str(output_dir),
+                generations_total=config.get('genetic_algorithm', {}).get('generations'),
+            )
+        except Exception as e:
+            logger.debug(f"Registry start update failed: {e}")
+
     # Initialize and run GA
     tmp_config_path = None
     try:
@@ -994,6 +1038,11 @@ def main():
         print("\n\n" + "=" * 80)
         print("EVOLUTION INTERRUPTED BY USER")
         print("=" * 80)
+        if registry and experiment_id:
+            try:
+                registry.cancel(experiment_id)
+            except Exception:
+                pass
         return 0
     except Exception as e:
         import traceback
@@ -1003,6 +1052,11 @@ def main():
         print(f"\n{e}")
         traceback.print_exc()
         logger.exception("Evolution failed")
+        if registry and experiment_id:
+            try:
+                registry.fail(experiment_id, error=str(e))
+            except Exception:
+                pass
         return 1
     finally:
         # Always clean up temporary config file, even on crash
@@ -1270,7 +1324,31 @@ def main():
         # Save evolution_stats.json (for visualize_evolution.py)
         if _gen_stats and config.get('output', {}).get('save_stats', False):
             _save_evolution_stats(output_dir, config, _gen_stats, _gen_holdout)
-    
+
+        # ── Register completion in experiment registry ──
+        if registry and experiment_id:
+            try:
+                _best_fitness = top_strategies[0].fitness if top_strategies else None
+                _best_profit = (top_strategies[0].metrics or {}).get('profit') if top_strategies else None
+                registry.complete(experiment_id, best_fitness=_best_fitness, best_profit=_best_profit)
+            except Exception as _re:
+                logger.debug(f"Registry completion update failed: {_re}")
+
+        # ── SIS corpus auto-rebuild trigger ──
+        sis_cfg = config.get('sis', {})
+        if sis_cfg.get('enabled') and sis_cfg.get('auto_rebuild', False) and top_strategies:
+            try:
+                from genetic_algorithm.intelligence.corpus import CorpusBuilder
+                logger.info("SIS auto-rebuild: rebuilding strategy corpus...")
+                corpus_builder = CorpusBuilder()
+                df = corpus_builder.build()
+                if len(df) > 0:
+                    corpus_builder.save(df)
+                    logger.info(f"SIS corpus rebuilt: {len(df)} strategies")
+                    print(f"  ✓ SIS corpus rebuilt with {len(df)} strategies")
+            except Exception as _ce:
+                logger.warning(f"SIS corpus auto-rebuild failed: {_ce}")
+
         # Final summary
         print("\n" + "=" * 80)
         print("NEXT STEPS")
@@ -1299,6 +1377,11 @@ def main():
         traceback.print_exc()
         sys.stdout.flush()
         sys.stderr.flush()
+        if registry and experiment_id:
+            try:
+                registry.fail(experiment_id, error=f"Post-evolution: {e}")
+            except Exception:
+                pass
         # Still return 1 to indicate failure, but evolution results are saved
         return 1
 

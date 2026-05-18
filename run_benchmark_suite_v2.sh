@@ -142,8 +142,7 @@ run_single_benchmark() {
     echo -e "  ${BLUE}▸ Starting at $(date '+%H:%M:%S')...${NC}"
 
     set +e
-    python "${REPO_DIR}/genetic_algorithm/run_ga.py" \
-        --config "${config_file}" \
+    python -m genetic_algorithm run "${config_file}" \
         --no-monitor \
         --yes \
         2>&1 | tee "${log_file}"

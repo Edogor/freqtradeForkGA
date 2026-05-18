@@ -86,8 +86,7 @@ for RUN_ID in "${RUN_ORDER[@]}"; do
 
     # Run GA with --no-monitor --yes (non-interactive)
     set +e
-    python genetic_algorithm/run_ga.py \
-        --config "$CONFIG" \
+    python -m genetic_algorithm run "$CONFIG" \
         --no-monitor \
         --yes \
         2>&1 | tee "$LOG_FILE"

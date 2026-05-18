@@ -1,0 +1,37 @@
+# Quick Test — minimal config for smoke-testing the GA pipeline
+# Runs 2 generations with 5 individuals. Completes in ~2 minutes.
+
+backtesting:
+  pairs: [BTC/USDT]
+  timerange: "20250101-20250301"
+  max_open_trades: 2
+  timeout: 60
+
+genetic_algorithm:
+  population_size: 5
+  generations: 2
+  elite_size: 1
+  random_immigrants: 1
+  convergence_patience: 99  # don't early-stop in quick test
+
+parallel_evaluation:
+  enabled: false
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+surrogate:
+  enabled: false
+
+terminal_monitor:
+  enabled: true
+  default_mode: simple

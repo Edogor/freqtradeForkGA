@@ -664,10 +664,27 @@ class TestCheckpointing:
             ga.no_improvement_count = 0
             ga.generation_stats = []
             ga.current_generation = 0
+            ga._catastrophic_restart_needed = False
+            ga.monitor = None
+
+            # Subsystems needed by save_checkpoint delegation
+            from collections import deque
+            from genetic_algorithm.engine.checkpoint import CheckpointManager
+            ga._holdout_consecutive_bad = 0
+            ga._holdout_degradation_history = deque()
+            ga.generation_holdout_history = []
+            ga._aos = MagicMock(enabled=False)
+            ga._surrogate = MagicMock(enabled=False)
+            ga._map_elites = MagicMock(enabled=False)
 
             storage_config = config.get('storage', {})
             ga.checkpoint_dir = Path(storage_config.get('checkpoint_dir', str(tmpdir)))
             ga.checkpoint_interval = storage_config.get('checkpoint_interval', 1)
+            ga._checkpoint_mgr = CheckpointManager(
+                checkpoint_dir=ga.checkpoint_dir,
+                checkpoint_interval=ga.checkpoint_interval,
+                logger=ga.logger,
+            )
 
         return ga
 

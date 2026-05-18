@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ⚠️  DEPRECATED: Use 'python -m genetic_algorithm queue add config/queue/*.yaml && python -m genetic_algorithm queue start' instead.
+# This script is kept for reference only (historic wave32 launch). Do not use for new waves.
 # ============================================================================
 # Wave32 Launch Script — 8 Scalping Experiments (5 Active + 3 Queue)
 # ============================================================================

@@ -119,7 +119,7 @@ class ArchetypeClassifier:
             self._centroids[cid] = centroid
             # Threshold: 2x mean intra-cluster distance
             dists = np.linalg.norm(members - centroid, axis=1)
-            self._centroid_thresholds[cid] = float(dists.mean() * 2.0)
+            self._centroid_thresholds[cid] = float(dists.mean() * 4.0)  # 4x (was 2x) — wider acceptance radius
 
         # 2D embedding for visualization (PCA — always available, no extra deps)
         from sklearn.decomposition import PCA
@@ -148,6 +148,12 @@ class ArchetypeClassifier:
         except (AttributeError, TypeError):
             # Fallback: assign to nearest centroid
             labels = self._nearest_centroid_predict(X_scaled)
+            n_assigned = int((labels != -1).sum())
+            logger.info(
+                f"[ARCHETYPES] predict fallback → centroid: "
+                f"{n_assigned}/{len(labels)} assigned, "
+                f"{len(self._centroids)} centroids available"
+            )
 
         df = df.copy()
         df["archetype"] = labels
@@ -347,6 +353,11 @@ class ArchetypeClassifier:
     def _nearest_centroid_predict(self, X_scaled: np.ndarray) -> np.ndarray:
         """Fallback prediction via nearest centroid distance."""
         if self.labels_ is None or not self._centroids:
+            logger.warning(
+                f"[ARCHETYPES] _nearest_centroid_predict: no centroids! "
+                f"labels_={'SET' if self.labels_ is not None else 'None'}, "
+                f"n_centroids={len(self._centroids)}"
+            )
             return np.full(len(X_scaled), -1)
 
         cluster_ids = sorted(self._centroids.keys())

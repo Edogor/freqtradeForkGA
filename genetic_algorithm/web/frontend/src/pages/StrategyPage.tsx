@@ -1,11 +1,15 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Code, Copy, Check, Shield, AlertTriangle, Syringe, Download, GitBranch, Play, Loader2, BarChart3, ExternalLink, TrendingUp, Zap, Square } from 'lucide-react';
+import { ArrowLeft, Code, Copy, Check, Shield, AlertTriangle, Syringe, Download, GitBranch, Play, Loader2, BarChart3, ExternalLink, TrendingUp, Zap, Square, FlaskConical } from 'lucide-react';
+import { StrategyNarrativeCard } from '../components/StrategyNarrativeCard';
+import { StrategyParameterEditor } from '../components/StrategyParameterEditor';
+import { ChartBacktestPanel } from '../components/ChartBacktestPanel';
+import { StrategyGeneTree } from '../components/StrategyGeneTree';
+import type { IndicatorPreview } from '../components/StrategyGeneTree';
 import { api } from '../api/client';
 import { useStore } from '../store/useStore';
 import { LoadingState, ErrorState } from '../components/StateDisplays';
 import { MetricsCard } from '../components/MetricsCard';
-import { StrategyGeneTree } from '../components/StrategyGeneTree';
 import { CandlestickChart, parseOHLCVCandles } from '../components/CandlestickChart';
 import type { StrategyDetail, RunSummary, PairInfo, OHLCVResponse, BacktestTrade, BacktestTradesResponse, LineageNode } from '../types';
 import type { Candle, IndicatorLine } from '../components/CandlestickChart';
@@ -60,6 +64,23 @@ export function StrategyPage() {
   const [drTimeframe, setDrTimeframe] = useState('');
   const [drRunning, setDrRunning] = useState(false);
   const [drError, setDrError] = useState<string | null>(null);
+
+  // Interactive test panel
+  const [showTestPanel, setShowTestPanel] = useState(false);
+  const [testOverrides, setTestOverrides] = useState<Record<string, unknown>>({});
+  const [testBacktestId, setTestBacktestId] = useState<string | null>(null);
+  const [testStatus, setTestStatus] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<Record<string, any> | null>(null);
+  const [testTrades, setTestTrades] = useState<BacktestTrade[]>([]);
+  const [testRunning, setTestRunning] = useState(false);
+  const [testError, setTestError] = useState<string | null>(null);
+  const testPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // T3-6: Indicator preview state — clicking a gene indicator highlights it on the chart
+  const [activeIndicator, setActiveIndicator] = useState<IndicatorPreview | null>(null);
+  const handleIndicatorClick = (ind: IndicatorPreview) => {
+    setActiveIndicator((prev) => prev?.type === ind.type ? null : ind);
+  };
   const navigate = useNavigate();
   const runsMap = useStore((s) => s.runs);
   const activeRuns = Array.from(runsMap.values()).filter(
@@ -95,6 +116,30 @@ export function StrategyPage() {
       setAvailablePairs(resp.pairs);
     }).catch(() => {});
   }, []);
+
+  // Auto-populate timeframe from strategy gene immediately on load
+  useEffect(() => {
+    if (!strategy) return;
+    if (!selectedTimeframe && strategy.gene?.timeframe) {
+      setSelectedTimeframe(strategy.gene.timeframe);
+    }
+  }, [strategy]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-populate chart pair from run config once pairs list is available
+  useEffect(() => {
+    if (!strategy || availablePairs.length === 0 || selectedPair) return;
+    const tf = selectedTimeframe || strategy.gene?.timeframe || '';
+    const runPairs = runsMap.get(runId || '')?.pairs ?? [];
+    const match = runPairs.find((rp) =>
+      availablePairs.some((ap) => ap.pair === rp && (!tf || ap.timeframe === tf)),
+    );
+    if (match) {
+      setSelectedPair(match);
+    } else if (availablePairs.length > 0) {
+      // Fall back to first available pair
+      setSelectedPair(availablePairs[0].pair);
+    }
+  }, [strategy, availablePairs, selectedPair, runId, runsMap, selectedTimeframe]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load lineage on mount
   useEffect(() => {
@@ -187,6 +232,38 @@ export function StrategyPage() {
     btPollRef.current = setInterval(poll, 2000);
     return () => { if (btPollRef.current) clearInterval(btPollRef.current); };
   }, [lastBacktestId]);
+
+  // Poll for interactive test completion
+  useEffect(() => {
+    if (!testBacktestId) return;
+    const poll = async () => {
+      try {
+        const r = await api.getBacktestResult(testBacktestId);
+        setTestStatus(r.status);
+        if (r.status === 'completed' || r.status === 'failed') {
+          if (testPollRef.current) { clearInterval(testPollRef.current); testPollRef.current = null; }
+          if (r.status === 'completed') {
+            setTestResult(r.result ?? null);
+            const allT: BacktestTrade[] = [];
+            let offset = 0;
+            let hasMore = true;
+            while (hasMore) {
+              const resp: BacktestTradesResponse = await api.getBacktestTrades(testBacktestId, { offset, limit: 500 });
+              allT.push(...resp.trades);
+              offset += 500;
+              hasMore = offset < resp.total;
+            }
+            setTestTrades(allT);
+          } else if (r.error) {
+            setTestError(r.error);
+          }
+        }
+      } catch { /* ignore */ }
+    };
+    poll();
+    testPollRef.current = setInterval(poll, 2000);
+    return () => { if (testPollRef.current) clearInterval(testPollRef.current); };
+  }, [testBacktestId]);
 
   // Auto-select first traded pair on chart when backtest trades arrive
   const chartDetailsRef = useRef<HTMLDetailsElement>(null);
@@ -378,6 +455,9 @@ export function StrategyPage() {
         />
       </div>
 
+      {/* Narrative Summary */}
+      <StrategyNarrativeCard metrics={strategy.metrics} gene={strategy.gene} />
+
       {/* Quality Assessment */}
       {q && (
         <div className="card">
@@ -536,105 +616,38 @@ export function StrategyPage() {
       )}
 
       {/* Strategy Gene Tree */}
-      {strategy.gene && <StrategyGeneTree gene={strategy.gene} />}
+      {strategy.gene && (
+        <StrategyGeneTree
+          gene={strategy.gene}
+          onIndicatorClick={handleIndicatorClick}
+          activeIndicator={activeIndicator?.type ?? null}
+        />
+      )}
 
-      {/* Price Data / OHLCV Chart */}
-      <details ref={chartDetailsRef} className="card group">
-        <summary className="text-sm font-medium text-gray-300 cursor-pointer select-none flex items-center gap-2">
-          <BarChart3 className="w-4 h-4" /> Price Data
-          <span className="text-xs text-gray-500 group-open:hidden">(click to expand chart)</span>
-        </summary>
-        <div className="mt-3 space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label className="text-[10px] text-gray-500 uppercase block mb-1">Pair</label>
-              <select
-                value={selectedPair}
-                onChange={(e) => setSelectedPair(e.target.value)}
-                className="w-full bg-surface-2 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-gray-200 font-mono focus:outline-none focus:ring-1 focus:ring-accent/50"
-              >
-                <option value="">Select pair...</option>
-                {[...new Set(availablePairs.map((p) => p.pair))].sort().map((pair) => (
-                  <option key={pair} value={pair}>{pair}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="text-[10px] text-gray-500 uppercase block mb-1">Timeframe</label>
-              <select
-                value={selectedTimeframe}
-                onChange={(e) => setSelectedTimeframe(e.target.value)}
-                className="w-full bg-surface-2 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-gray-200 font-mono focus:outline-none focus:ring-1 focus:ring-accent/50"
-              >
-                <option value="">Select timeframe...</option>
-                {[...new Set(
-                  availablePairs
-                    .filter((p) => !selectedPair || p.pair === selectedPair)
-                    .map((p) => p.timeframe)
-                )].sort().map((tf) => (
-                  <option key={tf} value={tf}>{tf}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="text-[10px] text-gray-500 uppercase block mb-1">Exchange</label>
-              <select
-                value={btExchange}
-                onChange={(e) => setBtExchange(e.target.value)}
-                className="w-full bg-surface-2 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-gray-200 font-mono focus:outline-none focus:ring-1 focus:ring-accent/50"
-              >
-                {[...new Set(availablePairs.map((p) => p.exchange))].sort().map((ex) => (
-                  <option key={ex} value={ex}>{ex}</option>
-                ))}
-                {availablePairs.length === 0 && <option value="binance">binance</option>}
-              </select>
-            </div>
+      {/* Price Data / OHLCV Chart + Interactive Backtest */}
+      {strategy.gene && (
+        <details ref={chartDetailsRef} className="card group">
+          <summary className="text-sm font-medium text-gray-300 cursor-pointer select-none flex items-center gap-2">
+            <BarChart3 className="w-4 h-4" /> Price Data &amp; Backtest
+            <span className="text-xs text-gray-500 group-open:hidden">(click to open chart)</span>
+          </summary>
+          <div className="mt-3">
+            <ChartBacktestPanel
+              gene={strategy.gene}
+              availablePairs={availablePairs}
+              defaultPair={selectedPair}
+              defaultTimeframe={selectedTimeframe}
+              defaultExchange={btExchange}
+              highlightIndicator={activeIndicator}
+              onTradesLoaded={(t, id) => {
+                setBacktestTrades(t);
+                setLastBacktestId(id);
+                setBtStatus('completed');
+              }}
+            />
           </div>
-
-          {chartLoading && (
-            <div className="flex items-center justify-center py-8 text-gray-500 gap-2">
-              <Loader2 className="w-4 h-4 animate-spin" /> Loading chart...
-            </div>
-          )}
-
-          {!chartLoading && candles.length > 0 && (
-            <>
-              <CandlestickChart
-                candles={candles}
-                trades={backtestTrades.filter((t) => t.pair === selectedPair)}
-                indicators={indicatorLines}
-                height={400}
-                onTimeRangeSelect={(start, end) => {
-                  setBtTimerange(`${start}-${end}`);
-                  setShowBacktest(true);
-                }}
-              />
-              {btStatus === 'completed' && backtestTrades.length > 0 && (
-                <div className="flex items-center gap-2 text-xs text-gray-400">
-                  <Check className="w-3 h-3 text-profit" />
-                  Showing {backtestTrades.filter((t) => t.pair === selectedPair).length} trade markers for {selectedPair}
-                  {lastBacktestId && (
-                    <Link to={`/backtest/${lastBacktestId}`} className="text-accent hover:underline flex items-center gap-1">
-                      View full results <ExternalLink className="w-3 h-3" />
-                    </Link>
-                  )}
-                </div>
-              )}
-              {btStatus === 'running' && (
-                <div className="flex items-center gap-2 text-xs text-yellow-400">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Backtest running — markers will appear when complete
-                </div>
-              )}
-            </>
-          )}
-
-          {!chartLoading && candles.length === 0 && selectedPair && selectedTimeframe && (
-            <p className="text-xs text-gray-500 py-4 text-center">
-              No data available for {selectedPair} {selectedTimeframe} on {btExchange}
-            </p>
-          )}
-        </div>
-      </details>
+        </details>
+      )}
 
       {/* Code View */}
       <div className="card">
@@ -858,6 +871,145 @@ export function StrategyPage() {
         </div>
       )}
 
+      {/* ── Interactive Strategy Test Panel ──────────────────────── */}
+      {strategy.gene && (
+        <div className="card">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+              <FlaskConical className="w-4 h-4 text-purple-400" /> Interactive Parameter Test
+            </h3>
+            <button
+              onClick={() => setShowTestPanel(!showTestPanel)}
+              className="text-xs text-accent hover:underline"
+            >
+              {showTestPanel ? 'Hide' : 'Open'}
+            </button>
+          </div>
+
+          {showTestPanel && (
+            <div className="space-y-4">
+              <p className="text-xs text-gray-500">
+                Tweak gene parameters below and run a backtest. Results overlay the original
+                trades on the chart in <span className="text-purple-400">purple</span>.
+              </p>
+
+              <StrategyParameterEditor
+                gene={strategy.gene}
+                onChange={setTestOverrides}
+              />
+
+              <div className="flex items-center gap-3 pt-1">
+                <button
+                  onClick={async () => {
+                    if (!strategy.gene || !runId || !strategyId) return;
+                    setTestRunning(true);
+                    setTestError(null);
+                    setTestTrades([]);
+                    setTestStatus(null);
+                    setTestResult(null);
+                    try {
+                      const res = await api.testStrategy(runId, strategyId, {
+                        gene_overrides: testOverrides,
+                      });
+                      setTestBacktestId(res.backtest_id);
+                      setTestStatus('running');
+                    } catch (err) {
+                      setTestError(err instanceof Error ? err.message : String(err));
+                    } finally {
+                      setTestRunning(false);
+                    }
+                  }}
+                  disabled={testRunning}
+                  className="flex items-center gap-1.5 text-xs bg-purple-500/20 text-purple-300 border border-purple-500/30 px-4 py-2 rounded-lg hover:bg-purple-500/30 transition-colors disabled:opacity-50"
+                >
+                  {testRunning ? (
+                    <><Loader2 className="w-3 h-3 animate-spin" /> Submitting...</>
+                  ) : (
+                    <><FlaskConical className="w-3 h-3" /> Run Test Backtest</>
+                  )}
+                </button>
+
+                {testStatus === 'running' && (
+                  <span className="text-xs text-yellow-400 flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Running...
+                  </span>
+                )}
+                {testStatus === 'completed' && (
+                  <span className="text-xs text-purple-400 flex items-center gap-1">
+                    <Check className="w-3 h-3" /> Done — {testTrades.length} trades
+                  </span>
+                )}
+                {testError && <span className="text-xs text-loss">{testError}</span>}
+              </div>
+
+              {/* Test backtest result summary */}
+              {testStatus === 'completed' && testResult && (
+                <div className="border border-purple-500/20 rounded-lg bg-purple-500/5 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-medium text-purple-300 flex items-center gap-2">
+                      <FlaskConical className="w-3.5 h-3.5" /> Test Results
+                    </h4>
+                    {testBacktestId && (
+                      <Link to={`/backtest/${testBacktestId}`} className="text-xs text-purple-400 hover:underline flex items-center gap-1">
+                        Full details <ExternalLink className="w-3 h-3" />
+                      </Link>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <InlineStat label="Trades" value={String(testResult.total_trades ?? 0)} />
+                    <InlineStat
+                      label="Profit"
+                      value={`${Number(testResult.profit_percent ?? 0) > 0 ? '+' : ''}${Number(testResult.profit_percent ?? 0).toFixed(2)}%`}
+                      color={Number(testResult.profit_percent ?? 0) >= 0 ? 'text-profit' : 'text-loss'}
+                    />
+                    <InlineStat
+                      label="Win Rate"
+                      value={testResult.total_trades ? `${((Number(testResult.wins ?? 0) / Number(testResult.total_trades)) * 100).toFixed(1)}%` : '—'}
+                    />
+                    <InlineStat label="Max DD" value={`${(Number(testResult.max_drawdown ?? 0) * 100).toFixed(1)}%`} color="text-loss" />
+                  </div>
+
+                  {/* Diff vs original */}
+                  {btResult && (
+                    <div className="border-t border-purple-500/10 pt-3">
+                      <p className="text-[10px] text-gray-500 uppercase mb-2">vs Original</p>
+                      <div className="grid grid-cols-3 gap-2">
+                        <DiffStat
+                          label="Profit"
+                          test={Number(testResult.profit_percent ?? 0)}
+                          original={Number(btResult.profit_percent ?? 0)}
+                          suffix="%"
+                        />
+                        <DiffStat
+                          label="Sharpe"
+                          test={Number(testResult.sharpe_ratio ?? 0)}
+                          original={Number(btResult.sharpe_ratio ?? 0)}
+                          decimals={2}
+                        />
+                        <DiffStat
+                          label="Trades"
+                          test={Number(testResult.total_trades ?? 0)}
+                          original={Number(btResult.total_trades ?? 0)}
+                          decimals={0}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Test trade markers note */}
+                  {testTrades.length > 0 && selectedPair && (
+                    <p className="text-[11px] text-purple-400/80">
+                      {testTrades.filter((t) => t.pair === selectedPair).length} test trade markers overlaid on chart in purple
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Dry Run Launch */}
       {strategy.gene && (
         <div className="card">
@@ -1025,6 +1177,37 @@ function InlineStat({
     <div className="bg-surface-2 rounded-lg px-3 py-2">
       <div className="text-[10px] text-gray-500 uppercase">{label}</div>
       <div className={`text-sm font-mono ${color || 'text-gray-200'}`}>{value}</div>
+    </div>
+  );
+}
+
+function DiffStat({
+  label,
+  test,
+  original,
+  suffix = '',
+  decimals = 1,
+}: {
+  label: string;
+  test: number;
+  original: number;
+  suffix?: string;
+  decimals?: number;
+}) {
+  const delta = test - original;
+  const isPositive = delta > 0;
+  const isNeutral = Math.abs(delta) < 0.01;
+  return (
+    <div className="bg-surface-2 rounded-lg px-3 py-2">
+      <div className="text-[10px] text-gray-500 uppercase">{label}</div>
+      <div className="text-sm font-mono text-gray-300">
+        {test.toFixed(decimals)}{suffix}
+      </div>
+      {!isNeutral && (
+        <div className={`text-[10px] font-mono ${isPositive ? 'text-profit' : 'text-loss'}`}>
+          {isPositive ? '+' : ''}{delta.toFixed(decimals)}{suffix}
+        </div>
+      )}
     </div>
   );
 }

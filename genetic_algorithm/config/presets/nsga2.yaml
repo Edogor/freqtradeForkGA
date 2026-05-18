@@ -1,0 +1,36 @@
+# NSGA-II — multi-objective optimization (Pareto front)
+# Optimizes for profit AND drawdown simultaneously.
+
+backtesting:
+  pairs: [BTC/USDT, ETH/USDT]
+  timerange: "20240601-20260201"
+  max_open_trades: 3
+
+genetic_algorithm:
+  population_size: 30
+  generations: 15
+  elite_size: 4
+  mutation_rate: 0.20
+  crossover_rate: 0.75
+  mode: nsga2
+  adaptive_mutation: true
+
+nsga2:
+  objectives:
+    - name: profit
+      type: maximize
+      scale: 100.0
+    - name: max_drawdown
+      type: minimize
+      scale: 1.0
+  pareto_front_size: 20
+
+parallel_evaluation:
+  enabled: true
+
+holdout_validation:
+  enabled: true
+  holdout_pct: 0.15
+
+deflated_sharpe:
+  enabled: true

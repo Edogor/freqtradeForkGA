@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ⚠️  DEPRECATED: Use 'ga_auto_queue_v2.sh --persistent' or 'python -m genetic_algorithm queue start' instead.
+# This script is kept for backward compatibility and will be removed in a future release.
 # ============================================================================
 # GA Auto-Queue Daemon — Keep the server busy with GA experiments 24/7
 # ============================================================================
@@ -240,8 +242,7 @@ launch_experiment() {
     # Launch with setsid for process isolation, using the done-dir copy
     export GA_OUTPUT_DIR="${exp_output}"
 
-    setsid python genetic_algorithm/run_ga.py \
-        --config "$done_path" \
+    setsid python -m genetic_algorithm run "$done_path" \
         --no-monitor --yes \
         > "${exp_log}" 2>&1 &
 

@@ -1,9 +1,11 @@
+import { useState } from 'react';
 import { Outlet, useLocation, Link } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { ToastContainer } from './Toast';
 import { ErrorBoundary } from './ErrorBoundary';
+import { NotificationCenter } from './NotificationCenter';
 import { useStore } from '../store/useStore';
-import { ChevronRight, WifiOff } from 'lucide-react';
+import { ChevronRight, WifiOff, Menu } from 'lucide-react';
 
 function Breadcrumbs() {
   const location = useLocation();
@@ -39,11 +41,47 @@ function Breadcrumbs() {
 
 export function Layout() {
   const connected = useStore((s) => s.connected);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
     <div className="flex min-h-screen">
-      <Sidebar />
-      <main className="flex-1 p-6 overflow-auto">
+      {/* Mobile sidebar overlay */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-20 bg-black/60 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar — always visible on desktop, slide-over on mobile */}
+      <div
+        className={[
+          'fixed inset-y-0 left-0 z-30 transition-transform duration-200 lg:static lg:translate-x-0',
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full',
+        ].join(' ')}
+      >
+        <Sidebar onClose={() => setSidebarOpen(false)} />
+      </div>
+
+      <main className="flex-1 p-4 lg:p-6 overflow-auto min-w-0">
+        {/* Mobile top bar */}
+        <div className="flex items-center gap-3 mb-4 lg:hidden">
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-200 hover:bg-white/5 transition-colors"
+            aria-label="Open menu"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          <span className="font-semibold text-sm text-gray-200 flex-1">GA Dashboard</span>
+          <NotificationCenter />
+        </div>
+
+        {/* Desktop top bar — notification bell right-aligned */}
+        <div className="hidden lg:flex items-center justify-end mb-2 -mt-2">
+          <NotificationCenter />
+        </div>
+
         {/* Reconnection banner */}
         {!connected && (
           <div className="mb-4 flex items-center gap-2 px-4 py-2.5 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-xs">
