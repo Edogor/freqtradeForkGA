@@ -1,0 +1,424 @@
+# ============================================================================
+# WAVE34 — HI-E: Stoploss/ROI Hunters (Heterogeneous Islands)
+# ============================================================================
+# Hypothesis: We have never systematically searched for the OPTIMAL stoploss
+#             and ROI range for scalping — we've always used the same
+#             heuristic ranges from wave32_H. This experiment lets the GA
+#             simultaneously explore FOUR stoploss/ROI regimes and lets
+#             ring migration cross-breed the best strategies from each:
+#
+#             - Micro-scalp (SL ≤1.5%, ROI ≤1.2%): ultra-tight, needs high
+#               win rate (min 0.45) to compensate tiny wins vs losses.
+#               If it works, returns very frequent small profits.
+#
+#             - Precision scalp (SL ≤2.5%, ROI ≤2%): tight but realistic.
+#               Sweet spot for scalping — larger than micro, smaller than std.
+#
+#             - Standard (SL ≤4%, ROI ≤3%): proven range from wave32_H.
+#               Baseline group to benchmark the others.
+#
+#             - Wide scalp (SL ≤6%, ROI ≤5%): more breathing room, tolerates
+#               volatility, fewer false stops. Good for recent high-volatility
+#               crypto environment.
+#
+# Ring migration hypothesis: micro-scalp timing signals (tight entries) may
+# improve standard/wide strategies' entry precision, while wide strategies'
+# filters may improve micro-scalp's generalization.
+#
+# 12 islands × 8 pop = 96 total · ring · 15m · 7 gens ≈ 3.8h
+# ============================================================================
+
+experiment_name: wave34_HIE_roi_sl_hunters
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 8
+  generations: 7
+  mutation_rate: 0.18
+  crossover_rate: 0.70
+  elite_size: 2
+  tournament_size: 3
+  selection_method: 'rank'
+  convergence_patience: 6
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.25
+  diversity_threshold: 0.12
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'single_objective'
+
+surrogate:
+  enabled: true
+  min_training_samples: 60
+  filter_percentile: 70
+  retrain_interval: 3
+  model: "gradient_boosting"
+  mutate_skipped: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 12
+  population_per_island: 8
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: false
+    indicator_overlap: 0.40
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+    merge_rounds: false
+  islands:
+    # ── Group 1: Micro-scalp (islands 0–2): SL ≤1.5%, ROI ≤1.2% ─────────
+    - name: island_0_micro_scalp
+      population_size: 8
+      seed: 500
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.015, -0.005]
+          roi_range: [0.003, 0.012]
+          min_trades: 100
+          min_win_rate: 0.45
+        fitness_penalties:
+          min_trades: 100
+          min_win_rate: 0.45
+          min_trades_per_month: 18
+        genetic_algorithm:
+          selection_method: 'tournament'  # tournament to find exceptional micro-scalpers
+          tournament_size: 3
+
+    - name: island_1_micro_scalp
+      population_size: 8
+      seed: 501
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.015, -0.005]
+          roi_range: [0.003, 0.012]
+          min_trades: 100
+          min_win_rate: 0.45
+        fitness_penalties:
+          min_trades: 100
+          min_win_rate: 0.45
+          min_trades_per_month: 18
+        genetic_algorithm:
+          selection_method: 'tournament'
+          tournament_size: 3
+
+    - name: island_2_micro_scalp
+      population_size: 8
+      seed: 502
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.015, -0.005]
+          roi_range: [0.003, 0.012]
+          min_trades: 100
+          min_win_rate: 0.45
+        fitness_penalties:
+          min_trades: 100
+          min_win_rate: 0.45
+          min_trades_per_month: 18
+        genetic_algorithm:
+          selection_method: 'rank'
+        fitness_weights:
+          profit: 0.34
+          sharpe_ratio: 0.08
+          sortino_ratio: 0.04
+          profit_factor: 0.16
+          drawdown: 0.03
+          win_rate: 0.25         # very high — micro-scalp needs precision
+          trade_frequency: 0.10
+
+    # ── Group 2: Precision scalp (islands 3–5): SL ≤2.5%, ROI ≤2% ───────
+    - name: island_3_precision_scalp
+      population_size: 8
+      seed: 503
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.025, -0.010]
+          roi_range: [0.005, 0.020]
+          min_win_rate: 0.42
+        fitness_penalties:
+          min_win_rate: 0.42
+          min_trades: 90
+          min_trades_per_month: 14
+        genetic_algorithm:
+          selection_method: 'rank'
+
+    - name: island_4_precision_scalp
+      population_size: 8
+      seed: 504
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.025, -0.010]
+          roi_range: [0.005, 0.020]
+          min_win_rate: 0.42
+        fitness_penalties:
+          min_win_rate: 0.42
+          min_trades: 90
+          min_trades_per_month: 14
+        genetic_algorithm:
+          selection_method: 'tournament'
+          tournament_size: 3
+
+    - name: island_5_precision_scalp
+      population_size: 8
+      seed: 505
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.025, -0.010]
+          roi_range: [0.005, 0.020]
+          min_win_rate: 0.42
+        fitness_penalties:
+          min_win_rate: 0.42
+          min_trades: 90
+          min_trades_per_month: 14
+        genetic_algorithm:
+          selection_method: 'tournament'
+          tournament_size: 3
+        fitness_weights:
+          profit: 0.36
+          sharpe_ratio: 0.09
+          sortino_ratio: 0.04
+          profit_factor: 0.14
+          drawdown: 0.04
+          win_rate: 0.22
+          trade_frequency: 0.11
+
+    # ── Group 3: Standard (islands 6–8): SL ≤4%, ROI ≤3% (proven range) ──
+    - name: island_6_standard
+      population_size: 8
+      seed: 506
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.040, -0.015]
+          roi_range: [0.008, 0.030]
+        fitness_penalties:
+          min_win_rate: 0.38
+        genetic_algorithm:
+          selection_method: 'rank'
+
+    - name: island_7_standard
+      population_size: 8
+      seed: 507
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.040, -0.015]
+          roi_range: [0.008, 0.030]
+        fitness_penalties:
+          min_win_rate: 0.38
+        genetic_algorithm:
+          selection_method: 'tournament'
+          tournament_size: 3
+
+    - name: island_8_standard
+      population_size: 8
+      seed: 508
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.040, -0.015]
+          roi_range: [0.008, 0.030]
+        fitness_penalties:
+          min_win_rate: 0.38
+        genetic_algorithm:
+          selection_method: 'rank'
+
+    # ── Group 4: Wide scalp (islands 9–11): SL ≤6%, ROI ≤5% ─────────────
+    - name: island_9_wide_scalp
+      population_size: 8
+      seed: 509
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.060, -0.020]
+          roi_range: [0.012, 0.050]
+          min_win_rate: 0.35
+        fitness_penalties:
+          min_trades: 60
+          min_win_rate: 0.35
+          min_trades_per_month: 10
+        genetic_algorithm:
+          selection_method: 'rank'
+
+    - name: island_10_wide_scalp
+      population_size: 8
+      seed: 510
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.060, -0.020]
+          roi_range: [0.012, 0.050]
+          min_win_rate: 0.35
+        fitness_penalties:
+          min_trades: 60
+          min_win_rate: 0.35
+          min_trades_per_month: 10
+        genetic_algorithm:
+          selection_method: 'tournament'
+          tournament_size: 3
+
+    - name: island_11_wide_scalp
+      population_size: 8
+      seed: 511
+      extra_config:
+        strategy_constraints:
+          stoploss_range: [-0.060, -0.020]
+          roi_range: [0.012, 0.050]
+          min_win_rate: 0.35
+        fitness_penalties:
+          min_trades: 60
+          min_win_rate: 0.35
+          min_trades_per_month: 10
+        genetic_algorithm:
+          selection_method: 'rank'
+        fitness_weights:
+          profit: 0.40
+          sharpe_ratio: 0.10
+          sortino_ratio: 0.05
+          profit_factor: 0.12
+          drawdown: 0.05
+          win_rate: 0.15
+          trade_frequency: 0.13  # lower freq expected at wide targets
+
+# ── Base config ─────────────────────────────────────────────────────────────
+fitness_weights:
+  profit: 0.38
+  sharpe_ratio: 0.09
+  sortino_ratio: 0.04
+  profit_factor: 0.12
+  drawdown: 0.04
+  win_rate: 0.18
+  trade_frequency: 0.15
+
+fitness_bounds:
+  profit_min: -5.0
+  profit_max: 10.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'gaussian'
+
+fitness_penalties:
+  min_trades: 80
+  min_trades_per_month: 12
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.20
+  min_win_rate: 0.38
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210101-20260331"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+  max_open_trades: 4
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 300
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+  validation_pairs:
+    - "SOL/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "PEPE/USDT"
+  weight_train: 0.50
+  weight_val: 0.50
+  min_val_fitness: 0.0
+  validate_top_n_only: 8
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+# Base strategy_constraints (overridden per island above)
+strategy_constraints:
+  min_trades: 80
+  max_drawdown: 0.20
+  min_win_rate: 0.38
+  timeframes: ["15m"]
+  stoploss_range: [-0.040, -0.010]
+  roi_range: [0.005, 0.025]
+  max_open_trades_range: [1, 4]
+  trailing_stop_positive_range: [0.005, 0.020]
+  trailing_stop_offset_addition_range: [0.003, 0.012]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+    - 'STOCH'
+    - 'DONCHIAN'
+    - 'WILLR'
+    - 'AROON'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+storage:
+  database: "genetic_algorithm/data/wave34_HIE.db"
+  strategy_dir: "user_data/strategies/wave34_HIE"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave34_HIE"
+  checkpoint_interval: 2
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 8000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave34_HIE.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave34/HIE_roi_sl_hunters/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 3
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave34_HIE"
+
+deflated_sharpe:
+  enabled: true

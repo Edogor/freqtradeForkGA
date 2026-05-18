@@ -12,7 +12,7 @@ import os
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from genetic_algorithm.core.individual import Individual
 from genetic_algorithm.core.strategy_gene import StrategyGene
@@ -99,10 +99,13 @@ class HallOfFame:
         self.max_size = max_size
         self.min_fitness = min_fitness
         self.entries: List[HallOfFameEntry] = []
+        self._fingerprint_cache: set = set()
         self.run_id = run_id or f"run_{int(time.time())}"
         
         # Load existing hall of fame
         self._load()
+        # Build fingerprint cache from loaded entries
+        self._rebuild_fingerprint_cache()
     
     @property
     def filepath(self) -> Path:
@@ -122,6 +125,12 @@ class HallOfFame:
         else:
             logger.info("No existing hall of fame found. Starting fresh.")
     
+    def _rebuild_fingerprint_cache(self) -> None:
+        """Rebuild the O(1) fingerprint cache from current entries."""
+        self._fingerprint_cache = {
+            self._fingerprint(e.strategy_gene_dict) for e in self.entries
+        }
+    
     def _save(self) -> None:
         """Save hall of fame to disk (atomic write via tmp+rename)."""
         data = {
@@ -137,18 +146,18 @@ class HallOfFame:
             os.replace(tmp_path, self.filepath)
         except IOError as e:
             logger.error(f"Failed to save hall of fame: {e}")
+            raise
     
     def _is_duplicate(self, gene_dict: Dict[str, Any]) -> bool:
         """
         Check if a strategy is structurally similar to an existing entry.
         
-        Uses indicator types + condition operators as a fingerprint.
+        Uses a detailed fingerprint including indicator types + parameters +
+        timeframes, and condition operators + thresholds + indicator instance
+        references. O(1) lookup via cached fingerprint set.
         """
         new_fp = self._fingerprint(gene_dict)
-        for entry in self.entries:
-            if self._fingerprint(entry.strategy_gene_dict) == new_fp:
-                return True
-        return False
+        return new_fp in self._fingerprint_cache
     
     def _fingerprint(self, gene_dict: Dict[str, Any]) -> str:
         """Create a structural fingerprint of a strategy gene dict.
@@ -170,7 +179,7 @@ class HallOfFame:
         # Use 1-decimal rounding so near-identical strategies (30.0 vs 30.0001)
         # are properly deduplicated while meaningfully different ones stay separate.
         def _cond_key(c):
-            thr = round(c.get('threshold', 0), 1)
+            thr = round(c.get('threshold', 0), 2)
             return f"{c.get('indicator', '')}:{c.get('operator', '')}:{thr}"
 
         entry_keys = sorted(_cond_key(c) for c in gene_dict.get('entry_conditions', []))
@@ -221,12 +230,15 @@ class HallOfFame:
                     individual_id=getattr(ind, 'id', 0) if hasattr(ind, 'id') else 0,
                 )
                 self.entries.append(entry)
+                self._fingerprint_cache.add(self._fingerprint(gene_dict))
                 added += 1
         
         if added > 0:
             # Sort by fitness descending, trim to max_size
             self.entries.sort(key=lambda e: e.fitness, reverse=True)
             self.entries = self.entries[:self.max_size]
+            # Rebuild cache after truncation may have removed entries
+            self._rebuild_fingerprint_cache()
             self._save()
             logger.info(f"[HALL OF FAME] Added {added} new entries. Total: {len(self.entries)}")
         
@@ -252,7 +264,7 @@ class HallOfFame:
                 # Validate and fix operator/indicator compatibility
                 self._fix_invalid_operators(gene)
                 ind = Individual(strategy_gene=gene)
-                ind.metadata = {'source': 'hall_of_fame', 'original_fitness': entry.fitness}
+                ind.metrics = {'source': 'hall_of_fame', 'original_fitness': entry.fitness}
                 individuals.append(ind)
             except Exception as e:
                 logger.debug(f"Failed to restore hall of fame entry: {e}")

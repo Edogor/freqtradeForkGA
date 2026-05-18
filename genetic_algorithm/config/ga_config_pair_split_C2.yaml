@@ -1,0 +1,132 @@
+# Pair-Split Validation Config C2 — 1h Timeframe Variant
+#
+# Purpose: Same pair-split generalization test as C1 but on 1h timeframe.
+#          Compares whether longer candles produce more generalizable strategies.
+#
+# Differences from C1:
+#   - Timeframe: 1h instead of 15m
+#   - Selection: rank instead of tournament (A/B test)
+#   - Slightly higher mutation: 0.20 (compensate for fewer bars)
+#
+# Window: 5 years (2021-03 to 2026-03), timeframe 1h
+# Expected runtime: ~2–3 hours (fewer bars per backtest)
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 12
+  generations: 15
+  mutation_rate: 0.20
+  crossover_rate: 0.7
+  elite_size: 3              # Slightly more elitism for 1h (less data)
+  tournament_size: 3
+  selection_method: 'rank'   # A/B test vs tournament in C1
+  convergence_patience: 8
+
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.1
+
+  fitness_sharing: false
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'single_objective'
+
+fitness_weights:
+  profit: 0.25
+  sharpe_ratio: 0.20
+  sortino_ratio: 0.15
+  profit_factor: 0.10
+  drawdown: 0.15
+  win_rate: 0.08
+  trade_frequency: 0.07
+
+fitness_penalties:
+  min_trades: 3              # Fewer trades expected on 1h
+  max_drawdown: 0.25
+  min_win_rate: 0.30
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210301-20260301"
+  stake_amount: 100
+  max_open_trades: 3
+  fee: 0.001
+  exchange: "binance"
+  auto_download_data: true
+  enable_cache: true
+  timeout: 180
+  pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+
+walk_forward:
+  enabled: false
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "SOL/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+
+strategy_constraints:
+  min_trades: 5
+  max_drawdown: 0.25
+  min_win_rate: 0.30
+  timeframes: ["1h"]         # <-- 1h only
+  stoploss_range: [-0.15, -0.05]
+  roi_range: [0.01, 0.08]
+  max_open_trades_range: [1, 5]
+
+multi_timeframe:
+  enabled: false
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'DONCHIAN'
+    - 'CMF'
+    - 'VROC'
+  min_per_strategy: 2
+  max_per_strategy: 5
+
+mutation:
+  rate: 0.20
+  add_indicator_prob: 0.15
+  remove_indicator_prob: 0.10
+  modify_param_prob: 0.35
+  modify_condition_prob: 0.25
+
+crossover:
+  rate: 0.7
+  indicator_mix_prob: 0.5
+
+monte_carlo:
+  enabled: false
+
+llm:
+  enabled: false
+
+generic_island_model:
+  enabled: false
+
+island_model:
+  enabled: false
+
+terminal_monitor:
+  enabled: true

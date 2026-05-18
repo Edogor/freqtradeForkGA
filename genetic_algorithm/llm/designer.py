@@ -8,15 +8,15 @@ validation, sanitization, and fallback handling.
 import logging
 import random
 import time
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 from genetic_algorithm.core.strategy_gene import (
     StrategyGene, IndicatorGene, ConditionGene
 )
-from genetic_algorithm.llm.provider import LLMProvider, LLMProviderFactory
+from genetic_algorithm.llm.provider import LLMProvider
 from genetic_algorithm.llm.router import create_provider_or_router
 from genetic_algorithm.llm.prompts import (
-    StrategyPromptBuilder, STRATEGY_STYLES, get_diverse_styles, INDICATOR_REFERENCE
+    StrategyPromptBuilder, get_diverse_styles, INDICATOR_REFERENCE
 )
 from genetic_algorithm.llm.diagnostics import diagnose_failure_mode, select_mutation_objective
 
@@ -58,6 +58,11 @@ class StrategyDesigner:
         self._min_call_interval = llm_config.get('min_call_interval', 3.0)
         self._max_call_interval = llm_config.get('max_call_interval', 12.0)
         self._effective_call_interval = self._min_call_interval
+        
+        # Rate-limit cooldown: skip LLM calls entirely after receiving 429
+        # Default 120s cooldown prevents wasting minutes on repeated 429 retries
+        self._rate_limit_cooldown = llm_config.get('rate_limit_cooldown', 120.0)
+        self._rate_limited_until = 0.0
         
         # LLM mutation config
         self.mutation_enabled = llm_config.get('mutation_enabled', False)
@@ -335,6 +340,12 @@ class StrategyDesigner:
             logger.error(f"LLM strategy generation failed: {e}")
             self.stats['failed'] += 1
             self._on_llm_failure()
+            # Activate cooldown if failure was due to rate limiting (429)
+            last_rl = getattr(self.provider, '_last_rate_limit_time', 0)
+            if last_rl and (time.time() - last_rl) < 60:
+                self._rate_limited_until = time.time() + self._rate_limit_cooldown
+                logger.warning(f"LLM rate-limited — cooldown for {self._rate_limit_cooldown:.0f}s "
+                             f"(skipping LLM calls until cooldown expires)")
             return None
     
     def _json_to_strategy_gene(
@@ -784,6 +795,11 @@ class StrategyDesigner:
 
     def _budget_available(self) -> bool:
         """Check if LLM call budget allows another call."""
+        # Skip if recently rate-limited (avoid wasting minutes on 429 retries)
+        if time.time() < self._rate_limited_until:
+            remaining = self._rate_limited_until - time.time()
+            logger.debug("LLM rate-limit cooldown active (%.0fs remaining), skipping", remaining)
+            return False
         if self._calls_this_generation >= self._max_calls_per_generation:
             logger.debug("LLM generation budget exhausted (%d/%d)",
                         self._calls_this_generation, self._max_calls_per_generation)

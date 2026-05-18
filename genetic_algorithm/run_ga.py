@@ -11,6 +11,7 @@ Configuration can be adjusted in the USER CONFIGURATION section below.
 
 import sys
 import os
+import shutil
 import logging
 import argparse
 import json
@@ -23,6 +24,37 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from genetic_algorithm.core.evolution import GeneticAlgorithm
 from genetic_algorithm.strategies.generator import StrategyGenerator
 import yaml
+
+
+# ============================================================================
+# DISK SPACE PROTECTION
+# ============================================================================
+
+def check_disk_space(min_gb: float = 5.0, path: str = ".") -> bool:
+    """
+    Check if sufficient disk space is available before starting evolution.
+
+    Args:
+        min_gb: Minimum free disk space in GB required to proceed.
+        path: Filesystem path to check (uses its mount point).
+
+    Returns:
+        True if enough space is available, False otherwise.
+    """
+    try:
+        usage = shutil.disk_usage(path)
+        free_gb = usage.free / (1024 ** 3)
+        if free_gb < min_gb:
+            print(f"❌ Insufficient disk space: {free_gb:.1f} GB free, "
+                  f"minimum {min_gb:.1f} GB required.")
+            print("   Free up space by cleaning old caches/checkpoints, "
+                  "then retry.")
+            return False
+        print(f"  ✓ Disk space OK: {free_gb:.1f} GB free (minimum: {min_gb:.1f} GB)")
+        return True
+    except OSError as e:
+        print(f"⚠️  Could not check disk space: {e}")
+        return True  # Don't block on check failure
 
 
 # ============================================================================
@@ -154,11 +186,14 @@ def print_configuration(config: dict):
     
     fitness_weights = config['fitness_weights']
     print("Fitness Weights:")
-    print(f"  Profit:             {fitness_weights['profit']:.2%}")
-    print(f"  Sharpe Ratio:       {fitness_weights['sharpe_ratio']:.2%}")
-    print(f"  Drawdown:           {fitness_weights['drawdown']:.2%}")
-    print(f"  Win Rate:           {fitness_weights['win_rate']:.2%}")
-    print(f"  Trade Frequency:    {fitness_weights['trade_frequency']:.2%}")
+    for fw_key, fw_label in [
+        ('profit', 'Profit'), ('profit_factor', 'Profit Factor'),
+        ('sharpe_ratio', 'Sharpe Ratio'), ('drawdown', 'Drawdown'),
+        ('win_rate', 'Win Rate'), ('trade_frequency', 'Trade Frequency'),
+        ('monthly_stability', 'Monthly Stability'), ('cross_pair', 'Cross Pair'),
+    ]:
+        if fw_key in fitness_weights:
+            print(f"  {fw_label + ':':20s}{fitness_weights[fw_key]:.2%}")
     print()
     print("=" * 80)
     print()
@@ -285,7 +320,7 @@ def save_summary_report(top_strategies: list, output_dir: Path, config: dict,
         generation_holdout_history: Optional list of GenerationHoldoutStats
     """
     from genetic_algorithm.utils.overfit_analysis import (
-        classify_overfitting, OverfitThresholds, OverfitAssessment,
+        classify_overfitting, OverfitThresholds,
         generate_detailed_results, save_detailed_results, print_overfit_summary,
     )
     
@@ -767,6 +802,20 @@ def main():
     except Exception as e:
         logger.debug(f"Extended config validation skipped: {e}")
     
+    # Run preflight checks (incompatible features, data availability)
+    try:
+        from genetic_algorithm.utils.config_validator import preflight_check
+        pf_errors, pf_warnings = preflight_check(config)
+        for w in pf_warnings:
+            logger.warning(f"[PREFLIGHT] {w}")
+        for e in pf_errors:
+            logger.error(f"[PREFLIGHT] {e}")
+        if pf_errors:
+            print(f"❌ Preflight check found {len(pf_errors)} error(s). Fix before launching.")
+            return 1
+    except Exception as e:
+        logger.debug(f"Preflight check skipped: {e}")
+    
     if args.validate_only:
         print("✅ Config validation passed!")
         return 0
@@ -804,6 +853,11 @@ def main():
         or str(OUTPUT_DIR)
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Disk space pre-flight check ──
+    min_disk_gb = config.get('storage', {}).get('min_disk_gb', 5.0)
+    if not check_disk_space(min_gb=min_disk_gb, path=str(output_dir)):
+        return 1
 
     print("\n" + "=" * 80)
     print("STARTING EVOLUTION")
@@ -1284,7 +1338,6 @@ def _start_dashboard_only(args):
 
 def _start_with_dashboard(args):
     """Start evolution AND web dashboard simultaneously."""
-    import threading
 
     config_file = Path(args.config)
     if not config_file.exists():
@@ -1298,7 +1351,6 @@ def _start_with_dashboard(args):
     config.setdefault('terminal_monitor', {})['enabled'] = False
 
     setup_logging(monitor_active=False)
-    logger = logging.getLogger(__name__)
 
     if not validate_config(config):
         print("❌ Config validation failed.")

@@ -1,0 +1,157 @@
+# ============================================================================
+# WAVE 21 — E175: E161 Winner + Bigger Population (Clean A/B Test)
+# ============================================================================
+# Purpose: E161 was the ONLY profitable experiment in wave 14 (+1.86%).
+#          However, all 5 top ranks converged to the same individual (Ind15),
+#          indicating population collapse killed diversity. This experiment
+#          replicates E161 exactly but with pop=15 and elite=3 to prevent
+#          collapse. This is the cleanest test of population size as variable.
+#
+# Base: E161 (15m ring, soft 30tpm — the only profitable experiment)
+# Key changes: pop=15 (was 8), elite=3 (was 1), corrected fitness weight keys
+# Control: Everything else matches E161 exactly (topology, thresholds, etc.)
+# Expected: Multiple distinct profitable individuals in top-5
+# ============================================================================
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 15
+  generations: 12
+  mutation_rate: 0.18
+  crossover_rate: 0.7
+  elite_size: 3
+  tournament_size: 3
+  selection_method: 'tournament'
+  convergence_patience: 8
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.1
+  fitness_sharing: false
+  allow_self_crossover: false
+  random_immigrants: 1
+  mode: 'single_objective'
+
+generic_island_model:
+  enabled: true
+  num_islands: 10
+  population_per_island: 15
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.5
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+    merge_rounds: false
+
+fitness_weights:
+  profit: 0.17
+  sharpe_ratio: 0.15
+  sortino_ratio: 0.10
+  profit_factor: 0.08
+  drawdown: 0.12
+  win_rate: 0.07
+  trade_frequency: 0.18
+  monthly_stability: 0.05
+  cross_pair: 0.04
+  drawdown_duration: 0.02
+  consecutive_losses: 0.02
+
+trade_frequency_thresholds:
+  very_few: 60
+  few: 180
+  ideal_min: 360
+  ideal_max: 1200
+  moderate_excess: 2000
+  shape: 'asymmetric'
+
+fitness_penalties:
+  min_trades: 150
+  min_trades_per_month: 30
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.25
+  min_win_rate: 0.30
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210301-20260301"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  exchange: "binance"
+  auto_download_data: true
+  enable_cache: true
+  timeout: 180
+
+walk_forward:
+  enabled: false
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "SOL/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 150
+  max_drawdown: 0.25
+  min_win_rate: 0.30
+  timeframes: ["15m"]
+  stoploss_range: [-0.07, -0.018]
+  roi_range: [0.004, 0.035]
+  max_open_trades_range: [1, 5]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'DONCHIAN'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'WILLR'
+    - 'ROC'
+    - 'AROON'
+    - 'TEMA'
+    - 'KAMA'
+  min_per_strategy: 2
+  max_per_strategy: 5
+
+island_model:
+  enabled: false
+
+llm:
+  enabled: false
+
+terminal_monitor:
+  enabled: true

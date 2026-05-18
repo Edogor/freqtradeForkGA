@@ -127,15 +127,18 @@ def _mutate_condition_threshold(condition, ind_config, is_entry, i, mutations_ap
     _DEFAULT_RANGES = {
         'RSI':   ([20, 40], [60, 80]),
         'CCI':   ([-200, -100], [100, 200]),
-        'STOCH': ([15, 30], [70, 85]),
+        'STOCH': ([15, 35], [65, 85]),
         'WILLR': ([-90, -70], [-30, -10]),
         'MFI':   ([15, 35], [65, 85]),
         'ADX':   ([20, 35], [20, 35]),       # same for entry/exit (trend strength)
         'AROON': ([60, 80], [60, 80]),
         'ROC':   ([-5, 0], [0, 5]),
         'VROC':  ([-200, -50], [50, 200]),
-        'CMF':   ([-0.2, -0.05], [0.05, 0.2]),
+        'CMF':   ([0.05, 0.2], [-0.2, -0.05]),  # entry=positive(bullish), exit=negative(bearish)
         'ATR':   ([0.005, 0.02], [0.005, 0.02]),  # volatility ratio of close price
+        'OBV':   ([-1e6, 0], [0, 1e6]),     # volume-based; wide range, Gaussian fallback is fine
+        'TEMA':  ([0.98, 1.0], [1.0, 1.02]), # ratio to close price
+        'KAMA':  ([0.98, 1.0], [1.0, 1.02]), # ratio to close price
     }
 
     defaults = _DEFAULT_RANGES.get(base_indicator)
@@ -266,14 +269,29 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
     
     # Get adaptive weights (injected by evolution.py from feature importance)
     indicator_weights = config.get('_indicator_weights', {})
-    
+    # v3: synergy weights keyed by partner indicator type
+    synergy_weights = config.get('_synergy_weights', {})
+
     mutations_applied = []
-    
-    def _weighted_choice(candidates: list) -> str:
-        """Pick an indicator using adaptive weights if available, else uniform."""
-        if not indicator_weights or not candidates:
+    _gene_tf = mutated_gene.timeframe  # for TF-adaptive indicator parameter scaling
+
+    def _weighted_choice(candidates: list, context_indicators: list = None) -> str:
+        """Pick an indicator using adaptive weights + synergy context, else uniform."""
+        if not candidates:
             return random.choice(candidates)
+
+        # Start with base indicator weights
         weights = [indicator_weights.get(c, 1.0) for c in candidates]
+
+        # v3: Blend synergy weights when we know existing indicators
+        if synergy_weights and context_indicators:
+            for i, c in enumerate(candidates):
+                if c in synergy_weights:
+                    # Multiplicative boost from synergy graph
+                    weights[i] *= (1.0 + synergy_weights[c])
+
+        if not any(w > 0 for w in weights):
+            return random.choice(candidates)
         return random.choices(candidates, weights=weights, k=1)[0]
     
     # Choose mutation operation
@@ -292,8 +310,9 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
         available_new = [t for t in available_indicators if t not in existing_types]
         
         if available_new:
-            new_type = _weighted_choice(available_new)
-            new_indicator = _create_random_indicator(new_type, indicator_config)
+            existing_types_for_ctx = [ind.type for ind in mutated_gene.indicators]
+            new_type = _weighted_choice(available_new, context_indicators=existing_types_for_ctx)
+            new_indicator = _create_random_indicator(new_type, indicator_config, timeframe=_gene_tf)
             mutated_gene.indicators.append(new_indicator)
             mutations_applied.append(f"add_{new_type}")
     
@@ -346,8 +365,9 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
             # Choose a different indicator type
             available_new = [t for t in available_indicators if t != old_type]
             if available_new:
-                new_type = _weighted_choice(available_new)
-                new_indicator = _create_random_indicator(new_type, indicator_config)
+                remaining_types = [ind.type for ind in mutated_gene.indicators if ind.type != old_type]
+                new_type = _weighted_choice(available_new, context_indicators=remaining_types)
+                new_indicator = _create_random_indicator(new_type, indicator_config, timeframe=_gene_tf)
                 mutated_gene.indicators[idx] = new_indicator
                 mutations_applied.append(f"replace_{old_type}_with_{new_type}")
                 
@@ -382,9 +402,8 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
         'applied': mutations_applied
     }]
     
-    # Ensure all indicators referenced in conditions are calculated
-    indicator_config = config.get('indicators', {})
-    new_individual.strategy_gene.ensure_indicators_for_conditions(indicator_config)
+    # Remove conditions orphaned by indicator mutation instead of adding random indicators
+    new_individual.strategy_gene.prune_orphaned_conditions()
     
     # Reassign instance IDs after mutation to maintain unique IDs
     new_individual.strategy_gene.assign_instance_ids()
@@ -392,9 +411,10 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
     return new_individual
 
 
-def _create_random_indicator(indicator_type: str, indicator_config: Dict[str, Any]) -> IndicatorGene:
+def _create_random_indicator(indicator_type: str, indicator_config: Dict[str, Any],
+                             timeframe: str = None) -> IndicatorGene:
     """Helper function to create a random indicator of given type."""
-    return create_random_indicator(indicator_type, indicator_config)
+    return create_random_indicator(indicator_type, indicator_config, timeframe=timeframe)
 
 
 def mutate_conditions(individual: Individual, mutation_rate: float,
@@ -435,7 +455,12 @@ def mutate_conditions(individual: Individual, mutation_rate: float,
                 else:
                     valid_ops = ['<', '>', 'cross_above', 'cross_below',
                                  'increasing', 'decreasing', 'between', 'value_above_ago']
-            condition.operator = random.choice(valid_ops)
+            op_weights_map = config.get('_operator_weights', {}) if config else {}
+            if op_weights_map:
+                weights = [op_weights_map.get(op, 1.0) for op in valid_ops]
+                condition.operator = random.choices(valid_ops, weights=weights, k=1)[0]
+            else:
+                condition.operator = random.choice(valid_ops)
             # Set sane defaults for new operators
             if condition.operator == 'between':
                 # Set a reasonable upper threshold
@@ -455,7 +480,7 @@ def mutate_conditions(individual: Individual, mutation_rate: float,
             # Set default ranges based on indicator type
             defaults = {
                 'RSI': ([20, 40], [60, 80]),
-                'STOCH': ([20, 40], [60, 80]),
+                'STOCH': ([15, 35], [65, 85]),
                 'CCI': ([-200, -100], [100, 200])
             }
             
@@ -514,9 +539,8 @@ def mutate_conditions(individual: Individual, mutation_rate: float,
     clamp_condition_thresholds(new_individual.strategy_gene.entry_conditions)
     clamp_condition_thresholds(new_individual.strategy_gene.exit_conditions)
     
-    # Ensure all indicators referenced in conditions are calculated
-    indicator_config = config.get('indicators', {})
-    new_individual.strategy_gene.ensure_indicators_for_conditions(indicator_config)
+    # Remove conditions orphaned by condition mutation instead of adding random indicators
+    new_individual.strategy_gene.prune_orphaned_conditions()
     
     # Reassign instance IDs to maintain unique references
     new_individual.strategy_gene.assign_instance_ids()
@@ -533,7 +557,7 @@ def _create_random_condition(indicator_type: str, is_entry: bool,
     config_map = {
         'RSI': ('cross_below', 'cross_above', 'buy_threshold', 'sell_threshold', [20, 40], [60, 80]),
         'MACD': ('cross_above', 'cross_below', None, None, None, None),
-        'STOCH': ('<', '>', 'k_threshold', 'd_threshold', [20, 40], [60, 80]),
+        'STOCH': ('<', '>', 'k_threshold', 'd_threshold', [15, 35], [65, 85]),
         'CCI': ('<', '>', 'buy_threshold', 'sell_threshold', [-200, -100], [100, 200]),
         'ADX': ('>', '>', 'threshold', 'threshold', [20, 40], [20, 40]),
         'BBANDS': ('cross_below', 'cross_above', None, None, None, None),
@@ -548,6 +572,12 @@ def _create_random_condition(indicator_type: str, is_entry: bool,
         'VWAP': ('cross_above', 'cross_below', None, None, None, None),
         'CMF': ('>', '<', 'buy_threshold', 'sell_threshold', [0.05, 0.2], [-0.2, -0.05]),
         'VROC': ('>', '<', 'threshold', 'threshold', [50, 200], [50, 200]),
+        'AROON': ('>', '<', 'threshold', 'threshold', [60, 80], [60, 80]),
+        'MFI': ('cross_below', 'cross_above', 'buy_threshold', 'sell_threshold', [15, 35], [65, 85]),
+        'WILLR': ('<', '>', 'buy_threshold', 'sell_threshold', [-90, -70], [-30, -10]),
+        'ROC': ('>', '<', 'threshold', 'threshold', [-5, 0], [0, 5]),
+        'TEMA': ('cross_above', 'cross_below', None, None, None, None),
+        'KAMA': ('cross_above', 'cross_below', None, None, None, None),
     }
     
     # Candlestick patterns: create threshold-based conditions
@@ -598,9 +628,10 @@ def _create_random_condition(indicator_type: str, is_entry: bool,
     entry_op, exit_op, entry_key, exit_key, entry_default, exit_default = config_map[indicator_type]
     operator = entry_op if is_entry else exit_op
     
-    # MACD, BBANDS, EMA, SMA, ATR, PSAR, SUPERTREND, ICHIMOKU, DONCHIAN, VWAP use threshold 0
+    # MACD, BBANDS, EMA, SMA, ATR, PSAR, SUPERTREND, ICHIMOKU, DONCHIAN, VWAP,
+    # TEMA, KAMA use threshold 0
     if indicator_type in ['MACD', 'BBANDS', 'EMA', 'SMA', 'PSAR', 'SUPERTREND', 
-                          'ICHIMOKU', 'DONCHIAN', 'VWAP']:
+                          'ICHIMOKU', 'DONCHIAN', 'VWAP', 'TEMA', 'KAMA']:
         threshold = 0
     elif indicator_type == 'ATR':
         threshold = random.uniform(0.005, 0.03)
@@ -679,10 +710,12 @@ def mutate_structure(individual: Individual, mutation_rate: float,
         # If enabling trailing stop, set appropriate parameters
         if mutated_gene.trailing_stop:
             # trailing_stop_positive_offset MUST be greater than trailing_stop_positive
-            # Set positive first, then ensure offset is higher
-            trailing_positive = random.uniform(0.01, 0.03)
-            # Offset must be greater than positive (add 0.01 to 0.03 on top)
-            trailing_offset = trailing_positive + random.uniform(0.01, 0.03)
+            # Ranges are configurable via strategy_constraints (important for scalping)
+            ts_pos_range = strategy_constraints.get('trailing_stop_positive_range', [0.01, 0.03])
+            ts_offset_add_range = strategy_constraints.get('trailing_stop_offset_addition_range', [0.01, 0.03])
+            trailing_positive = random.uniform(*ts_pos_range)
+            # Offset must be greater than positive
+            trailing_offset = trailing_positive + random.uniform(*ts_offset_add_range)
             mutated_gene.trailing_stop_positive = trailing_positive
             mutated_gene.trailing_stop_positive_offset = trailing_offset
             mutations_applied.append("trailing_stop_params")
@@ -893,7 +926,6 @@ def mutate_adaptive_per_gene(individual: Individual, base_mutation_rate: float,
     Returns:
         Mutated individual
     """
-    mutated_gene = individual.strategy_gene.copy()
     mutations_applied = []
     
     # Calculate adaptive rates for different gene components
@@ -1004,7 +1036,7 @@ def mutate_timeframes(individual: Individual, mutation_rate: float,
                 ind_type = random.choice(candidates) if candidates else random.choice(available_indicators)
             else:
                 ind_type = random.choice(available_indicators)
-            new_ind = create_random_indicator(ind_type, indicator_config)
+            new_ind = create_random_indicator(ind_type, indicator_config, timeframe=new_tf)
             new_ind.timeframe = new_tf
             mutated_gene.indicators.append(new_ind)
             mutations_applied.append(f"add_tf_{new_tf}_{ind_type}")
@@ -1231,6 +1263,7 @@ def _mutate_regime_gene(
         gene.regime_gene = RegimeGene(
             enabled=False,
             regime_timeframes=list(available_tfs),
+            micro_regime=in_strategy_cfg.get('micro_regime', False),
         )
 
     rg = gene.regime_gene
@@ -1278,6 +1311,12 @@ def _mutate_regime_gene(
                     key=lambda x: {'30m': 0, '1h': 1, '4h': 2, '1d': 3}.get(x, 4)
                 )
                 mutations.append(f"regime_tf_add_{added}")
+
+    # Toggle micro_regime (fast base-TF regime detection)
+    if random.random() < 0.15:
+        old_micro = getattr(rg, 'micro_regime', False)
+        rg.micro_regime = not old_micro
+        mutations.append(f"micro_regime_{old_micro}_to_{rg.micro_regime}")
 
     # Swap combination method
     if random.random() < 0.15:
@@ -1330,34 +1369,57 @@ def mutate(individual: Individual, mutation_rate: float,
     
     mutated = individual
     
+    # Self-adaptive: prefer the gene's own evolved rate when available
+    sa_config = config.get('self_adaptive', {})
+    gene = individual.strategy_gene
+    if (sa_config.get('enabled', False)
+            and getattr(gene, 'self_mutation_rate', None) is not None):
+        effective_rate = gene.self_mutation_rate
+    else:
+        effective_rate = mutation_rate
+    
     for method in methods:
-        if random.random() < mutation_rate:
+        if random.random() < effective_rate:
             # Snapshot pre-mutation state so we can roll back on failure
             pre_mutation = mutated
             try:
                 if method == 'parameters':
-                    mutated = mutate_parameters(mutated, mutation_rate, config)
+                    mutated = mutate_parameters(mutated, effective_rate, config)
                 elif method == 'indicators':
-                    mutated = mutate_indicators(mutated, mutation_rate, config)
+                    mutated = mutate_indicators(mutated, effective_rate, config)
                 elif method == 'conditions':
-                    mutated = mutate_conditions(mutated, mutation_rate, config)
+                    mutated = mutate_conditions(mutated, effective_rate, config)
                 elif method == 'structure':
-                    mutated = mutate_structure(mutated, mutation_rate, config)
+                    mutated = mutate_structure(mutated, effective_rate, config)
                 elif method == 'gaussian':
-                    mutated = mutate_gaussian(mutated, mutation_rate, config, sigma=0.1)
+                    mutated = mutate_gaussian(mutated, effective_rate, config, sigma=0.1)
                 elif method == 'condition_reassign':
-                    mutated = mutate_condition_reassign(mutated, mutation_rate, config)
+                    mutated = mutate_condition_reassign(mutated, effective_rate, config)
                 elif method == 'adaptive':
-                    mutated = mutate_adaptive_per_gene(mutated, mutation_rate, config)
+                    mutated = mutate_adaptive_per_gene(mutated, effective_rate, config)
                 elif method == 'timeframes':
-                    mutated = mutate_timeframes(mutated, mutation_rate, config)
+                    mutated = mutate_timeframes(mutated, effective_rate, config)
                 elif method == 'dynamic_bounds':
-                    mutated = mutate_dynamic_bounds(mutated, mutation_rate, config)
+                    mutated = mutate_dynamic_bounds(mutated, effective_rate, config)
                 elif method == 'regime':
-                    mutated = mutate_regime(mutated, mutation_rate, config)
+                    mutated = mutate_regime(mutated, effective_rate, config)
             except (ValueError, KeyError, AttributeError, TypeError) as e:
                 # Roll back to pre-mutation state to prevent partial corruption
                 mutated = pre_mutation
                 logger.warning(f"Mutation method '{method}' failed: {e}. Rolling back to pre-'{method}' state.")
+    
+    # Self-adaptive meta-mutation: evolve the individual's own mutation rate
+    sa_config = config.get('self_adaptive', {})
+    if sa_config.get('enabled', False):
+        gene = mutated.strategy_gene
+        rate_range = sa_config.get('mutation_rate_range', [0.05, 0.50])
+        if gene.self_mutation_rate is None:
+            gene.self_mutation_rate = mutation_rate  # Initialize from global
+        # Gaussian perturbation (τ ≈ 1/√n, classic Schwefel rule)
+        import math
+        n_genes = len(gene.indicators) + len(gene.entry_conditions) + len(gene.exit_conditions)
+        tau = 1.0 / math.sqrt(max(1, 2 * n_genes))
+        gene.self_mutation_rate *= math.exp(tau * random.gauss(0, 1))
+        gene.self_mutation_rate = max(rate_range[0], min(rate_range[1], gene.self_mutation_rate))
     
     return mutated

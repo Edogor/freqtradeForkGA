@@ -43,7 +43,7 @@ import threading
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 from genetic_algorithm.core.evolution import GeneticAlgorithm
 from genetic_algorithm.core.individual import Individual
@@ -53,6 +53,7 @@ from genetic_algorithm.core.population import (
     calculate_pairwise_distances,
 )
 from genetic_algorithm.core.hall_of_fame import HallOfFame
+from genetic_algorithm.core.culling import StrategyCuller
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ logger = logging.getLogger(__name__)
 
 INDICATOR_FAMILIES: Dict[str, List[str]] = {
     'momentum': ['RSI', 'MACD', 'STOCH', 'CCI', 'MFI', 'ROC', 'WILLR'],
-    'trend': ['EMA', 'SMA', 'TEMA', 'KAMA', 'SUPERTREND', 'AROON', 'ICHIMOKU', 'SAR'],
+    'trend': ['EMA', 'SMA', 'TEMA', 'KAMA', 'SUPERTREND', 'AROON', 'ICHIMOKU', 'PSAR'],
     'volatility': ['BBANDS', 'ATR', 'DONCHIAN'],
     'volume': ['OBV', 'CMF', 'VROC', 'VWAP'],
     'candlestick': [
@@ -225,8 +226,11 @@ class GenericIslandModelEvolution:
         self.island_stats: Dict[str, GenericIslandStats] = {}
         self.generation_stats: Dict[str, list] = {}
         self.migration_history: List[GenericMigrationEvent] = []
+        hof_cfg = self.config.get('hall_of_fame', {})
         self.hall_of_fame = HallOfFame(
-            max_size=self.config.get('hall_of_fame', {}).get('max_size', 50)
+            directory=hof_cfg.get('directory', 'genetic_algorithm/data/hall_of_fame'),
+            max_size=hof_cfg.get('max_size', 50),
+            min_fitness=hof_cfg.get('min_fitness', 0.0),
         )
 
         # External migration (cross-machine strategy exchange)
@@ -242,6 +246,20 @@ class GenericIslandModelEvolution:
             'interval', self.migration.interval
         )
         self.external_migration_count: int = ext_cfg.get('count', 3)
+
+        # Strategy culling
+        self.culler = StrategyCuller(self.config, self.logger)
+        if self.culler.enabled:
+            self.logger.info("[CULL] Strategy culling enabled")
+
+        # Checkpoint settings
+        storage_config = self.config.get('storage', {})
+        self.checkpoint_dir = Path(
+            storage_config.get('checkpoint_dir', 'genetic_algorithm/data/checkpoints')
+        )
+        self.checkpoint_interval: int = storage_config.get('checkpoint_interval', 5)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self._checkpoint_requested = False  # for SIGUSR1 manual trigger
 
         # Thread safety
         self._hof_lock = threading.Lock()
@@ -287,7 +305,7 @@ class GenericIslandModelEvolution:
 
             pool = None
             if indicator_pools:
-                pool = indicator_pools[i % len(indicator_pools)]
+                pool = indicator_pools[i % len(indicator_pools)] if i < len(indicator_pools) else indicator_pools[i % len(indicator_pools)]
 
             pairs = None
             if pair_subsets:
@@ -323,10 +341,11 @@ class GenericIslandModelEvolution:
         families = list(INDICATOR_FAMILIES.keys())
         pools = []
 
-        # Create one pool per family pair (sliding window with overlap)
-        for i in range(len(families)):
-            # Core: 2 adjacent families
-            core_families = [families[i], families[(i + 1) % len(families)]]
+        # Create pools — at least num_islands pools to avoid identical specialization
+        n_pools = max(len(families), getattr(self, 'num_islands', len(families)))
+        for i in range(n_pools):
+            # Core: 2 adjacent families (wrap around with modulo)
+            core_families = [families[i % len(families)], families[(i + 1) % len(families)]]
             core_indicators = []
             for fam in core_families:
                 core_indicators.extend(INDICATOR_FAMILIES[fam])
@@ -380,6 +399,22 @@ class GenericIslandModelEvolution:
     # Build sub-GA for an island
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> None:
+        """
+        Recursively merge *override* into *base* in-place.
+
+        Dicts are merged recursively so that a partial override like
+        ``{'genetic_algorithm': {'selection_method': 'tournament'}}`` only
+        touches the ``selection_method`` key rather than replacing the whole
+        ``genetic_algorithm`` section.  All other types are replaced directly.
+        """
+        for key, value in override.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                GenericIslandModelEvolution._deep_merge(base[key], value)
+            else:
+                base[key] = value
+
     def _build_island_config(self, ic: GenericIslandConfig) -> Dict[str, Any]:
         """
         Build a complete config dict for one island's GA, derived
@@ -428,21 +463,15 @@ class GenericIslandModelEvolution:
         # Tag island name for logging
         cfg['_island_name'] = ic.name
 
-        # Apply extra config overrides
-        for key, value in ic.extra_config.items():
-            cfg[key] = value
+        # Apply extra config overrides using deep merge so that partial
+        # overrides (e.g. only genetic_algorithm.selection_method) don't
+        # wipe sibling keys in the same section.
+        self._deep_merge(cfg, ic.extra_config)
 
-        # Parallel evaluation: split workers across islands
-        if self.parallel_islands:
-            par_cfg = cfg.get('parallel_evaluation', {})
-            if par_cfg.get('enabled', False):
-                total_workers = par_cfg.get('num_workers') or max(
-                    1, os.cpu_count() - 1,
-                )
-                workers_per_island = max(
-                    1, total_workers // len(self.island_configs),
-                )
-                par_cfg['num_workers'] = workers_per_island
+        # Disable per-island parallel evaluation — the island model
+        # creates ONE shared ParallelEvaluator to avoid spawning
+        # N_islands × N_workers processes (OOM on 16 GB systems).
+        cfg['parallel_evaluation'] = {'enabled': False}
 
         return cfg
 
@@ -491,6 +520,8 @@ class GenericIslandModelEvolution:
         """
         original_sigint = signal.getsignal(signal.SIGINT)
         original_sigterm = signal.getsignal(signal.SIGTERM)
+        _sigusr1_available = hasattr(signal, 'SIGUSR1')
+        original_sigusr1 = signal.getsignal(signal.SIGUSR1) if _sigusr1_available else None
 
         def _shutdown(signum, frame):
             if self._shutdown_requested:
@@ -499,14 +530,22 @@ class GenericIslandModelEvolution:
             self._shutdown_requested = True
             self.logger.warning("[SHUTDOWN] Graceful shutdown requested")
 
+        def _checkpoint_now(signum, frame):
+            self._checkpoint_requested = True
+            self.logger.info("[CHECKPOINT] Manual checkpoint requested via SIGUSR1")
+
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
+        if _sigusr1_available:
+            signal.signal(signal.SIGUSR1, _checkpoint_now)
 
         try:
             return self._evolve_inner()
         finally:
             signal.signal(signal.SIGINT, original_sigint)
             signal.signal(signal.SIGTERM, original_sigterm)
+            if _sigusr1_available:
+                signal.signal(signal.SIGUSR1, original_sigusr1)
 
     def _evolve_inner(self) -> Dict[str, List[Individual]]:
         start_time = time.time()
@@ -534,30 +573,69 @@ class GenericIslandModelEvolution:
         self.logger.info("  Parallel: %s", self.parallel_islands)
         self.logger.info("=" * 70)
 
-        # ═══════════════════════════════════════════════════════════════
-        # PHASE 1: CREATE ISLANDS
-        # ═══════════════════════════════════════════════════════════════
-        self._phase1_create_islands()
+        # Create a SINGLE shared parallel evaluator for all islands.
+        # Previously each island created its own ProcessPoolExecutor,
+        # leading to N_islands × N_workers processes (~80 on 20 islands)
+        # and OOM crashes on 16 GB systems.
+        self._shared_parallel_evaluator = None
+        parallel_config = self.config.get('parallel_evaluation', {})
+        if parallel_config.get('enabled', False):
+            from genetic_algorithm.evaluation.parallel import (
+                ParallelEvaluator, is_parallel_available,
+            )
+            if is_parallel_available():
+                self._shared_parallel_evaluator = ParallelEvaluator(
+                    self.config,
+                    num_workers=parallel_config.get('num_workers'),
+                )
+                self.logger.info(
+                    "[ISLAND] Shared parallel evaluator: %d workers "
+                    "(single pool for all %d islands)",
+                    self._shared_parallel_evaluator.num_workers,
+                    len(self.island_configs),
+                )
 
-        # ═══════════════════════════════════════════════════════════════
-        # PHASE 2: EVOLUTION
-        # ═══════════════════════════════════════════════════════════════
-        results = self._phase2_evolve()
+        try:
+            # ═══════════════════════════════════════════════════════════
+            # PHASE 1: CREATE ISLANDS
+            # ═══════════════════════════════════════════════════════════
+            self._phase1_create_islands()
 
-        # ═══════════════════════════════════════════════════════════════
-        # PHASE 3: REPORTING
-        # ═══════════════════════════════════════════════════════════════
-        total_elapsed = time.time() - start_time
-        self._phase3_report(results, total_elapsed)
+            # ── Try resuming from checkpoint ──
+            resume_gen = self.load_island_checkpoint()
+            if resume_gen is not None:
+                self.logger.info(
+                    "[ISLAND] Resuming island model from generation %d",
+                    resume_gen,
+                )
+            else:
+                resume_gen = 0
 
-        self.monitor.on_evolution_complete({
-            'total_time': total_elapsed,
-            'generations': self.generations,
-            'islands': len(self.islands),
-            'migrations': len(self.migration_history),
-        })
+            # ═══════════════════════════════════════════════════════════
+            # PHASE 2: EVOLUTION
+            # ═══════════════════════════════════════════════════════════
+            results = self._phase2_evolve(start_generation=resume_gen)
 
-        return results
+            # ═══════════════════════════════════════════════════════════
+            # PHASE 3: REPORTING
+            # ═══════════════════════════════════════════════════════════
+            total_elapsed = time.time() - start_time
+            self._phase3_report(results, total_elapsed)
+
+            self.monitor.on_evolution_complete({
+                'total_time': total_elapsed,
+                'generations': self.generations,
+                'islands': len(self.islands),
+                'migrations': len(self.migration_history),
+            })
+
+            return results
+        finally:
+            # Always clean up the shared pool (crash, interrupt, or normal exit)
+            if self._shared_parallel_evaluator is not None:
+                self.logger.info("[ISLAND] Shutting down shared parallel evaluator")
+                self._shared_parallel_evaluator.shutdown()
+                self._shared_parallel_evaluator = None
 
     # ------------------------------------------------------------------
     # Phase 1: Create Islands
@@ -602,21 +680,25 @@ class GenericIslandModelEvolution:
     # Phase 2: Evolution
     # ------------------------------------------------------------------
 
-    def _phase2_evolve(self) -> Dict[str, List[Individual]]:
+    def _phase2_evolve(self, start_generation: int = 0) -> Dict[str, List[Individual]]:
         """
         Run the generation loop with periodic migration across all islands.
         """
         phase_start = time.time()
         self.logger.info("")
         self.logger.info("═" * 70)
-        self.logger.info("  PHASE 2: EVOLVING %d ISLANDS × %d GENERATIONS%s",
+        self.logger.info("  PHASE 2: EVOLVING %d ISLANDS × %d GENERATIONS%s%s",
                          len(self.islands), self.generations,
-                         " (PARALLEL)" if self.parallel_islands else "")
+                         " (PARALLEL)" if self.parallel_islands else "",
+                         f" (resuming from gen {start_generation})" if start_generation > 0 else "")
+        max_runtime_minutes = self.config.get('genetic_algorithm', {}).get('max_runtime_minutes', None)
+        if max_runtime_minutes:
+            self.logger.info("  Max runtime: %.0f minutes", max_runtime_minutes)
         self.logger.info("═" * 70)
 
         overall_best_individual = None
 
-        for gen in range(self.generations):
+        for gen in range(start_generation, self.generations):
             if self._shutdown_requested:
                 self.logger.info("[SHUTDOWN] Stopping at generation %d", gen)
                 break
@@ -668,6 +750,21 @@ class GenericIslandModelEvolution:
             ):
                 self._merge_round(gen)
 
+            # ── Checkpoint save ──
+            should_checkpoint = (
+                self.checkpoint_interval > 0
+                and (gen + 1) % self.checkpoint_interval == 0
+            ) or self._checkpoint_requested
+            if should_checkpoint:
+                try:
+                    self.save_island_checkpoint(gen)
+                    self.export_best_strategies(gen)
+                    self._checkpoint_requested = False
+                except Exception as ckpt_err:
+                    self.logger.error(
+                        "[CHECKPOINT] Failed to save at gen %d: %s", gen, ckpt_err,
+                    )
+
             # Log generation summary
             gen_elapsed = time.time() - gen_start
             self._log_generation_summary(gen, gen_elapsed)
@@ -714,8 +811,28 @@ class GenericIslandModelEvolution:
                 },
             )
 
+            # Hard runtime cap: stop cleanly after max_runtime_minutes
+            if max_runtime_minutes is not None:
+                total_elapsed_min = (time.time() - phase_start) / 60.0
+                if total_elapsed_min >= max_runtime_minutes:
+                    self.logger.info(
+                        "[RUNTIME] %.1f min elapsed ≥ limit %.0f min"
+                        " — stopping after gen %d/%d",
+                        total_elapsed_min, max_runtime_minutes,
+                        gen + 1, self.generations,
+                    )
+                    break
+
         # Collect results: pool top-5 from every island, deduplicate
         results = self._collect_final_results()
+
+        # Final checkpoint at end of evolution
+        try:
+            last_gen = self.generations - 1
+            self.save_island_checkpoint(last_gen)
+            self.export_best_strategies(last_gen)
+        except Exception as e:
+            self.logger.error("[CHECKPOINT] Final save failed: %s", e)
 
         phase_elapsed = time.time() - phase_start
         self.logger.info("")
@@ -750,8 +867,28 @@ class GenericIslandModelEvolution:
         if ga.llm_enabled and ga.strategy_designer:
             ga.strategy_designer.reset_generation_budget()
 
+        # Inject shared parallel evaluator so all islands share ONE
+        # worker pool instead of each spawning its own.
+        if self._shared_parallel_evaluator is not None:
+            ga.parallel_evaluator = self._shared_parallel_evaluator
+            ga.parallel_enabled = True
+
         # Step 1: Evaluate fitness
         ga.evaluate_population(population)
+
+        # Step 1b: Feed evaluated population to surrogate model so it can
+        # learn and (from the next generation onward) pre-filter candidates.
+        # evaluate_population() is called directly here instead of via
+        # ga.evolve(), so we must drive the surrogate manually.
+        if hasattr(ga, '_surrogate') and ga._surrogate is not None and ga._surrogate.enabled:
+            try:
+                ga._surrogate.add_training_data(population)
+                ga._surrogate.maybe_retrain()
+            except Exception as _surr_exc:
+                self.logger.debug(
+                    "[SURROGATE] Training update failed for island %s gen %d: %s",
+                    island_name, generation, _surr_exc,
+                )
 
         # Step 2: Fitness sharing
         if ga.fitness_sharing and len(population.individuals) >= 2:
@@ -761,6 +898,12 @@ class GenericIslandModelEvolution:
             apply_fitness_sharing(
                 population, sigma_share=ga.sharing_radius,
                 distance_matrix=distance_matrix,
+            )
+
+        # Step 2b: Strategy culling (after evaluation & sharing, before HoF)
+        if self.culler.enabled:
+            self.culler.cull_population(
+                population, generation=generation, elite_size=ga.elite_size,
             )
 
         # Step 3: Get stats
@@ -776,9 +919,11 @@ class GenericIslandModelEvolution:
                     ist.best_fitness = best_ind.raw_fitness
                     profit = best_ind.metrics.get('profit', 0)
                     ist.best_profit = profit
+                    trades = best_ind.metrics.get('num_trades', 0)
+                    win_rate = best_ind.metrics.get('win_rate', 0.0)
                     self.logger.info(
-                        "  [%s] NEW BEST: fitness=%.4f profit=%.2f%%",
-                        island_name, ist.best_fitness, profit,
+                        "  [%s] NEW BEST: fitness=%.4f profit=%.2f%% trades=%d win_rate=%.2f",
+                        island_name, ist.best_fitness, profit, trades, win_rate,
                     )
                 ist.avg_fitness = stats.avg_fitness
                 ist.generations_completed = generation + 1
@@ -850,6 +995,275 @@ class GenericIslandModelEvolution:
                     )
 
     # ------------------------------------------------------------------
+    # Checkpoint save / load / export
+    # ------------------------------------------------------------------
+
+    def save_island_checkpoint(self, generation: int) -> str:
+        """
+        Save the full island-model state to a single JSON checkpoint.
+
+        Serialises every island population, hall of fame, island stats,
+        migration history, and config snapshot so the run can be resumed
+        from exactly this point.
+        """
+        from datetime import datetime
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = str(
+            self.checkpoint_dir / f"island_checkpoint_gen{generation}_{timestamp}.json"
+        )
+
+        # Collect all island populations
+        island_data = {}
+        for ic in self.island_configs:
+            pop = self.island_populations.get(ic.name)
+            if pop:
+                island_data[ic.name] = {
+                    'individuals': [ind.to_dict() for ind in pop.individuals],
+                    'generation': pop.generation,
+                    'size': pop.size,
+                }
+
+        # Collect island stats
+        stats_data = {}
+        for name, ist in self.island_stats.items():
+            stats_data[name] = {
+                'best_fitness': ist.best_fitness,
+                'best_profit': ist.best_profit,
+                'avg_fitness': ist.avg_fitness,
+                'generations_completed': ist.generations_completed,
+                'migrants_sent': ist.migrants_sent,
+                'migrants_received': ist.migrants_received,
+            }
+
+        # Hall of fame
+        hof_data = []
+        try:
+            for entry in self.hall_of_fame.entries:
+                hof_data.append({
+                    'fitness': entry.fitness,
+                    'generation_found': getattr(entry, 'generation_found', 0),
+                    'strategy_gene_dict': entry.strategy_gene_dict if hasattr(entry, 'strategy_gene_dict') else {},
+                    'metrics': getattr(entry, 'metrics', {}),
+                    'individual_id': getattr(entry, 'individual_id', 0),
+                })
+        except Exception as e:
+            self.logger.warning("[CHECKPOINT] Could not serialise hall of fame: %s", e)
+
+        checkpoint = {
+            'version': 1,
+            'type': 'island_model',
+            'timestamp': datetime.now().isoformat(),
+            'generation': generation,
+            'total_generations': self.generations,
+            'num_islands': len(self.island_configs),
+            'population_per_island': self.population_per_island,
+            'island_populations': island_data,
+            'island_stats': stats_data,
+            'hall_of_fame': hof_data,
+            'migration_history_count': len(self.migration_history),
+            'config_snapshot': {
+                'genetic_algorithm': self.config.get('genetic_algorithm', {}),
+                'backtesting': self.config.get('backtesting', {}),
+                'generic_island_model': self.config.get('generic_island_model', {}),
+                'fitness_weights': self.config.get('fitness_weights', {}),
+            },
+        }
+
+        # Save numpy / python random state
+        checkpoint['random_state'] = {'python': random.getstate()}
+        try:
+            import numpy as np
+            np_state = np.random.get_state()
+            checkpoint['random_state']['numpy'] = (
+                np_state[0],
+                np_state[1].tolist(),
+                int(np_state[2]),
+                int(np_state[3]),
+                float(np_state[4]),
+            )
+        except ImportError:
+            pass
+
+        # Atomic write
+        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+        json_bytes = json.dumps(checkpoint, indent=2, default=str).encode('utf-8')
+        checkpoint['checksum'] = hashlib.sha256(json_bytes).hexdigest()
+
+        tmp_path = filepath + '.tmp'
+        with open(tmp_path, 'w') as f:
+            json.dump(checkpoint, f, indent=2, default=str)
+        os.replace(tmp_path, filepath)
+
+        self.logger.info(
+            "[CHECKPOINT] Saved island model state at generation %d to %s",
+            generation, filepath,
+        )
+        return filepath
+
+    def load_island_checkpoint(self) -> Optional[int]:
+        """
+        Find and load the latest island checkpoint from *checkpoint_dir*.
+
+        Restores island populations, stats, and hall of fame so evolution
+        can resume from the next generation.
+
+        Returns:
+            The generation to resume FROM (i.e. next gen to run), or None
+            if no checkpoint was found.
+        """
+        # Find latest checkpoint file
+        pattern = str(self.checkpoint_dir / 'island_checkpoint_gen*.json')
+        candidates = sorted(glob.glob(pattern))
+        if not candidates:
+            return None
+
+        filepath = candidates[-1]
+        self.logger.info("[CHECKPOINT] Loading island checkpoint: %s", filepath)
+
+        with open(filepath, 'r') as f:
+            checkpoint = json.load(f)
+
+        # Verify checksum
+        stored_checksum = checkpoint.pop('checksum', None)
+        if stored_checksum:
+            json_bytes = json.dumps(checkpoint, indent=2, default=str).encode('utf-8')
+            computed = hashlib.sha256(json_bytes).hexdigest()
+            if computed != stored_checksum:
+                self.logger.warning(
+                    "[CHECKPOINT] Checksum mismatch — file may be corrupted"
+                )
+
+        saved_gen = checkpoint['generation']
+
+        # Restore island populations
+        # Try name-based matching first, then fall back to index-based
+        island_pop_data = checkpoint.get('island_populations', {})
+        current_names = [ic.name for ic in self.island_configs]
+        ckpt_names = list(island_pop_data.keys())
+
+        # Check if name-based match works
+        name_matches = sum(1 for n in ckpt_names if n in self.island_populations)
+        use_index = name_matches == 0 and len(ckpt_names) > 0
+
+        if use_index:
+            self.logger.info(
+                "[CHECKPOINT] No island name matches — using index-based mapping "
+                "(%d checkpoint → %d current islands)",
+                len(ckpt_names), len(current_names),
+            )
+
+        restored = 0
+        for idx, (ckpt_name, pop_data) in enumerate(island_pop_data.items()):
+            # Determine target island name
+            if use_index and idx < len(current_names):
+                target_name = current_names[idx]
+            elif ckpt_name in self.island_populations:
+                target_name = ckpt_name
+            else:
+                self.logger.warning(
+                    "[CHECKPOINT] Island %s in checkpoint but not in current config — skipping",
+                    ckpt_name,
+                )
+                continue
+
+            pop = Population(
+                size=pop_data.get('size', self.population_per_island),
+                generation=pop_data.get('generation', saved_gen),
+            )
+            # Clear default individuals and load from checkpoint
+            pop.individuals = []
+            for ind_data in pop_data['individuals']:
+                pop.add_individual(Individual.from_dict(ind_data))
+            self.island_populations[target_name] = pop
+            restored += 1
+
+        self.logger.info(
+            "[CHECKPOINT] Restored %d/%d island populations from generation %d",
+            restored, len(self.island_configs), saved_gen,
+        )
+
+        # Restore island stats
+        stats_data = checkpoint.get('island_stats', {})
+        for name, sd in stats_data.items():
+            if name in self.island_stats:
+                ist = self.island_stats[name]
+                ist.best_fitness = sd.get('best_fitness', 0.0)
+                ist.best_profit = sd.get('best_profit', 0.0)
+                ist.avg_fitness = sd.get('avg_fitness', 0.0)
+                ist.generations_completed = sd.get('generations_completed', 0)
+                ist.migrants_sent = sd.get('migrants_sent', 0)
+                ist.migrants_received = sd.get('migrants_received', 0)
+
+        # Restore random state
+        random_state = checkpoint.get('random_state', {})
+        if 'python' in random_state:
+            try:
+                py_state = random_state['python']
+                random.setstate((py_state[0], tuple(py_state[1]), py_state[2]))
+            except Exception as e:
+                self.logger.warning("[CHECKPOINT] Failed to restore Python random state: %s", e)
+        if 'numpy' in random_state:
+            try:
+                import numpy as np
+                ns = random_state['numpy']
+                np.random.set_state((
+                    ns[0], np.array(ns[1], dtype=np.uint32),
+                    int(ns[2]), int(ns[3]), float(ns[4]),
+                ))
+            except Exception as e:
+                self.logger.warning("[CHECKPOINT] Failed to restore NumPy random state: %s", e)
+
+        resume_gen = saved_gen + 1
+        self.logger.info(
+            "[CHECKPOINT] Will resume from generation %d/%d",
+            resume_gen + 1, self.generations,
+        )
+        return resume_gen
+
+    def export_best_strategies(self, generation: int, top_n: int = 10):
+        """
+        Export the top-N hall-of-fame strategies as standalone .py files
+        to a backup directory alongside the checkpoint.
+        """
+        export_dir = self.checkpoint_dir / f"best_strategies_gen{generation}"
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        exported = 0
+        try:
+            from genetic_algorithm.core.strategy_gene import StrategyGene
+            for i, entry in enumerate(self.hall_of_fame.entries[:top_n]):
+                gene_dict = getattr(entry, 'strategy_gene_dict', None)
+                if not gene_dict:
+                    continue
+                # Reconstruct StrategyGene from the stored dict
+                try:
+                    strategy_gene = StrategyGene.from_dict(gene_dict)
+                except Exception as e:
+                    self.logger.debug("[EXPORT] Could not reconstruct gene for HoF entry %d: %s", i, e)
+                    continue
+                # Regenerate strategy code
+                ga = next(iter(self.islands.values()), None)
+                if ga is None:
+                    break
+                try:
+                    code = ga.strategy_generator.generate_strategy_code(strategy_gene)
+                    fname = export_dir / f"hof_rank{i+1}_fitness{entry.fitness:.4f}.py"
+                    with open(fname, 'w') as f:
+                        f.write(code)
+                    exported += 1
+                except Exception as e:
+                    self.logger.debug("[EXPORT] Failed to export HoF entry %d: %s", i, e)
+        except Exception as e:
+            self.logger.warning("[EXPORT] Strategy export failed: %s", e)
+
+        if exported:
+            self.logger.info(
+                "[CHECKPOINT] Exported %d best strategies to %s",
+                exported, export_dir,
+            )
+
+    # ------------------------------------------------------------------
     # Migration dispatch
     # ------------------------------------------------------------------
 
@@ -896,7 +1310,7 @@ class GenericIslandModelEvolution:
             if not top:
                 continue
 
-            replaced = self._inject_migrants(target, top, generation)
+            replaced = self._inject_migrants(target, top, generation, source=source)
             fitnesses = [
                 ind.raw_fitness for ind in top if ind.raw_fitness is not None
             ]
@@ -921,22 +1335,32 @@ class GenericIslandModelEvolution:
 
     def _migrate_fully_connected(self, generation: int):
         """
-        Fully connected: every island sends top-N to every other island.
+        Fully connected: every island sends migrants to every other island.
+        
+        To preserve diversity, each source picks from a pool of top 3×N
+        individuals and sends a different random sample of N to each target.
         """
         names = [ic.name for ic in self.island_configs]
+        rng = random.Random(self.base_seed + generation)
 
         for source in names:
-            top = self._get_top_individuals(source, self.migration.count)
-            if not top:
+            # Fetch a larger pool so each target gets a different sample
+            pool_size = self.migration.count * 3
+            pool = self._get_top_individuals(source, pool_size)
+            if not pool:
                 continue
 
             for target in names:
                 if target == source:
                     continue
 
-                replaced = self._inject_migrants(target, top, generation)
+                # Sample N from pool (with fallback to full pool if smaller)
+                n = min(self.migration.count, len(pool))
+                migrants = rng.sample(pool, n)
+
+                replaced = self._inject_migrants(target, migrants, generation, source=source)
                 fitnesses = [
-                    ind.raw_fitness for ind in top if ind.raw_fitness is not None
+                    ind.raw_fitness for ind in migrants if ind.raw_fitness is not None
                 ]
 
                 self.migration_history.append(GenericMigrationEvent(
@@ -948,13 +1372,13 @@ class GenericIslandModelEvolution:
                 ))
 
                 with self._stats_lock:
-                    self.island_stats[source].migrants_sent += len(top)
+                    self.island_stats[source].migrants_sent += len(migrants)
                     self.island_stats[target].migrants_received += replaced
 
             self.logger.info(
-                "  %s → all: %d migrants (best=%.4f)",
-                source, len(top),
-                max((ind.raw_fitness for ind in top if ind.raw_fitness), default=0),
+                "  %s → all: pool=%d, per-target=%d (best=%.4f)",
+                source, len(pool), min(self.migration.count, len(pool)),
+                max((ind.raw_fitness for ind in pool if ind.raw_fitness), default=0),
             )
 
     def _migrate_tournament(self, generation: int):
@@ -1039,7 +1463,7 @@ class GenericIslandModelEvolution:
 
             # Bidirectional: A's best → B, B's best → A
             if top_a:
-                replaced_b = self._inject_migrants(island_b, top_a, generation)
+                replaced_b = self._inject_migrants(island_b, top_a, generation, source=island_a)
                 fitnesses_a = [
                     ind.raw_fitness for ind in top_a if ind.raw_fitness is not None
                 ]
@@ -1055,7 +1479,7 @@ class GenericIslandModelEvolution:
                     self.island_stats[island_b].migrants_received += replaced_b
 
             if top_b:
-                replaced_a = self._inject_migrants(island_a, top_b, generation)
+                replaced_a = self._inject_migrants(island_a, top_b, generation, source=island_b)
                 fitnesses_b = [
                     ind.raw_fitness for ind in top_b if ind.raw_fitness is not None
                 ]
@@ -1123,7 +1547,7 @@ class GenericIslandModelEvolution:
 
         # Inject into every island
         for ic in self.island_configs:
-            replaced = self._inject_migrants(ic.name, top_global, generation)
+            replaced = self._inject_migrants(ic.name, top_global, generation, source='global_merge')
             if replaced > 0:
                 self.logger.info(
                     "    → %s: injected %d global elites", ic.name, replaced,
@@ -1156,6 +1580,7 @@ class GenericIslandModelEvolution:
         target_island: str,
         migrants: List[Individual],
         generation: int,
+        source: str = 'unknown',
     ) -> int:
         """
         Inject migrant individuals into a target island's population,
@@ -1185,7 +1610,7 @@ class GenericIslandModelEvolution:
 
             new_ind = Individual(strategy_gene=gene_copy)
             new_ind.evaluated = False  # Force re-evaluation
-            new_ind.metrics = {'origin': f'migrant_from_{target_island}'}
+            new_ind.metrics = {'origin': f'migrant_from_{source}'}
 
             # Replace worst individual in-place
             idx = pop.individuals.index(sorted_inds[replaced])
@@ -1247,7 +1672,7 @@ class GenericIslandModelEvolution:
                     # Distribute migrants across random islands
                     for migrant in migrants:
                         target = random.choice(island_names)
-                        replaced = self._inject_migrants(target, [migrant], generation)
+                        replaced = self._inject_migrants(target, [migrant], generation, source='external')
                         if replaced > 0:
                             total_injected += replaced
                             self.logger.info(
@@ -1342,6 +1767,7 @@ class GenericIslandModelEvolution:
             serialized = json.dumps(gene_dict, sort_keys=True, default=str)
             return hashlib.md5(serialized.encode()).hexdigest()
         except Exception:
+            logger.warning(f"[ISLAND] Gene hashing failed for individual {getattr(ind, 'id', '?')}", exc_info=True)
             return str(id(ind))
 
     # ------------------------------------------------------------------
@@ -1383,6 +1809,21 @@ class GenericIslandModelEvolution:
                 unique_global.append(ind)
 
         results['__global__'] = unique_global[:20]  # Top-20 globally
+
+        # Quality gate: filter out negative-profit strategies from global results
+        neg_profit_count = sum(
+            1 for ind in results['__global__']
+            if ind.metrics.get('profit', 0) < 0
+        )
+        if neg_profit_count > 0:
+            results['__global__'] = [
+                ind for ind in results['__global__']
+                if ind.metrics.get('profit', 0) >= 0
+            ]
+            self.logger.info(
+                "[RESULTS] Filtered %d negative-profit strategies from global top results",
+                neg_profit_count,
+            )
 
         self.logger.info(
             "Final results: %d unique strategies across %d islands (top-20 global)",

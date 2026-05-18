@@ -1,0 +1,158 @@
+# ============================================================================
+# WAVE 21 — E173: Population & Diversity Fix
+# ============================================================================
+# Purpose: Test whether E161's profitable recipe was limited by population
+#          collapse rather than fitness function design. Combines bigger pop
+#          with stronger diversity mechanisms: elite=3 preserves more variety,
+#          tournament=4 reduces selection pressure, random_immigrants=2 injects
+#          fresh genetic material every generation.
+#
+# Base: E161 (the only profitable experiment in wave 14)
+# Key changes: pop=15 (was 8), elite=3 (was 1), tournament=4 (was 3),
+#   random_immigrants=2 (was 1), num_islands=8 (was 10, to balance compute),
+#   slightly higher profit weight 0.20, corrected fitness weight keys
+# Expected: Diverse top-5 with multiple profitable strategies
+# ============================================================================
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 15
+  generations: 12
+  mutation_rate: 0.18
+  crossover_rate: 0.7
+  elite_size: 3
+  tournament_size: 4
+  selection_method: 'tournament'
+  convergence_patience: 10
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.1
+  fitness_sharing: false
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'single_objective'
+
+generic_island_model:
+  enabled: true
+  num_islands: 8
+  population_per_island: 15
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.5
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+    merge_rounds: false
+
+fitness_weights:
+  profit: 0.20
+  sharpe_ratio: 0.15
+  sortino_ratio: 0.10
+  profit_factor: 0.08
+  drawdown: 0.12
+  win_rate: 0.07
+  trade_frequency: 0.15
+  monthly_stability: 0.05
+  cross_pair: 0.04
+  drawdown_duration: 0.02
+  consecutive_losses: 0.02
+
+trade_frequency_thresholds:
+  very_few: 60
+  few: 180
+  ideal_min: 360
+  ideal_max: 1200
+  moderate_excess: 2000
+  shape: 'asymmetric'
+
+fitness_penalties:
+  min_trades: 150
+  min_trades_per_month: 30
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.25
+  min_win_rate: 0.30
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210301-20260301"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  exchange: "binance"
+  auto_download_data: true
+  enable_cache: true
+  timeout: 180
+
+walk_forward:
+  enabled: false
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "SOL/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 150
+  max_drawdown: 0.25
+  min_win_rate: 0.30
+  timeframes: ["15m"]
+  stoploss_range: [-0.07, -0.018]
+  roi_range: [0.004, 0.035]
+  max_open_trades_range: [1, 5]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'DONCHIAN'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'WILLR'
+    - 'ROC'
+    - 'AROON'
+    - 'TEMA'
+    - 'KAMA'
+  min_per_strategy: 2
+  max_per_strategy: 5
+
+island_model:
+  enabled: false
+
+llm:
+  enabled: false
+
+terminal_monitor:
+  enabled: true

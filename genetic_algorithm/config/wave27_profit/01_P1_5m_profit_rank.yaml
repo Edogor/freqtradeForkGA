@@ -1,0 +1,218 @@
+# ============================================================================
+# WAVE27 — P1: 5m Profit Maximizer (Rank Selection)
+# ============================================================================
+# Heavy profit-first fitness: profit (42%) + profit_factor (22%) = 64% of score.
+# trade_frequency weight REMOVED. win_rate weight REMOVED.
+# min_profit_factor penalty: strategies with PF < 0.85 are heavily penalised.
+# Tighter fitness_bounds: profit normalised over [-30%, +100%] for sensitivity.
+# Tighter stoploss/ROI constraints: force meaningful risk/reward ratios.
+# ============================================================================
+
+experiment_name: wave27_P1_5m_profit_rank
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 30
+  generations: 50
+  mutation_rate: 0.20
+  crossover_rate: 0.7
+  elite_size: 3
+  tournament_size: 4
+  selection_method: 'rank'
+  convergence_patience: 15
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.22
+  diversity_threshold: 0.14
+  allow_self_crossover: false
+  random_immigrants: 3
+  mode: 'single_objective'
+
+surrogate:
+  enabled: true
+  min_training_samples: 80
+  filter_percentile: 55
+  retrain_interval: 3
+  model: "random_forest"
+  mutate_skipped: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 10
+  population_per_island: 30
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.4
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 4
+    count: 2
+    merge_rounds: false
+
+# ---- PROFIT-FIRST FITNESS -----------------------------------------------
+# profit (42%) + profit_factor (22%) = 64% of the total score.
+# Sharpe still guards against lucky/volatile strategies.
+# trade_frequency and win_rate removed entirely — we optimise for P&L.
+fitness_weights:
+  profit: 0.42
+  profit_factor: 0.22
+  sharpe_ratio: 0.14
+  drawdown: 0.08
+  sortino_ratio: 0.06
+  consistency: 0.05
+  exposure_time: 0.03
+
+# Tighter normalisation range so the GA clearly feels the difference between
+# a -5% and a +30% strategy (old range was -50% to +200%).
+fitness_bounds:
+  profit_min: -30
+  profit_max: 100
+  profit_factor_norm: 2.0   # PF of 2.0 is "max"; old default was 3.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'asymmetric'
+
+fitness_penalties:
+  min_trades: 150
+  min_trades_per_month: 5       # Very low floor — quality beats quantity
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.25
+  min_win_rate: 0.20            # Lowered — let profit_factor do the filtering
+  min_profit_factor: 0.85       # NEW: smooth penalty when PF < 0.85
+  complexity_weight: 0.005
+  pair_loss_threshold: -20.0
+
+# ---- RISK/REWARD CONSTRAINTS -------------------------------------------
+# Wider ROI floor (0.8%) vs stoploss ceiling (-7%) so GA cannot generate
+# "0.2% ROI / -4% SL" strategies that mathematically can't be profitable.
+backtesting:
+  timerange: "20240101-20260327"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "PEPE/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 360
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "SOL/USDT"
+    - "BNB/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "XRP/USDT"
+    - "PEPE/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+  validate_top_n_only: 5
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 150
+  max_drawdown: 0.25
+  min_win_rate: 0.20
+  timeframes: ["5m"]
+  stoploss_range: [-0.07, -0.015]   # Force -1.5% to -7% stoploss
+  roi_range: [0.008, 0.06]          # Force 0.8% minimum ROI target
+  max_open_trades_range: [1, 3]
+
+multi_timeframe:
+  enabled: true
+  available: ['1h', '4h']
+  max_timeframes: 2
+  higher_timeframe_preference:
+    - 'EMA'
+    - 'SMA'
+    - 'ATR'
+    - 'ADX'
+    - 'RSI'
+    - 'BBANDS'
+    - 'SUPERTREND'
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+    - 'STOCH'
+    - 'ATR'
+    - 'ADX'
+    - 'CCI'
+  min_per_strategy: 2
+  max_per_strategy: 5
+
+storage:
+  database: "genetic_algorithm/data/wave27_P1.db"
+  strategy_dir: "user_data/strategies/wave27_P1"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave27_P1"
+  checkpoint_interval: 3
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 5000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave27_P1.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave27_laptop/P1_5m_profit_rank/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 2
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave27_P1"
+
+deflated_sharpe:
+  enabled: true

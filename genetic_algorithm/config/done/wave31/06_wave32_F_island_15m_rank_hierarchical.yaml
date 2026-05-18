@@ -1,0 +1,202 @@
+# ============================================================================
+# WAVE32 — F: Island 15m Rank + Hierarchical (Tier-Diversity Topology)
+# ============================================================================
+# Hypothesis: Wave31_F (15m hierarchical, 2+2 pairs) reached fitness=0.388
+#             with -1.10% profit — the second-best still-running experiment.
+#             Upgrade with 3+3 pairs and stronger profit signal. Hierarchical
+#             topology creates natural tier diversity which correlates with
+#             better Sharpe stability. Migration interval=4 keeps islands more
+#             independent (slower mixing than ring).
+#
+# 6 islands × 15 pop = 90 individuals, hierarchical topology, 15m
+# Train: BTC/USDT, SOL/USDT, XRP/USDT  |  Val: ETH/USDT, BNB/USDT, PEPE/USDT
+# ============================================================================
+
+experiment_name: wave32_F_island_15m_rank_hierarchical
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 15
+  generations: 35
+  mutation_rate: 0.18
+  crossover_rate: 0.70
+  elite_size: 3
+  tournament_size: 3
+  selection_method: 'rank'
+  convergence_patience: 15
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.22
+  diversity_threshold: 0.12
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'single_objective'
+
+surrogate:
+  enabled: true
+  min_training_samples: 80
+  filter_percentile: 70
+  retrain_interval: 3
+  model: "gradient_boosting"
+  mutate_skipped: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 6
+  population_per_island: 15
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.40
+    pair_rotation: false
+  migration:
+    topology: 'hierarchical'
+    interval: 4
+    count: 2
+    merge_rounds: false
+
+# ── Fitness Weights ────────────────────────────────────────────────────────
+fitness_weights:
+  profit: 0.35
+  sharpe_ratio: 0.15
+  sortino_ratio: 0.07
+  profit_factor: 0.08
+  drawdown: 0.12
+  win_rate: 0.11
+  trade_frequency: 0.08
+  monthly_stability: 0.02
+  cross_pair: 0.02
+
+fitness_bounds:
+  profit_min: -10.0
+  profit_max: 50.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'gaussian'
+
+fitness_penalties:
+  min_trades: 80
+  min_trades_per_month: 12
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210101-20260331"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "SOL/USDT"
+    - "XRP/USDT"
+    - "ETH/USDT"
+    - "BNB/USDT"
+    - "PEPE/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 300
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "SOL/USDT"
+    - "XRP/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "BNB/USDT"
+    - "PEPE/USDT"
+  weight_train: 0.55
+  weight_val: 0.45
+  min_val_fitness: 0.0
+  validate_top_n_only: 8
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 80
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  timeframes: ["15m"]
+  stoploss_range: [-0.040, -0.010]
+  roi_range: [0.005, 0.025]
+  max_open_trades_range: [1, 4]
+  trailing_stop_positive_range: [0.005, 0.020]
+  trailing_stop_offset_addition_range: [0.003, 0.012]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+    - 'STOCH'
+    - 'DONCHIAN'
+    - 'WILLR'
+    - 'AROON'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+storage:
+  database: "genetic_algorithm/data/wave32_F.db"
+  strategy_dir: "user_data/strategies/wave32_F"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave32_F"
+  checkpoint_interval: 3
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 8000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave32_F.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave32/F_island_15m_rank_hierarchical/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 3
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave32_F"
+
+deflated_sharpe:
+  enabled: true

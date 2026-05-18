@@ -1,0 +1,201 @@
+# ============================================================================
+# WAVE31 — G: Island 15m Tournament + Ring + Component Crossover
+# ============================================================================
+# Hypothesis: Component crossover (block-level) preserves indicator-condition
+#             coherence better than uniform crossover. Combined with tournament
+#             selection + ring topology on 15m. This tests whether block-level
+#             recombination outperforms element-level for strategy building.
+#
+# Key design:
+#   - crossover_method: 'component' (swaps entire indicator sets as blocks)
+#   - tournament selection, ring topology
+#   - 15m timeframe
+# 7 islands × 15 pop = 105 individuals, ring topology, 15m
+# Pair validation: 2 train (BTC+BNB) + 2 val (ETH+SOL)
+# QUEUE position 02
+# ============================================================================
+
+experiment_name: wave31_G_island_15m_tournament_ring_component
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 15
+  generations: 30
+  mutation_rate: 0.19
+  crossover_rate: 0.72
+  crossover_method: 'component'   # Block-level — preserves indicator coherence
+  elite_size: 3
+  tournament_size: 4
+  selection_method: 'tournament'
+  convergence_patience: 15
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.25
+  diversity_threshold: 0.12
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'single_objective'
+
+surrogate:
+  enabled: true
+  min_training_samples: 80
+  filter_percentile: 70
+  retrain_interval: 3
+  model: "gradient_boosting"
+  mutate_skipped: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 7
+  population_per_island: 15
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.40
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+    merge_rounds: false
+
+fitness_weights:
+  profit: 0.27
+  sharpe_ratio: 0.16
+  sortino_ratio: 0.08
+  profit_factor: 0.08
+  drawdown: 0.13
+  win_rate: 0.14
+  trade_frequency: 0.10
+  monthly_stability: 0.02
+  cross_pair: 0.02
+
+fitness_bounds:
+  profit_min: -15.0
+  profit_max: 50.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'gaussian'
+
+fitness_penalties:
+  min_trades: 60
+  min_trades_per_month: 10
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210101-20260331"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 300
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "BNB/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "SOL/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+  validate_top_n_only: 8
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 60
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  timeframes: ["15m"]
+  stoploss_range: [-0.040, -0.010]
+  roi_range: [0.005, 0.025]
+  max_open_trades_range: [1, 4]
+  trailing_stop_positive_range: [0.005, 0.020]
+  trailing_stop_offset_addition_range: [0.003, 0.012]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+    - 'STOCH'
+    - 'DONCHIAN'
+    - 'WILLR'
+    - 'AROON'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+storage:
+  database: "genetic_algorithm/data/wave31_G.db"
+  strategy_dir: "user_data/strategies/wave31_G"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave31_G"
+  checkpoint_interval: 3
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 8000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave31_G.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave31/G_island_15m_tournament_ring_component/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 3
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave31_G"
+
+deflated_sharpe:
+  enabled: true

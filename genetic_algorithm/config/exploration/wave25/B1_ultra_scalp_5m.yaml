@@ -1,0 +1,211 @@
+# ============================================================================
+# WAVE25 — B1: Ultra-Scalp (5m)
+# ============================================================================
+# Standard GA (no island model) — fast iteration, small population
+# pop=15, gen=20, tournament+elite=3, patience=8
+# Walk-forward scalping preset (30d/7d/3d)
+# Tightest stoploss + ROI for high-frequency scalping
+# Expected runtime: ~6-10 hours (shorter timeframe = more candles = slower BT)
+# ============================================================================
+
+experiment_name: wave25_B1_ultra_scalp_5m
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 15
+  generations: 20
+  mutation_rate: 0.20
+  crossover_rate: 0.7
+  elite_size: 3
+  tournament_size: 3
+  selection_method: 'tournament'
+  convergence_patience: 8
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.15
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.20
+  diversity_threshold: 0.12
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'single_objective'
+
+surrogate:
+  enabled: true
+  min_training_samples: 30
+  filter_percentile: 60
+  retrain_interval: 3
+  model: "random_forest"
+  mutate_skipped: true
+
+fitness_weights:
+  profit: 0.15
+  sharpe_ratio: 0.18
+  sortino_ratio: 0.12
+  profit_factor: 0.08
+  drawdown: 0.12
+  win_rate: 0.08
+  trade_frequency: 0.20
+  consistency: 0.03
+  exposure_time: 0.04
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'asymmetric'
+
+fitness_penalties:
+  min_trades: 200
+  min_trades_per_month: 40
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  complexity_weight: 0.01
+
+backtesting:
+  # Extended timerange for better regime coverage (was 20240101)
+  timerange: "20230101-20260324"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+    - "BNB/USDT"
+    - "XRP/USDT"
+    - "PEPE/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 240
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "SOL/USDT"
+    - "BNB/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "XRP/USDT"
+    - "PEPE/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+  validate_top_n_only: 5
+
+walk_forward:
+  enabled: false
+  preset: scalping
+  mode: 'rolling'
+  aggregation: 'harmonic_mean'
+  embargo_days: 2
+  min_train_trades: 15
+  max_windows: 12
+  gap_penalty:
+    enabled: true
+    threshold: 0.12
+    max_penalty: 0.5
+
+holdout_validation:
+  enabled: false
+  holdout_pct: 0.15
+
+holdout_monitoring:
+  enabled: false
+  interval: 2
+  top_n: 3
+  early_stop: true
+  early_stop_threshold: 0.55
+  early_stop_checks: 3
+  fitness_penalty: true
+  penalty_factor: 0.8
+
+monte_carlo:
+  enabled: false
+  num_permutations: 15
+  methods:
+    - bootstrap
+    - shuffle
+    - slippage_jitter
+  slippage_std: 0.0008
+
+strategy_constraints:
+  min_trades: 200
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  timeframes: ["5m"]
+  stoploss_range: [-0.04, -0.01]
+  roi_range: [0.004, 0.02]
+  max_open_trades_range: [2, 5]
+  trailing_stop_positive_range: [0.003, 0.012]
+  trailing_stop_offset_addition_range: [0.003, 0.01]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+storage:
+  database: "genetic_algorithm/data/wave25_B1.db"
+  strategy_dir: "user_data/strategies/wave25_B1"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave25_B1"
+  checkpoint_interval: 3
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 3000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave25_B1.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave25/B1_ultra_scalp_5m/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 2
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave25_B1"
+
+deflated_sharpe:
+  enabled: true
+  min_trades: 15
+  benchmark_sr: 0.0
+  skewness_correction: true
+
+advanced:
+  parallel_evaluation: true
+  max_workers: 5
+  enable_dry_run: false
+  enable_ml_fitness: false
+  enable_llm: false
+
+island_model:
+  enabled: false

@@ -1,0 +1,195 @@
+# ============================================================================
+# WAVE31 — J: Plain GA 5m NSGA-II Pareto (3-Objective)
+# ============================================================================
+# Hypothesis: NSGA-II on 5m scalping — high-frequency Pareto search.
+#             Objectives: profit ↑, win_rate ↑, sharpe_ratio ↑.
+#             Scalping requires many winning trades — win_rate as separate
+#             objective forces the GA not to sacrifice it for profit.
+#             Plain GA (no island) for maximum population pool on 5m.
+#
+# Key design:
+#   - mode: nsga2, 3 objectives: profit, win_rate, sharpe
+#   - No island model — pop=30 for broader Pareto coverage
+#   - 5m scalping constraints: high min_trades requirement
+#   - fitness_sharing: false (NSGA-II requirement)
+# Pair validation: 2 train (BTC+ETH) + 2 val (SOL+BNB)
+# QUEUE position 05 — last queue item
+# ============================================================================
+
+experiment_name: wave31_J_plain_5m_nsga2_3obj
+
+genetic_algorithm:
+  random_seed: null
+  population_size: 30
+  generations: 30
+  mutation_rate: 0.20
+  crossover_rate: 0.72
+  elite_size: 3
+  tournament_size: 3
+  selection_method: 'tournament'
+  convergence_patience: 15
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: false          # CRITICAL: must be OFF for NSGA-II
+  allow_self_crossover: false
+  random_immigrants: 2
+  mode: 'nsga2'
+
+# ── NSGA-II 3-Objective: Profit, Win Rate, Sharpe ─────────────────────────
+nsga2:
+  objectives:
+    - name: 'profit'
+      type: 'maximize'
+      scale: 100.0
+    - name: 'win_rate'
+      type: 'maximize'
+      scale: 1.0
+    - name: 'sharpe_ratio'
+      type: 'maximize'
+      scale: 3.0
+  pareto_front_size: 20
+  crowding_distance_percentile: 0.1
+  min_trades: 120
+
+generic_island_model:
+  enabled: false
+
+# ── Fitness Weights (reporting / scalar fallback) ─────────────────────────
+fitness_weights:
+  profit: 0.27
+  sharpe_ratio: 0.16
+  sortino_ratio: 0.08
+  profit_factor: 0.08
+  drawdown: 0.13
+  win_rate: 0.14
+  trade_frequency: 0.10
+  monthly_stability: 0.02
+  cross_pair: 0.02
+
+fitness_bounds:
+  profit_min: -15.0
+  profit_max: 50.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'gaussian'
+
+fitness_penalties:
+  min_trades: 120
+  min_trades_per_month: 20
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  complexity_weight: 0.01
+
+backtesting:
+  timerange: "20210101-20260331"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "SOL/USDT"
+    - "BNB/USDT"
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 300
+
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+  validation_pairs:
+    - "SOL/USDT"
+    - "BNB/USDT"
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+  validate_top_n_only: 10
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+strategy_constraints:
+  min_trades: 120
+  max_drawdown: 0.20
+  min_win_rate: 0.35
+  timeframes: ["5m"]
+  stoploss_range: [-0.025, -0.006]
+  roi_range: [0.003, 0.015]
+  max_open_trades_range: [1, 4]
+  trailing_stop_positive_range: [0.003, 0.012]
+  trailing_stop_offset_addition_range: [0.002, 0.008]
+
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'PSAR'
+    - 'CMF'
+    - 'VROC'
+    - 'MFI'
+    - 'ROC'
+    - 'TEMA'
+    - 'KAMA'
+    - 'VWAP'
+    - 'STOCH'
+    - 'DONCHIAN'
+    - 'WILLR'
+    - 'AROON'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+storage:
+  database: "genetic_algorithm/data/wave31_J.db"
+  strategy_dir: "user_data/strategies/wave31_J"
+  checkpoint_dir: "genetic_algorithm/data/checkpoints_wave31_J"
+  checkpoint_interval: 3
+  keep_history: true
+  min_disk_gb: 5.0
+  min_disk_gb_runtime: 2.0
+  max_cache_disk_mb: 6000
+
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/wave31_J.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/exploration/wave31/J_plain_5m_nsga2_3obj/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 50
+  inject_count: 3
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/hall_of_fame_wave31_J"
+
+deflated_sharpe:
+  enabled: true

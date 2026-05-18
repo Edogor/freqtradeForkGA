@@ -15,9 +15,9 @@ Usage:
 """
 
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +101,8 @@ class FeatureImportanceTracker:
         
         # Track which features appear in each tier
         gen_indicator_counts = defaultdict(lambda: {'top': 0, 'bottom': 0, 'total': 0})
+        # Track all indicator types seen across the entire generation (for generations_seen)
+        gen_indicator_types_seen = set()
         
         for ind in sorted_inds:
             gene = ind.strategy_gene
@@ -109,10 +111,9 @@ class FeatureImportanceTracker:
             is_bottom = id(ind) in bottom_set
             
             # Track indicator types
-            indicator_types_seen = set()
             for indicator in gene.indicators:
                 ind_type = indicator.type
-                indicator_types_seen.add(ind_type)
+                gen_indicator_types_seen.add(ind_type)
                 
                 stats = self.indicator_stats[ind_type]
                 stats.appearances_total += 1
@@ -171,10 +172,12 @@ class FeatureImportanceTracker:
                 if is_bottom:
                     stats.appearances_bottom += 1
             
-            # Update generations_seen — count how many distinct generations
-            # this indicator type has appeared in (not the generation number).
-            for ind_type in indicator_types_seen:
-                self.indicator_stats[ind_type].generations_seen += 1
+            # Update generations_seen after the individual loop — once per generation,
+            # not per individual. Moved outside to gen_indicator_types_seen below.
+        
+        # Increment generations_seen exactly once per indicator type per generation
+        for ind_type in gen_indicator_types_seen:
+            self.indicator_stats[ind_type].generations_seen += 1
         
         # Store generation snapshot
         top_indicators = sorted(
@@ -298,3 +301,53 @@ class FeatureImportanceTracker:
             weights[name] = max(0.3, 1.0 + score * 2.0)
         
         return weights
+
+    # ------------------------------------------------------------------
+    # Serialization (for checkpoint persistence)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _stats_to_dict(stats: 'FeatureStats') -> Dict[str, Any]:
+        return {
+            'appearances_top': stats.appearances_top,
+            'appearances_bottom': stats.appearances_bottom,
+            'appearances_total': stats.appearances_total,
+            'fitness_sum_when_present': stats.fitness_sum_when_present,
+            'fitness_count_when_present': stats.fitness_count_when_present,
+            'generations_seen': stats.generations_seen,
+        }
+
+    @staticmethod
+    def _stats_from_dict(d: Dict[str, Any]) -> 'FeatureStats':
+        return FeatureStats(
+            appearances_top=d.get('appearances_top', 0),
+            appearances_bottom=d.get('appearances_bottom', 0),
+            appearances_total=d.get('appearances_total', 0),
+            fitness_sum_when_present=d.get('fitness_sum_when_present', 0.0),
+            fitness_count_when_present=d.get('fitness_count_when_present', 0),
+            generations_seen=d.get('generations_seen', 0),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize tracker state for checkpoint persistence."""
+        return {
+            'total_generations': self.total_generations,
+            'indicator_stats': {k: self._stats_to_dict(v) for k, v in self.indicator_stats.items()},
+            'operator_stats': {k: self._stats_to_dict(v) for k, v in self.operator_stats.items()},
+            'condition_pattern_stats': {k: self._stats_to_dict(v) for k, v in self.condition_pattern_stats.items()},
+            'generation_history': list(self.generation_history),
+        }
+
+    def load_from_dict(self, data: Dict[str, Any]) -> None:
+        """Restore tracker state from a checkpoint dict."""
+        self.total_generations = data.get('total_generations', 0)
+        self.generation_history = data.get('generation_history', [])
+        self.indicator_stats = defaultdict(FeatureStats)
+        for k, v in data.get('indicator_stats', {}).items():
+            self.indicator_stats[k] = self._stats_from_dict(v)
+        self.operator_stats = defaultdict(FeatureStats)
+        for k, v in data.get('operator_stats', {}).items():
+            self.operator_stats[k] = self._stats_from_dict(v)
+        self.condition_pattern_stats = defaultdict(FeatureStats)
+        for k, v in data.get('condition_pattern_stats', {}).items():
+            self.condition_pattern_stats[k] = self._stats_from_dict(v)

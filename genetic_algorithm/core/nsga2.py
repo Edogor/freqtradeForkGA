@@ -435,7 +435,10 @@ def extract_objectives_from_metrics(
     """
     # ── Min-trades gate: penalize degenerate strategies ──
     num_trades = metrics.get('num_trades', metrics.get('trade_count', 0))
-    if min_trades > 0 and num_trades < min_trades:
+    # Guard unconditionally for 0 trades: a "do nothing" strategy produces
+    # profit=0, drawdown=0 which appears Pareto-optimal vs. losing strategies.
+    # We must assign worst-case objectives regardless of min_trades setting.
+    if num_trades == 0 or (min_trades > 0 and num_trades < min_trades):
         # Return worst-case objectives so these individuals sink to the
         # bottom of NSGA-II ranking without being discarded entirely
         # (they can still mutate into something useful).

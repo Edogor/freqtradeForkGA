@@ -56,6 +56,13 @@ docs/
 |----------|-------------|--------|
 | [LLM_STRATEGY_DESIGNER_GUIDE.md](features/LLM_STRATEGY_DESIGNER_GUIDE.md) | How to use LLMs to seed and diversify the GA population | ✅ Complete |
 
+### Island Model & Parallel Evaluation
+
+| Document | Description | Status |
+|----------|-------------|--------|
+| [GENERIC_ISLAND_MODEL.md](features/GENERIC_ISLAND_MODEL.md) | Generic Island Model — multi-population evolution with shared process pool | ✅ Complete |
+| [CONFIG_VALIDATOR_GUIDE.md](features/CONFIG_VALIDATOR_GUIDE.md) | Config validator & anti-pattern reference (AP-1 to AP-20) | ✅ Complete |
+
 ---
 
 ## 📋 Plans & Roadmaps (`plans/`)
@@ -91,7 +98,7 @@ docs/
 | **Parsimony Pressure** | ✅ Complete | Tier 3 - Strategy simplification |
 | **Pareto Archive** | ✅ Complete | Tier 3 - Non-dominated solution preservation |
 | **Dynamic Bounds** | ✅ Complete | Tier 3 - Evolvable parameter ranges |
-| Island Model | 📋 Planned | Future enhancement |
+| Island Model | ✅ Complete | Generic Island Model with shared pool (OOM-safe) |
 | **LLM Strategy Designer** | ✅ Complete | Phase 1A — multi-provider seeding & immigrants |
 
 ---
@@ -106,4 +113,4 @@ docs/
 
 ---
 
-*Last Updated: March 2026*
+*Last Updated: April 2026*

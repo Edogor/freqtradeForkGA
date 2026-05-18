@@ -21,10 +21,47 @@ from genetic_algorithm.utils.timerange import (
     aggregate_validation_scores,
     parse_timerange,
     format_date,
-    TimeWindow
 )
 
 logger = logging.getLogger(__name__)
+
+# Canonical fitness weight keys used by calculate_fitness()
+VALID_FITNESS_WEIGHT_KEYS = frozenset({
+    'profit', 'sharpe_ratio', 'sortino_ratio', 'profit_factor',
+    'drawdown', 'win_rate', 'trade_frequency',
+    'monthly_stability', 'cross_pair', 'drawdown_duration', 'consecutive_losses',
+})
+
+# Deprecated key aliases from older configs
+FITNESS_WEIGHT_KEY_ALIASES = {
+    'consistency': 'monthly_stability',
+    'exposure_time': 'cross_pair',
+}
+
+
+def resolve_fitness_weight_aliases(weights: dict) -> dict:
+    """
+    Resolve deprecated key aliases and warn about unknown keys.
+
+    Returns a new dict with aliases replaced by canonical keys.
+    """
+    resolved = {}
+    for key, val in weights.items():
+        if key in FITNESS_WEIGHT_KEY_ALIASES:
+            canonical = FITNESS_WEIGHT_KEY_ALIASES[key]
+            logger.warning(
+                "[FITNESS] Deprecated weight key '%s' — use '%s' instead. "
+                "Auto-resolved for this run.", key, canonical,
+            )
+            resolved[canonical] = val
+        elif key not in VALID_FITNESS_WEIGHT_KEYS:
+            logger.warning(
+                "[FITNESS] Unknown fitness_weight key '%s' (ignored). "
+                "Valid keys: %s", key, ', '.join(sorted(VALID_FITNESS_WEIGHT_KEYS)),
+            )
+        else:
+            resolved[key] = val
+    return resolved
 
 
 class FitnessEvaluator:
@@ -46,16 +83,23 @@ class FitnessEvaluator:
             config: Configuration dictionary
         """
         self.config = config
-        self.fitness_weights = config.get('fitness_weights', {})
+        self.fitness_weights = resolve_fitness_weight_aliases(
+            config.get('fitness_weights', {})
+        )
         self.fitness_penalties = config.get('fitness_penalties', {})
         self.backtest_config = config.get('backtesting', {})
         self.walk_forward_config = config.get('walk_forward', {})
         self.monte_carlo_config = config.get('monte_carlo', {})
         
+        # Pair-split validation config (train on some pairs, validate on others)
+        self.pair_validation_config = config.get('pair_validation', {})
+        self.pair_validation_enabled = self.pair_validation_config.get('enabled', False)
+        self.validate_top_n_only = self.pair_validation_config.get('validate_top_n_only', 0)
+        
         # Fitness bounds for clamping extreme values
         fitness_bounds = config.get('fitness_bounds', {})
-        self.profit_min = fitness_bounds.get('profit_min', -50)
-        self.profit_max = fitness_bounds.get('profit_max', 200)
+        self.profit_min = fitness_bounds.get('profit_min', -10)
+        self.profit_max = fitness_bounds.get('profit_max', 10)
         self.sharpe_min = fitness_bounds.get('sharpe_min', -5)
         self.sharpe_max = fitness_bounds.get('sharpe_max', 10)
         self.sortino_min = fitness_bounds.get('sortino_min', -5)
@@ -65,15 +109,80 @@ class FitnessEvaluator:
         
         # Trade frequency thresholds
         tf_config = config.get('trade_frequency_thresholds', {})
-        # Scale thresholds by number of pairs for multi-pair backtests
+        # Auto-scale ONLY the built-in defaults by number of pairs.
+        # If the user explicitly set a value in config, use it as-is
+        # (the user already accounts for pair count when setting thresholds).
         num_pairs = len(self.backtest_config.get('pairs', ['BTC/USDT']))
         pair_scale = max(1.0, num_pairs / 1.0)  # 1.0 for single pair baseline
-        self.tf_very_few = int(tf_config.get('very_few', 5) * pair_scale)
-        self.tf_few = int(tf_config.get('few', 10) * pair_scale)
-        self.tf_ideal_min = int(tf_config.get('ideal_min', 10) * pair_scale)
-        self.tf_ideal_max = int(tf_config.get('ideal_max', 50) * pair_scale)
-        self.tf_moderate_excess = int(tf_config.get('moderate_excess', 100) * pair_scale)
+        auto_scale = tf_config.get('auto_scale_by_pairs', True)
+
+        # Timeframe-based scaling: shorter timeframes naturally produce more trades.
+        # Reference baseline is 1h; multipliers scale thresholds accordingly.
+        _TF_TRADE_MULTIPLIERS = {
+            '1m': 60.0, '3m': 20.0, '5m': 12.0, '15m': 4.0, '30m': 2.0,
+            '1h': 1.0, '2h': 0.5, '4h': 0.25, '6h': 0.17, '8h': 0.125,
+            '12h': 0.083, '1d': 0.042,
+        }
+        auto_scale_tf = tf_config.get('auto_scale_by_timeframe', True)
+        strategy_constraints = config.get('strategy_constraints', {})
+        base_timeframes = strategy_constraints.get('timeframes', ['5m'])
+        # Use the shortest configured timeframe as reference
+        if base_timeframes and auto_scale_tf:
+            shortest_tf = min(base_timeframes,
+                              key=lambda t: _TF_TRADE_MULTIPLIERS.get(t, 1.0))
+            tf_scale = _TF_TRADE_MULTIPLIERS.get(shortest_tf, 1.0)
+        else:
+            tf_scale = 1.0
+
+        def _tf(key: str, default: float) -> int:
+            if key in tf_config:
+                raw = tf_config[key]
+                if auto_scale:
+                    return int(raw * pair_scale)
+                return int(raw)
+            return int(default * pair_scale * tf_scale)
+
+        self.tf_very_few = _tf('very_few', 5)
+        self.tf_few = _tf('few', 10)
+        self.tf_ideal_min = _tf('ideal_min', 10)
+        self.tf_ideal_max = _tf('ideal_max', 50)
+        self.tf_moderate_excess = _tf('moderate_excess', 100)
+        self.tf_shape = tf_config.get('shape', 'gaussian')  # 'gaussian' or 'asymmetric'
+
+        if tf_config and not auto_scale:
+            logger.info(f"[FITNESS] Trade freq thresholds (no auto-scale): "
+                       f"ideal_min={self.tf_ideal_min}, ideal_max={self.tf_ideal_max}")
+        elif tf_config:
+            logger.info(f"[FITNESS] Trade freq thresholds (auto-scaled ×{pair_scale:.0f} pairs): "
+                       f"ideal_min={self.tf_ideal_min}, ideal_max={self.tf_ideal_max}")
+        else:
+            logger.info(f"[FITNESS] Trade freq thresholds (auto-scaled ×{pair_scale:.0f} pairs, "
+                       f"×{tf_scale:.1f} timeframe): "
+                       f"ideal_min={self.tf_ideal_min}, ideal_max={self.tf_ideal_max}")
         
+        # Trade frequency per month hard penalty
+        self.min_trades_per_month = self.fitness_penalties.get('min_trades_per_month', 0)
+        self.min_tpm_penalty = self.fitness_penalties.get('min_trades_per_month_penalty', 0.0)
+        self.timerange_months = self._calculate_timerange_months(
+            self.backtest_config.get('timerange', ''))
+        if self.min_trades_per_month > 0:
+            logger.info(f"[FITNESS] Trade frequency floor: {self.min_trades_per_month} trades/month "
+                       f"(penalty={self.min_tpm_penalty}, timerange={self.timerange_months:.1f} months)")
+        
+        # Resolve walk-forward preset if specified
+        _WF_PRESETS = {
+            'scalping':  {'train_days': 30,  'validation_days': 7,  'step_days': 3},
+            'intraday':  {'train_days': 60,  'validation_days': 15, 'step_days': 7},
+            'swing':     {'train_days': 120, 'validation_days': 30, 'step_days': 15},
+        }
+        wf_preset = self.walk_forward_config.get('preset')
+        if wf_preset and wf_preset in _WF_PRESETS:
+            preset_vals = _WF_PRESETS[wf_preset]
+            for k, v in preset_vals.items():
+                if k not in self.walk_forward_config:
+                    self.walk_forward_config[k] = v
+            logger.info(f"[WF] Applied preset '{wf_preset}': {preset_vals}")
+
         # Validate walk-forward config if enabled
         if self.walk_forward_config.get('enabled', False):
             validate_walk_forward_config(self.walk_forward_config)
@@ -93,13 +202,97 @@ class FitnessEvaluator:
         # Deflated Sharpe Ratio tracker (anti-overfitting)
         from genetic_algorithm.evaluation.deflated_sharpe import DSRTracker
         self._dsr_tracker = DSRTracker(config)
-    
+
+        # Portfolio diversity: reward strategies uncorrelated with existing elites
+        diversity_cfg = config.get('portfolio_diversity', {})
+        self._diversity_enabled = diversity_cfg.get('enabled', False)
+        self._diversity_max_bonus = diversity_cfg.get('max_bonus', 0.10)
+        self._diversity_max_penalty = diversity_cfg.get('max_penalty', 0.10)
+        self._diversity_corr_threshold = diversity_cfg.get('correlation_threshold', 0.5)
+        self._diversity_references: list = []  # list of monthly-profit vectors
+
+    # ------------------------------------------------------------------
+    # Portfolio diversity helpers
+    # ------------------------------------------------------------------
+
+    def update_diversity_references(self, monthly_profit_vectors: list) -> None:
+        """
+        Set reference monthly-profit vectors for diversity scoring.
+
+        Called by the evolution engine after each generation with the elite
+        strategies' monthly profit series.
+
+        Args:
+            monthly_profit_vectors: list of lists, each inner list is a
+                strategy's monthly profit percentages.
+        """
+        self._diversity_references = [
+            v for v in monthly_profit_vectors
+            if v and len(v) >= 2
+        ]
+        if self._diversity_references:
+            logger.debug(
+                f"[DIVERSITY] Updated references: {len(self._diversity_references)} "
+                f"vectors (len {len(self._diversity_references[0])})"
+            )
+
+    def _compute_diversity_bonus(self, metrics: Dict[str, Any]) -> float:
+        """
+        Compute diversity multiplier from monthly profit correlation.
+
+        Returns a multiplier in [1 - max_penalty, 1 + max_bonus].
+        Low average correlation → bonus (> 1.0).
+        High average correlation → penalty (< 1.0).
+        """
+        if not self._diversity_enabled or not self._diversity_references:
+            return 1.0
+
+        monthly = metrics.get('monthly_profits')
+        if not monthly or len(monthly) < 2:
+            return 1.0
+
+        # Compute Pearson correlation with each reference
+        correlations = []
+        for ref in self._diversity_references:
+            # Align lengths: use the shorter of the two
+            min_len = min(len(monthly), len(ref))
+            if min_len < 2:
+                continue
+            a = monthly[:min_len]
+            b = ref[:min_len]
+            mean_a = sum(a) / min_len
+            mean_b = sum(b) / min_len
+            cov = sum((a[i] - mean_a) * (b[i] - mean_b) for i in range(min_len))
+            var_a = sum((x - mean_a) ** 2 for x in a)
+            var_b = sum((x - mean_b) ** 2 for x in b)
+            denom = (var_a * var_b) ** 0.5
+            if denom > 1e-12:
+                correlations.append(cov / denom)
+
+        if not correlations:
+            return 1.0
+
+        avg_corr = sum(correlations) / len(correlations)
+        metrics['diversity_avg_correlation'] = avg_corr
+
+        threshold = self._diversity_corr_threshold
+        if avg_corr < threshold:
+            # Bonus: scale linearly from 0 at threshold to max_bonus at corr = -1
+            bonus_frac = (threshold - avg_corr) / (threshold + 1.0)
+            return 1.0 + self._diversity_max_bonus * bonus_frac
+        else:
+            # Penalty: scale linearly from 0 at threshold to max_penalty at corr = 1
+            penalty_frac = (avg_corr - threshold) / (1.0 - threshold) if threshold < 1.0 else 0.0
+            return 1.0 - self._diversity_max_penalty * penalty_frac
+
     def evaluate(self, strategy_gene: StrategyGene, strategy_name: str = None) -> Tuple[float, Dict[str, float]]:
         """
         Evaluate a strategy's fitness through backtesting.
         
-        If walk-forward optimization is enabled in config, uses walk-forward validation.
-        Otherwise, uses standard single-period backtesting.
+        Routing priority:
+        1. Walk-forward optimization (if enabled)
+        2. Pair-split validation (if enabled) — train on some pairs, validate on others
+        3. Standard single-period backtesting
         
         Args:
             strategy_gene: Strategy to evaluate
@@ -111,6 +304,13 @@ class FitnessEvaluator:
         # Check if walk-forward is enabled
         if self.walk_forward_config.get('enabled', False):
             return self.evaluate_walk_forward(strategy_gene, strategy_name)
+        
+        # Check if pair-split validation is enabled
+        if self.pair_validation_enabled:
+            # When validate_top_n_only > 0, initial evaluation is training-only;
+            # validation backtest is deferred to run_deferred_validation()
+            skip_val = self.validate_top_n_only > 0
+            return self.evaluate_pair_split(strategy_gene, strategy_name, skip_validation=skip_val)
         
         # Standard single-period evaluation
         return self._evaluate_standard(strategy_gene, strategy_name)
@@ -157,6 +357,11 @@ class FitnessEvaluator:
             # Convert backtest result to metrics dictionary
             metrics = self._backtest_result_to_metrics(backtest_result)
             
+            # Flag zero-trade results so classification can detect them
+            if backtest_result.total_trades == 0:
+                metrics['no_trades'] = True
+                logger.warning(f"{generated_name}: zero trades — strategy produces no signal")
+            
             # Add complexity to metrics
             metrics['complexity'] = strategy_gene.calculate_complexity()
             
@@ -187,6 +392,13 @@ class FitnessEvaluator:
             # Log at debug level - summary is logged by evolution.py
             logger.debug(f"{generated_name}: fitness={fitness:.4f}, profit={metrics['profit']:.2f}%, trades={metrics['num_trades']}")
             
+            # Portfolio diversity adjustment (optional, config-driven)
+            diversity_mult = self._compute_diversity_bonus(metrics)
+            if diversity_mult != 1.0:
+                fitness *= diversity_mult
+                metrics['diversity_multiplier'] = diversity_mult
+                logger.debug(f"{generated_name}: diversity multiplier={diversity_mult:.3f}")
+
             return fitness, metrics
             
         except Exception as e:
@@ -202,6 +414,222 @@ class FitnessEvaluator:
                 'complexity': strategy_gene.calculate_complexity(),
                 'error': str(e)
             }
+    
+    def evaluate_pair_split(self, strategy_gene: StrategyGene, strategy_name: str = None, skip_validation: bool = False) -> Tuple[float, Dict[str, float]]:
+        """
+        Evaluate a strategy using pair-split validation.
+        
+        Runs the same strategy on training pairs and validation pairs separately,
+        then blends the fitnesses with configurable weights. This measures
+        overfitting by checking how well a strategy generalizes to unseen pairs
+        *without* walk-forward or holdout time splits.
+        
+        Config:
+            pair_validation:
+              enabled: true
+              training_pairs: ["BTC/USDT", "BNB/USDT", "XRP/USDT"]
+              validation_pairs: ["ETH/USDT", "SOL/USDT"]
+              weight_train: 0.6
+              weight_val: 0.4
+              min_val_fitness: 0.0
+        
+        Args:
+            strategy_gene: Strategy to evaluate
+            strategy_name: Optional name for the strategy
+            
+        Returns:
+            Tuple of (composite_fitness, metrics_dict)
+        """
+        pv = self.pair_validation_config
+        training_pairs = pv.get('training_pairs', [])
+        validation_pairs = pv.get('validation_pairs', [])
+        weight_train = pv.get('weight_train', 0.6)
+        weight_val = pv.get('weight_val', 0.4)
+        min_val_fitness = pv.get('min_val_fitness', 0.0)
+        
+        # Normalize weights to sum to 1.0 (prevents silent scaling errors)
+        _w_total = weight_train + weight_val
+        if _w_total > 0 and abs(_w_total - 1.0) > 1e-6:
+            logger.debug(f"[PAIR-SPLIT] Normalizing weights: {weight_train}+{weight_val}={_w_total}")
+            weight_train /= _w_total
+            weight_val /= _w_total
+        
+        # Always use GAStrategy_ prefix to match the class name in generated code
+        generated_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
+        
+        try:
+            strategy_code = self.strategy_generator.generate_strategy_code(strategy_gene)
+            
+            # === Training pairs backtest ===
+            train_result = self.backtester.backtest_strategy(
+                strategy_code, generated_name,
+                strategy_max_open_trades=strategy_gene.max_open_trades,
+                pairs_override=training_pairs,
+            )
+            
+            if not train_result.success:
+                logger.warning(f"[PAIR-SPLIT] {generated_name}: training backtest failed")
+                return 0.0, {'profit': 0.0, 'num_trades': 0, 'error': 'train_backtest_failed'}
+            
+            train_metrics = self._backtest_result_to_metrics(train_result)
+            train_metrics['complexity'] = strategy_gene.calculate_complexity()
+            train_fitness = self.calculate_fitness(train_metrics, strategy_gene)
+            
+            # When skip_validation is set, return training-only fitness (discounted)
+            # Used by validate_top_n_only to defer validation backtest to top-N only
+            if skip_validation:
+                discount = weight_train + weight_val * 0.8  # ~0.92 discount
+                metrics = {
+                    'profit': train_metrics.get('profit', 0.0),
+                    'sharpe_ratio': train_metrics.get('sharpe_ratio', 0.0),
+                    'sortino_ratio': train_metrics.get('sortino_ratio', 0.0),
+                    'max_drawdown': train_metrics.get('max_drawdown', 1.0),
+                    'win_rate': train_metrics.get('win_rate', 0.0),
+                    'num_trades': train_metrics.get('num_trades', 0),
+                    'profit_factor': train_metrics.get('profit_factor', 0.0),
+                    'complexity': train_metrics.get('complexity', 0),
+                    'train_fitness': train_fitness,
+                    'val_fitness': None,
+                    'training_only': True,
+                    'training_pairs': ','.join(training_pairs),
+                    'validation_pairs': ','.join(validation_pairs),
+                }
+                logger.info(f"[PAIR-SPLIT] {generated_name}: train_only={train_fitness:.4f} "
+                           f"(deferred validation)")
+                return train_fitness * discount, metrics
+            
+            # === Validation pairs backtest ===
+            val_result = self.backtester.backtest_strategy(
+                strategy_code, generated_name,
+                strategy_max_open_trades=strategy_gene.max_open_trades,
+                pairs_override=validation_pairs,
+            )
+            
+            if not val_result.success:
+                logger.warning(f"[PAIR-SPLIT] {generated_name}: validation backtest failed")
+                return 0.0, {'profit': 0.0, 'num_trades': 0, 'error': 'val_backtest_failed'}
+            
+            val_metrics = self._backtest_result_to_metrics(val_result)
+            val_metrics['complexity'] = strategy_gene.calculate_complexity()
+            val_fitness = self.calculate_fitness(val_metrics, strategy_gene)
+            
+            # === Composite fitness ===
+            composite_fitness = train_fitness * weight_train + val_fitness * weight_val
+            
+            # Generalization ratio: how well does validation fitness track training
+            gen_ratio = val_fitness / (train_fitness + 1e-8)
+            
+            # Enforce minimum validation fitness — penalise overfitted strategies
+            if min_val_fitness > 0 and val_fitness < min_val_fitness:
+                penalty_ratio = max(0.0, val_fitness / min_val_fitness)
+                logger.warning(
+                    f"[PAIR-SPLIT] {generated_name}: val_fitness={val_fitness:.4f} below "
+                    f"threshold {min_val_fitness}. Applying penalty ratio {penalty_ratio:.3f}"
+                )
+                composite_fitness *= penalty_ratio
+            
+            # Build combined metrics
+            metrics = {
+                # Use training metrics as the primary display values
+                'profit': train_metrics.get('profit', 0.0),
+                'sharpe_ratio': train_metrics.get('sharpe_ratio', 0.0),
+                'sortino_ratio': train_metrics.get('sortino_ratio', 0.0),
+                'max_drawdown': train_metrics.get('max_drawdown', 1.0),
+                'win_rate': train_metrics.get('win_rate', 0.0),
+                'num_trades': train_metrics.get('num_trades', 0),
+                'profit_factor': train_metrics.get('profit_factor', 0.0),
+                'complexity': train_metrics.get('complexity', 0),
+                # Pair-split specific metrics
+                'train_fitness': train_fitness,
+                'val_fitness': val_fitness,
+                'pair_generalization_ratio': gen_ratio,
+                'val_profit': val_metrics.get('profit', 0.0),
+                'val_sharpe': val_metrics.get('sharpe_ratio', 0.0),
+                'val_trades': val_metrics.get('num_trades', 0),
+                'val_max_drawdown': val_metrics.get('max_drawdown', 1.0),
+                'val_win_rate': val_metrics.get('win_rate', 0.0),
+                'training_pairs': ','.join(training_pairs),
+                'validation_pairs': ','.join(validation_pairs),
+                # Map pair-split validation to holdout-compatible fields so
+                # overfit_analysis.classify_overfitting() can classify as
+                # SAFE/WARNING/OVERFIT instead of UNKNOWN.
+                # Pair-split measures "spatial overfitting" (cross-pair generalization)
+                # analogous to holdout's "temporal overfitting".
+                'holdout_fitness': val_fitness,
+                'holdout_degradation': (
+                    (train_fitness - val_fitness) / max(abs(train_fitness), 1e-4)
+                    if train_fitness > 1e-8 else 0.0
+                ),
+                'holdout_profit': val_metrics.get('profit', 0.0),
+                'holdout_trades': val_metrics.get('num_trades', 0),
+                'holdout_drawdown': val_metrics.get('max_drawdown', 1.0),
+                # Also provide train_val_gap for the WF signal path
+                'train_val_gap': (
+                    (train_fitness - val_fitness) / max(abs(train_fitness), 1e-4)
+                    if train_fitness > 1e-4 else 0.0
+                ),
+            }
+            
+            # Flag zero-trade results
+            if train_result.total_trades == 0 or val_result.total_trades == 0:
+                metrics['no_trades'] = True
+            
+            logger.info(f"[PAIR-SPLIT] {generated_name}: train={train_fitness:.4f} val={val_fitness:.4f} "
+                       f"composite={composite_fitness:.4f} gen_ratio={gen_ratio:.2f}")
+            
+            return composite_fitness, metrics
+            
+        except Exception as e:
+            generated_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
+            logger.error(f"[PAIR-SPLIT] Error evaluating {generated_name}: {e}", exc_info=True)
+            return 0.0, {
+                'profit': 0.0, 'num_trades': 0,
+                'complexity': strategy_gene.calculate_complexity(),
+                'error': str(e)
+            }
+    
+    def run_deferred_validation(self, population) -> int:
+        """Run validation backtests on the top-N individuals (by training fitness).
+        
+        Called after the initial evaluation pass when validate_top_n_only > 0.
+        Re-evaluates top-N with full pair-split (training + validation).
+        Non-top individuals keep their discounted training-only fitness.
+        
+        Returns:
+            Number of individuals that received full validation
+        """
+        if self.validate_top_n_only <= 0 or not self.pair_validation_enabled:
+            return 0
+        
+        # Collect evaluated individuals with training-only results
+        candidates = [
+            ind for ind in population
+            if ind.evaluated and ind.fitness is not None
+            and ind.metrics and ind.metrics.get('training_only', False)
+        ]
+        
+        if not candidates:
+            return 0
+        
+        # Sort by training fitness descending
+        candidates.sort(key=lambda x: x.metrics.get('train_fitness', 0), reverse=True)
+        top_n = candidates[:self.validate_top_n_only]
+        
+        validated = 0
+        for ind in top_n:
+            try:
+                fitness, metrics = self.evaluate_pair_split(
+                    ind.strategy_gene,
+                    skip_validation=False,
+                )
+                ind.set_fitness(fitness, metrics)
+                validated += 1
+            except Exception as e:
+                logger.warning(f"[PAIR-SPLIT] Deferred validation failed: {e}")
+        
+        logger.info(f"[PAIR-SPLIT] Deferred validation: {validated}/{len(top_n)} top candidates validated, "
+                    f"{len(candidates) - len(top_n)} kept training-only")
+        return validated
     
     def _auto_adjust_walk_forward_params(
         self, 
@@ -442,8 +870,13 @@ class FitnessEvaluator:
                     val_metrics = self._backtest_result_to_metrics(val_result)
                     val_metrics['complexity'] = strategy_gene.calculate_complexity()
                     val_fitness = self.calculate_fitness(val_metrics, strategy_gene)
-                    # Apply partial credit from training trade count
-                    val_fitness *= train_trade_credit
+                    # Apply confidence factor: use the LOWER of training and validation
+                    # trade credits so both halves must demonstrate sufficient activity.
+                    val_trade_credit = 1.0
+                    if val_result.total_trades < adaptive_min_trades:
+                        val_trade_credit = 0.3 + 0.7 * (val_result.total_trades / adaptive_min_trades)
+                    combined_credit = min(train_trade_credit, val_trade_credit)
+                    val_fitness *= combined_credit
                 else:
                     val_fitness = 0.0
                     val_metrics = {
@@ -535,7 +968,7 @@ class FitnessEvaluator:
             # Apply train-validation gap penalty to discourage overfitting
             # A strategy that performs much better on training than validation is likely overfit
             gap_penalty_config = self.walk_forward_config.get('gap_penalty', {})
-            gap_penalty_enabled = gap_penalty_config.get('enabled', True)
+            gap_penalty_enabled = gap_penalty_config.get('enabled', False)
             gap_penalty_threshold = gap_penalty_config.get('threshold', 0.1)
             gap_penalty_max = gap_penalty_config.get('max_penalty', 0.5)
             
@@ -807,7 +1240,7 @@ class FitnessEvaluator:
             # Bonus for high positive months ratio
             norm_stability = norm_stability * 0.7 + positive_months * 0.3
         else:
-            norm_stability = 0.5  # Unknown / not enough data
+            norm_stability = positive_months  # Zero std = perfectly stable; use positive_months ratio
         
         # === Cross-pair consistency score ===
         # Penalize strategies that only work on 1-2 pairs
@@ -886,8 +1319,10 @@ class FitnessEvaluator:
         pf_bonus = _sigmoid_bonus(profit_factor, 1.5, 0.05, steepness=3.0)
         total_bonus += sortino_bonus * pf_bonus / 0.05  # Scales 0-0.10 when both good
         
-        # Profit bonus: smooth ramp centred around 5% profit (replaces 0% and 10% cliffs)
-        profit_bonus = _sigmoid_bonus(profit, 5.0, 0.15, steepness=0.3)
+        # Profit bonus: smooth ramp centred at break-even (0% profit).
+        # Threshold moved from 5.0→0.0 and steepness raised 0.3→0.5 so the
+        # gradient is strongest exactly where strategies cross into positive territory.
+        profit_bonus = _sigmoid_bonus(profit, 0.0, 0.15, steepness=0.5)
         total_bonus += profit_bonus
         
         # Risk-adjusted excellence: smooth product of Sharpe and low-drawdown sigmoids
@@ -898,6 +1333,14 @@ class FitnessEvaluator:
         # Soft cap via tanh saturation instead of hard min()
         excess = total_bonus - 1.0
         total_bonus = 1.0 + 0.3 * math.tanh(excess / 0.3)  # Saturates near 1.3x
+
+        # Hard floor: negative-profit strategies cannot use bonus amplification.
+        # This defunds the ~30% of the population that survives on Sharpe/drawdown
+        # metrics alone while producing negative returns — they score at base fitness
+        # only, leaving more selection pressure available for profitable strategies.
+        if profit < 0:
+            total_bonus = min(total_bonus, 1.0)
+
         fitness *= total_bonus
         
         # ==================================================================================
@@ -933,22 +1376,54 @@ class FitnessEvaluator:
         # Ensure non-negative
         return max(0, penalized_fitness)
     
+    @staticmethod
+    def _calculate_timerange_months(timerange_str: str) -> float:
+        """Parse FreqTrade timerange string (YYYYMMDD-YYYYMMDD) and return duration in months."""
+        if not timerange_str or '-' not in timerange_str:
+            return 0.0
+        try:
+            parts = timerange_str.split('-')
+            start_str, end_str = parts[0].strip(), parts[1].strip()
+            from datetime import datetime
+            start = datetime.strptime(start_str, '%Y%m%d')
+            end = datetime.strptime(end_str, '%Y%m%d')
+            days = (end - start).days
+            return days / 30.44  # average days per month
+        except (ValueError, IndexError):
+            return 0.0
+
     def _normalize_trade_frequency(self, num_trades: int) -> float:
         """
-        Normalize trade frequency to 0-1 range using a smooth bell curve.
+        Normalize trade frequency to 0-1 range.
         
-        Uses a Gaussian centred on the ideal trade range.  This replaces the
-        piecewise step function to provide continuous gradients for the GA.
+        Supports two modes:
+        - 'gaussian': Symmetric bell curve centred on ideal range (original)
+        - 'asymmetric': Strong penalty below ideal_min, gentle falloff above ideal_max.
+          Better for experiments that want to encourage high trade counts.
         """
         if num_trades <= 0:
             return 0.0
         
         ideal_mean = (self.tf_ideal_min + self.tf_ideal_max) / 2.0
-        # σ chosen so ideal_min..ideal_max spans ~2σ (95% of peak)
         sigma = max((self.tf_ideal_max - self.tf_ideal_min) / 2.0, 1.0)
         
-        z = (num_trades - ideal_mean) / sigma
-        score = math.exp(-z * z / 2.0)
+        if self.tf_shape == 'asymmetric':
+            # Asymmetric: steep penalty below ideal_min, gentle above ideal_max
+            if num_trades < self.tf_ideal_min:
+                # Below minimum: steep Gaussian penalty (same as symmetric)
+                z = (num_trades - self.tf_ideal_min) / sigma
+                score = math.exp(-z * z / 2.0)
+            elif num_trades <= self.tf_ideal_max:
+                # In ideal range: perfect score
+                score = 1.0
+            else:
+                # Above maximum: gentle linear decay, floor at 0.3
+                excess = num_trades - self.tf_ideal_max
+                score = max(0.3, 1.0 - excess / (self.tf_ideal_max * 3))
+        else:
+            # Original symmetric Gaussian
+            z = (num_trades - ideal_mean) / sigma
+            score = math.exp(-z * z / 2.0)
         
         return max(0.15, min(1.0, score))
     
@@ -990,6 +1465,31 @@ class FitnessEvaluator:
                 trade_penalty = max(0.05, trade_penalty)
                 fitness *= trade_penalty
         
+        # Hard penalty for minimum trades per month
+        # Unlike the S-curve above, this enforces a strict floor on trade frequency.
+        # When min_trades_per_month_penalty=0.0, strategies below threshold get zero fitness.
+        if self.min_trades_per_month > 0 and self.timerange_months > 0:
+            actual_tpm = num_trades / self.timerange_months
+            if actual_tpm < self.min_trades_per_month:
+                fitness *= self.min_tpm_penalty  # 0.0 = hard kill
+                if self.min_tpm_penalty == 0.0:
+                    logger.debug(f"[FITNESS] Hard penalty: {actual_tpm:.1f} trades/month "
+                               f"< {self.min_trades_per_month} minimum → fitness=0")
+                    return 0.0  # Early return, skip remaining penalties
+        
+        # Profit factor penalty: penalise strategies below minimum PF (< 1.0 = losing money).
+        # Uses a steep sigmoid so PF ≥ min_pf is unaffected, PF → 0 is heavily penalised.
+        min_pf = penalties.get('min_profit_factor', 0.0)
+        if min_pf > 0:
+            pf = metrics.get('profit_factor', 0)
+            if pf <= 0:
+                fitness *= 0.01  # No winning trades at all → near-zero fitness
+            elif pf < min_pf:
+                # Linear ramp: 0 at PF=0, 1.0 at PF=min_pf
+                pf_penalty = max(0.01, pf / min_pf)
+                fitness *= pf_penalty
+                logger.debug(f"[FITNESS] profit_factor penalty: PF={pf:.3f} < {min_pf} → x{pf_penalty:.3f}")
+
         # Smooth penalty for excessive drawdown (sigmoid onset around threshold).
         # Gives a gentle signal even slightly below threshold instead of a hard gate.
         max_dd_threshold = penalties.get('max_drawdown', 0.30)
@@ -1094,6 +1594,66 @@ class FitnessEvaluator:
                 logger.debug(f"Applied dead-exit penalty: {dead_count}/{bounded_count} bounded exit "
                            f"conditions use impossible thresholds (fitness x{dead_penalty:.3f})")
         
+        # ── Trade duration penalty ──────────────────────────────────────────
+        # Penalize strategies that hold positions too long for their timeframe.
+        # Scalping strategies on 5m should exit within ~12 candles, not hold for hours.
+        max_avg_candles = penalties.get('max_avg_trade_candles', 0)
+        duration_penalty_weight = penalties.get('trade_duration_penalty_weight', 0.3)
+        if max_avg_candles > 0 and strategy_gene is not None:
+            avg_duration_str = metrics.get('avg_duration', '')
+            if avg_duration_str:
+                # Parse duration string (e.g. "2:30:00" or "0 days 02:30:00" or minutes float)
+                _dur_minutes = self._parse_duration_minutes(avg_duration_str)
+                if _dur_minutes is not None and _dur_minutes > 0:
+                    from genetic_algorithm.core.strategy_gene import timeframe_to_minutes
+                    candle_min = timeframe_to_minutes(strategy_gene.timeframe) or 60
+                    avg_candles = _dur_minutes / candle_min
+                    if avg_candles > max_avg_candles:
+                        excess = (avg_candles - max_avg_candles) / max_avg_candles
+                        try:
+                            dur_penalty = max(1.0 - duration_penalty_weight,
+                                              1.0 / (1.0 + math.exp(3.0 * excess)))
+                        except OverflowError:
+                            dur_penalty = 1.0 - duration_penalty_weight
+                        fitness *= dur_penalty
+                        logger.debug(f"Applied trade duration penalty: avg={avg_candles:.1f} candles "
+                                   f"(max={max_avg_candles}), penalty x{dur_penalty:.3f}")
+
+        # ── Trade clustering penalty ──────────────────────────────────────────
+        # Penalize strategies that spam-open multiple trades within a narrow window.
+        # This prevents the GA from evolving "always enter" strategies.
+        clustering_enabled = penalties.get('trade_clustering_enabled', False)
+        if clustering_enabled and num_trades > 10:
+            max_per_window = penalties.get('trade_clustering_max_per_window', 3)
+            window_candles = penalties.get('trade_clustering_window_candles', 5)
+            trades_list = metrics.get('trades', [])
+            if trades_list and len(trades_list) > 10:
+                cluster_ratio = self._compute_cluster_ratio(
+                    trades_list, max_per_window, window_candles,
+                    strategy_gene.timeframe if strategy_gene else '1h')
+                if cluster_ratio > 0.3:
+                    cluster_penalty = max(0.7, 1.0 - cluster_ratio * 0.3)
+                    fitness *= cluster_penalty
+                    logger.debug(f"Applied trade clustering penalty: ratio={cluster_ratio:.2f}, "
+                               f"penalty x{cluster_penalty:.3f}")
+
+        # ── Spread-aware fitness penalty ──────────────────────────────────────
+        # Penalize strategies whose average profit per trade is barely above costs.
+        # If the edge is thinner than 2× round-trip costs, it won't survive live.
+        spread_aware = penalties.get('spread_aware_enabled', False)
+        if spread_aware and num_trades > 0:
+            fee = self.backtest_config.get('fee', 0.001)
+            slippage = self.backtest_config.get('slippage_pct', 0.0)
+            round_trip_cost = (fee + slippage) * 2  # entry + exit
+            avg_profit_pct = metrics.get('avg_profit', 0.0) / 100.0  # convert to decimal
+            min_edge = penalties.get('spread_aware_min_edge_multiplier', 2.0)
+            if avg_profit_pct > 0 and avg_profit_pct < round_trip_cost * min_edge:
+                edge_ratio = avg_profit_pct / (round_trip_cost * min_edge) if round_trip_cost > 0 else 1.0
+                spread_penalty = max(0.5, edge_ratio)
+                fitness *= spread_penalty
+                logger.debug(f"Applied spread-aware penalty: avg_profit={avg_profit_pct:.4f}, "
+                           f"min_edge={round_trip_cost * min_edge:.4f}, penalty x{spread_penalty:.3f}")
+
         # Combined penalty floor: prevent penalty compounding from destroying
         # viable strategies. With N multiplicative penalties, the product can
         # approach zero even for decent strategies. Floor at 10% of original.
@@ -1102,6 +1662,88 @@ class FitnessEvaluator:
             fitness = max(fitness, original_fitness * min_penalized)
         
         return fitness
+
+    @staticmethod
+    def _parse_duration_minutes(duration_str) -> float:
+        """Parse a duration string into minutes.
+
+        Handles formats like:
+        - ``"2:30:00"`` (H:M:S)
+        - ``"0 days 02:30:00"`` (pandas Timedelta str)
+        - numeric (already minutes)
+        Returns None on parse failure.
+        """
+        if isinstance(duration_str, (int, float)):
+            return float(duration_str)
+        if not isinstance(duration_str, str) or not duration_str.strip():
+            return None
+        try:
+            s = duration_str.strip()
+            # Strip "X days " prefix
+            if 'days' in s or 'day' in s:
+                parts = s.split(' ', 2)
+                days = int(parts[0])
+                s = parts[-1] if len(parts) > 2 else '0:00:00'
+                day_minutes = days * 1440
+            else:
+                day_minutes = 0
+            # Parse H:M:S
+            hms = s.split(':')
+            h = int(hms[0]) if len(hms) > 0 else 0
+            m = int(hms[1]) if len(hms) > 1 else 0
+            sec = int(float(hms[2])) if len(hms) > 2 else 0
+            return day_minutes + h * 60 + m + sec / 60.0
+        except (ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _compute_cluster_ratio(trades_list, max_per_window: int,
+                               window_candles: int, timeframe: str) -> float:
+        """Compute fraction of trades that are part of dense clusters.
+
+        A cluster is a window of ``window_candles`` candles where more than
+        ``max_per_window`` trades were opened.  Returns ratio in [0, 1].
+        """
+        if len(trades_list) < 5:
+            return 0.0
+        try:
+            from genetic_algorithm.core.strategy_gene import timeframe_to_minutes
+            candle_min = timeframe_to_minutes(timeframe) or 60
+            window_minutes = candle_min * window_candles
+
+            # Extract open timestamps — trade dicts may have different key names
+            stamps = []
+            for t in trades_list:
+                ts = t.get('open_date') or t.get('open_timestamp')
+                if ts is None:
+                    continue
+                if isinstance(ts, str):
+                    from datetime import datetime
+                    try:
+                        ts = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    except (ValueError, TypeError):
+                        continue
+                stamps.append(ts)
+
+            if len(stamps) < 5:
+                return 0.0
+
+            stamps.sort()
+            clustered = 0
+            for i, ts in enumerate(stamps):
+                count = 0
+                for j in range(i, len(stamps)):
+                    diff = stamps[j] - ts
+                    diff_min = diff.total_seconds() / 60.0 if hasattr(diff, 'total_seconds') else float(diff)
+                    if diff_min <= window_minutes:
+                        count += 1
+                    else:
+                        break
+                if count > max_per_window:
+                    clustered += 1
+            return clustered / len(stamps)
+        except Exception:
+            return 0.0
     
     def evaluate_holdout(self, strategy_gene: StrategyGene, holdout_timerange: str,
                          strategy_name: str = None) -> Tuple[float, Dict[str, float]]:
