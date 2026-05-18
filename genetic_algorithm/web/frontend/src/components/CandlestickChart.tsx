@@ -18,9 +18,9 @@ import {
   type LineData,
   type SeriesMarker,
   type Time,
+  type LogicalRange,
   ColorType,
   CrosshairMode,
-  LogicalRange,
 } from 'lightweight-charts';
 import type { BacktestTrade } from '../types';
 
@@ -65,6 +65,8 @@ interface CandlestickChartProps {
   selectionRange?: SelectionRange | null;
   /** Called when user scrolls near the left edge — parent should fetch older candles */
   onNeedMoreData?: () => void;
+  /** Called when user scrolls near the right edge — parent should fetch newer candles */
+  onNeedNewerData?: () => void;
   /** Show a "Loading older data…" spinner overlay in top-left */
   moreDataLoading?: boolean;
 }
@@ -106,6 +108,7 @@ export const CandlestickChart = memo(function CandlestickChart({
   onCandleClick,
   selectionRange,
   onNeedMoreData,
+  onNeedNewerData,
   moreDataLoading = false,
 }: CandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -121,8 +124,13 @@ export const CandlestickChart = memo(function CandlestickChart({
   // Infinite scroll — left-edge detection refs
   const onNeedMoreDataRef = useRef(onNeedMoreData);
   useEffect(() => { onNeedMoreDataRef.current = onNeedMoreData; }, [onNeedMoreData]);
+  const onNeedNewerDataRef = useRef(onNeedNewerData);
+  useEffect(() => { onNeedNewerDataRef.current = onNeedNewerData; }, [onNeedNewerData]);
   const needMoreDataCooldownRef = useRef(false);
+  const needNewerDataCooldownRef = useRef(false);
   const logicalRangeHandlerRef = useRef<((r: LogicalRange | null) => void) | null>(null);
+  const totalCandlesRef = useRef<number>(candles.length);
+  useEffect(() => { totalCandlesRef.current = candles.length; }, [candles.length]);
   // Track oldest candle time to detect prepend vs full refresh
   const prevOldestTimeRef = useRef<number>(0);
 
@@ -198,13 +206,21 @@ export const CandlestickChart = memo(function CandlestickChart({
     const ro = new ResizeObserver(resizeHandler);
     ro.observe(containerRef.current);
 
-    // Left-edge scroll detection — triggers onNeedMoreData when user is near bar 50
+    // Edge scroll detection — load older on left edge and newer on right edge
     const logicalRangeHandler = (range: LogicalRange | null) => {
-      if (!range || needMoreDataCooldownRef.current) return;
-      if (range.from <= 50) {
+      if (!range) return;
+
+      if (range.from <= 50 && !needMoreDataCooldownRef.current) {
         needMoreDataCooldownRef.current = true;
         onNeedMoreDataRef.current?.();
         setTimeout(() => { needMoreDataCooldownRef.current = false; }, 3000);
+      }
+
+      const total = totalCandlesRef.current;
+      if (total > 0 && range.to >= Math.max(0, total - 50) && !needNewerDataCooldownRef.current) {
+        needNewerDataCooldownRef.current = true;
+        onNeedNewerDataRef.current?.();
+        setTimeout(() => { needNewerDataCooldownRef.current = false; }, 3000);
       }
     };
     logicalRangeHandlerRef.current = logicalRangeHandler;
@@ -378,56 +394,6 @@ export const CandlestickChart = memo(function CandlestickChart({
     return () => { chart.timeScale().unsubscribeVisibleTimeRangeChange(positionOverlay); };
   }, [selectionRange]);
 
-  return (
-    <div className="relative">
-      {onTimeRangeSelect && candles.length > 0 && (
-        <button
-          onClick={() => {
-                  {/* Loading older data indicator */}
-                  {moreDataLoading && (
-                    <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5 px-2 py-1 rounded bg-black/60 text-gray-400 text-[10px] pointer-events-none">
-                      <span className="w-2.5 h-2.5 border-2 border-gray-500/60 border-t-gray-300 rounded-full animate-spin flex-shrink-0" />
-                      Loading older data…
-                    </div>
-                  )}
-                  {onTimeRangeSelect && candles.length > 0 && (
-                    <button
-                      onClick={() => {
-            const range = chartRef.current?.timeScale().getVisibleRange();
-            if (range) {
-              const fmt = (t: Time) => {
-                const d = new Date((t as number) * 1000);
-                const y = d.getUTCFullYear();
-                const m = String(d.getUTCMonth() + 1).padStart(2, '0');
-                const day = String(d.getUTCDate()).padStart(2, '0');
-                return `${y}${m}${day}`;
-              };
-              onTimeRangeSelect(fmt(range.from), fmt(range.to));
-            }
-          }}
-          className="absolute top-2 right-2 z-10 text-[10px] bg-accent/20 text-accent border border-accent/30 px-2 py-1 rounded hover:bg-accent/30 transition-colors"
-        >
-          Set as Backtest Range
-        </button>
-      )}
-      {/* Selection range highlight overlay */}
-      <div
-        ref={selectionOverlayRef}
-        className="absolute top-0 bottom-0 pointer-events-none z-10"
-        style={{
-          display: 'none',
-          background: 'rgba(99,102,241,0.15)',
-          borderLeft: '2px solid rgba(99,102,241,0.6)',
-          borderRight: '2px solid rgba(99,102,241,0.6)',
-        }}
-      />
-      <div
-        ref={containerRef}
-        className="w-full rounded-lg overflow-hidden border border-white/5"
-        style={{ minHeight: height, cursor: onCandleClick ? 'crosshair' : 'default' }}
-      />
-    </div>
-  );
   return (
     <div className="relative">
       {/* Loading older data indicator (top-left) */}

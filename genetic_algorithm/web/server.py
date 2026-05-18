@@ -16,8 +16,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from genetic_algorithm.web.config import WebConfig
@@ -113,6 +114,37 @@ def create_app(
     # ── Static files (React build) ────────────────────────────────
     frontend_build = Path(__file__).parent / "frontend" / "dist"
     if frontend_build.exists():
+        index_file = frontend_build / "index.html"
+
+        @app.middleware("http")
+        async def spa_fallback(request: Request, call_next):
+            """Serve React index.html for non-API deep links.
+
+            This prevents JSON 404 responses when users directly load routes like
+            /backtest/<id> or /runs/<id>/strategies/<id> in the browser.
+            """
+            response = await call_next(request)
+            if response.status_code != 404 or request.method != "GET":
+                return response
+
+            path = request.url.path
+            if (
+                path.startswith("/api")
+                or path.startswith("/ws")
+                or path.startswith("/docs")
+                or path.startswith("/redoc")
+            ):
+                return response
+
+            # Static asset requests should remain true 404s if missing.
+            if "." in path.rsplit("/", 1)[-1]:
+                return response
+
+            if index_file.exists():
+                return FileResponse(index_file)
+
+            return response
+
         app.mount("/", StaticFiles(directory=str(frontend_build), html=True), name="frontend")
         logger.info("Serving frontend from %s", frontend_build)
     else:

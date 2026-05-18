@@ -15,7 +15,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Play, Loader2, Check, ChevronDown, ChevronUp,
-  Crosshair, RotateCcw, TrendingUp, TrendingDown,
+  RotateCcw, TrendingUp, TrendingDown,
   BarChart3, Calendar, DollarSign, ShieldAlert, Eye,
 } from 'lucide-react';
 import { api } from '../api/client';
@@ -107,8 +107,6 @@ export function ChartBacktestPanel({
   const [chartLoading, setChartLoading] = useState(false);
 
   // ── Range selection ─────────────────────────────────────────
-  type RangeMode = 'off' | 'picking_start' | 'picking_end';
-  const [rangeMode, setRangeMode] = useState<RangeMode>('off');
   const [rangeStart, setRangeStart] = useState<number | null>(null);
   const [rangeEnd, setRangeEnd] = useState<number | null>(null);
   // Manual text inputs (YYYYMMDD)
@@ -125,6 +123,10 @@ export function ChartBacktestPanel({
     gene.max_open_trades != null ? String(gene.max_open_trades) : '3',
   );
   const [trailingStop, setTrailingStop] = useState(gene.trailing_stop ?? false);
+  const [strategyTimeframe, setStrategyTimeframe] = useState(gene.timeframe || '5m');
+  const [showROITable, setShowROITable] = useState(false);
+  // Track overrides: path → value (e.g., "indicators.0.parameters.period" → 20)
+  const [parameterOverrides, setParameterOverrides] = useState<Record<string, unknown>>({});
 
   // ── Backtest execution ──────────────────────────────────────
   const [btId, setBtId] = useState<string | null>(null);
@@ -139,6 +141,7 @@ export function ChartBacktestPanel({
   const [moreDataLoading, setMoreDataLoading] = useState(false);
   const [noMoreData, setNoMoreData] = useState(false);
   const oldestCandleTimeRef = useRef<number>(0);
+  const newestCandleTimeRef = useRef<number>(0);
 
   // ── Sync defaults when parent props change ──────────────────
   useEffect(() => { if (defaultPair && !selectedPair) setSelectedPair(defaultPair); }, [defaultPair]);
@@ -160,7 +163,10 @@ export function ChartBacktestPanel({
       .then((r) => {
         const parsed = parseOHLCVCandles(r.candles);
         setCandles(parsed);
-        if (parsed.length > 0) oldestCandleTimeRef.current = parsed[0].time;
+        if (parsed.length > 0) {
+          oldestCandleTimeRef.current = parsed[0].time;
+          newestCandleTimeRef.current = parsed[parsed.length - 1].time;
+        }
       })
       .catch(() => {})
       .finally(() => setChartLoading(false));
@@ -186,7 +192,7 @@ export function ChartBacktestPanel({
       .then((r) => {
         const lines: IndicatorLine[] = Object.entries(r.indicators || {}).map(([name, data]) => ({
           name,
-          data: (data as any[]).map(([ts, v]: [number, number]) => ({
+          data: (data as unknown as [number, number][]).map(([ts, v]: [number, number]) => ({
             time: Math.floor(ts / 1000),
             value: v,
           })),
@@ -208,11 +214,17 @@ export function ChartBacktestPanel({
 
   // ── Candle click handler ────────────────────────────────────
   const handleCandleClick = useCallback((unixSec: number) => {
-    if (rangeMode === 'picking_start') {
+    // First click sets start (or resets an existing range)
+    if (rangeStart == null || rangeEnd != null) {
       setRangeStart(unixSec);
+      setRangeEnd(null);
       setManualStart(unixToYYYYMMDD(unixSec));
-      setRangeMode('picking_end');
-    } else if (rangeMode === 'picking_end') {
+      setManualEnd('');
+      return;
+    }
+
+    // Second click sets end
+    if (rangeStart != null && rangeEnd == null) {
       const start = rangeStart ?? unixSec;
       const end = unixSec;
       const [s, e] = start <= end ? [start, end] : [end, start];
@@ -220,75 +232,144 @@ export function ChartBacktestPanel({
       setRangeEnd(e);
       setManualStart(unixToYYYYMMDD(s));
       setManualEnd(unixToYYYYMMDD(e));
-      setRangeMode('off');
     }
-  }, [rangeMode, rangeStart]);
+  }, [rangeStart, rangeEnd]);
 
   // Selection range for the chart highlight
   const selectionRange: SelectionRange | null =
     rangeStart != null
       ? { start: rangeStart, end: rangeEnd ?? rangeStart }
-
-        // ── Infinite scroll: load older candles ────────────────────
-        const handleNeedMoreData = useCallback(async () => {
-          if (moreDataLoading || noMoreData || !oldestCandleTimeRef.current || !selectedPair || !selectedTimeframe) return;
-          setMoreDataLoading(true);
-          try {
-            // Fetch candles ending one day before our oldest candle
-            const endStr = unixToYYYYMMDD(oldestCandleTimeRef.current - 86400);
-            const [ohlcvResp, indResp] = await Promise.all([
-              api.getOHLCV({ pair: selectedPair, timeframe: selectedTimeframe, exchange: selectedExchange, end: endStr, limit: 3000 }),
-              gene.indicators?.length
-                ? api.getIndicators({
-                    pair: selectedPair,
-                    timeframe: selectedTimeframe,
-                    exchange: selectedExchange,
-                    indicators: gene.indicators.map((i) => i.type).join(','),
-                    end: endStr,
-                    limit: 3000,
-                  })
-                : Promise.resolve(null),
-            ]);
-
-            const newCandles = parseOHLCVCandles(ohlcvResp.candles);
-            if (newCandles.length === 0) {
-              setNoMoreData(true);
-              return;
-            }
-
-            // Prepend (deduplication by time)
-            setCandles((prev) => {
-              const existingTimes = new Set(prev.map((c) => c.time));
-              const fresh = newCandles.filter((c) => !existingTimes.has(c.time));
-              if (fresh.length === 0) { setNoMoreData(true); return prev; }
-              const merged = [...fresh, ...prev];
-              oldestCandleTimeRef.current = merged[0].time;
-              return merged;
-            });
-
-            // Merge indicator data for older range
-            if (indResp) {
-              const newLines: IndicatorLine[] = Object.entries(indResp.indicators || {}).map(([name, data]) => ({
-                name,
-                data: (data as [number, number][]).map(([ts, v]) => ({ time: Math.floor(ts / 1000), value: v })),
-                pane: 'price' as const,
-              }));
-              setIndicatorLines((prev) =>
-                prev.map((existing) => {
-                  const fresh = newLines.find((l) => l.name === existing.name);
-                  if (!fresh) return existing;
-                  const existingTimes = new Set(existing.data.map((d) => d.time));
-                  return { ...existing, data: [...fresh.data.filter((d) => !existingTimes.has(d.time)), ...existing.data] };
-                }),
-              );
-            }
-
-            if (newCandles.length < 50) setNoMoreData(true);
-          } catch { /* ignore */ } finally {
-            setMoreDataLoading(false);
-          }
-        }, [moreDataLoading, noMoreData, selectedPair, selectedTimeframe, selectedExchange, gene.indicators]);
       : null;
+
+  // ── Infinite scroll: load older candles ────────────────────
+  const handleNeedMoreData = useCallback(async () => {
+    if (moreDataLoading || noMoreData || !oldestCandleTimeRef.current || !selectedPair || !selectedTimeframe) return;
+    setMoreDataLoading(true);
+    try {
+      // Fetch candles ending one day before our oldest candle
+      const endStr = unixToYYYYMMDD(oldestCandleTimeRef.current - 86400);
+      const [ohlcvResp, indResp] = await Promise.all([
+        api.getOHLCV({ pair: selectedPair, timeframe: selectedTimeframe, exchange: selectedExchange, end: endStr, limit: 3000 }),
+        gene.indicators?.length
+          ? api.getIndicators({
+              pair: selectedPair,
+              timeframe: selectedTimeframe,
+              exchange: selectedExchange,
+              indicators: gene.indicators.map((i) => i.type).join(','),
+              end: endStr,
+              limit: 3000,
+            })
+          : Promise.resolve(null),
+      ]);
+
+      const newCandles = parseOHLCVCandles(ohlcvResp.candles);
+      if (newCandles.length === 0) {
+        setNoMoreData(true);
+        return;
+      }
+
+      // Prepend (deduplication by time)
+      setCandles((prev) => {
+        const existingTimes = new Set(prev.map((c) => c.time));
+        const fresh = newCandles.filter((c) => !existingTimes.has(c.time));
+        if (fresh.length === 0) {
+          setNoMoreData(true);
+          return prev;
+        }
+        const merged = [...fresh, ...prev];
+        oldestCandleTimeRef.current = merged[0].time;
+        newestCandleTimeRef.current = merged[merged.length - 1].time;
+        return merged;
+      });
+
+      // Merge indicator data for older range
+      if (indResp) {
+        const newLines: IndicatorLine[] = Object.entries(indResp.indicators || {}).map(([name, data]) => ({
+          name,
+          data: (data as unknown as [number, number][]).map(([ts, v]) => ({ time: Math.floor(ts / 1000), value: v })),
+          pane: 'price' as const,
+        }));
+        setIndicatorLines((prev) =>
+          prev.map((existing) => {
+            const fresh = newLines.find((l) => l.name === existing.name);
+            if (!fresh) return existing;
+            const existingTimes = new Set(existing.data.map((d) => d.time));
+            return {
+              ...existing,
+              data: [...fresh.data.filter((d) => !existingTimes.has(d.time)), ...existing.data],
+            };
+          }),
+        );
+      }
+
+      if (newCandles.length < 50) setNoMoreData(true);
+    } catch {
+      // Ignore transient network errors while panning
+    } finally {
+      setMoreDataLoading(false);
+    }
+  }, [moreDataLoading, noMoreData, selectedPair, selectedTimeframe, selectedExchange, gene.indicators]);
+
+  // ── Infinite scroll: load newer candles ────────────────────
+  const handleNeedNewerData = useCallback(async () => {
+    if (moreDataLoading || !newestCandleTimeRef.current || !selectedPair || !selectedTimeframe) return;
+    setMoreDataLoading(true);
+    try {
+      // Fetch candles starting one day after our newest candle
+      const startStr = unixToYYYYMMDD(newestCandleTimeRef.current + 86400);
+      const [ohlcvResp, indResp] = await Promise.all([
+        api.getOHLCV({ pair: selectedPair, timeframe: selectedTimeframe, exchange: selectedExchange, start: startStr, limit: 3000 }),
+        gene.indicators?.length
+          ? api.getIndicators({
+              pair: selectedPair,
+              timeframe: selectedTimeframe,
+              exchange: selectedExchange,
+              indicators: gene.indicators.map((i) => i.type).join(','),
+              start: startStr,
+              limit: 3000,
+            })
+          : Promise.resolve(null),
+      ]);
+
+      const newCandles = parseOHLCVCandles(ohlcvResp.candles);
+      if (newCandles.length === 0) return;
+
+      // Append (deduplication by time)
+      setCandles((prev) => {
+        const existingTimes = new Set(prev.map((c) => c.time));
+        const fresh = newCandles.filter((c) => !existingTimes.has(c.time));
+        if (fresh.length === 0) return prev;
+        const merged = [...prev, ...fresh];
+        oldestCandleTimeRef.current = merged[0].time;
+        newestCandleTimeRef.current = merged[merged.length - 1].time;
+        return merged;
+      });
+
+      // Merge indicator data for newer range
+      if (indResp) {
+        const newLines: IndicatorLine[] = Object.entries(indResp.indicators || {}).map(([name, data]) => ({
+          name,
+          data: (data as unknown as [number, number][]).map(([ts, v]) => ({ time: Math.floor(ts / 1000), value: v })),
+          pane: 'price' as const,
+        }));
+        setIndicatorLines((prev) =>
+          prev.map((existing) => {
+            const fresh = newLines.find((l) => l.name === existing.name);
+            if (!fresh) return existing;
+            const existingTimes = new Set(existing.data.map((d) => d.time));
+            return {
+              ...existing,
+              data: [...existing.data, ...fresh.data.filter((d) => !existingTimes.has(d.time))],
+            };
+          }),
+        );
+      }
+    } catch {
+      // Ignore transient network errors while panning
+    } finally {
+      setMoreDataLoading(false);
+    }
+  }, [moreDataLoading, selectedPair, selectedTimeframe, selectedExchange, gene.indicators]);
 
   // ── Backtest polling ────────────────────────────────────────
   useEffect(() => {
@@ -324,6 +405,36 @@ export function ChartBacktestPanel({
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [btId]);
 
+  // ── Merge parameter overrides into gene ────────────────────
+  const buildGeneWithOverrides = (): StrategyGene => {
+    const overridden = JSON.parse(JSON.stringify(gene)) as StrategyGene;
+    
+    // Direct overrides
+    if (strategyTimeframe) overridden.timeframe = strategyTimeframe;
+    
+    // Apply parameter overrides (e.g., indicator period changes, ROI changes)
+    Object.entries(parameterOverrides).forEach(([path, value]) => {
+      const parts = path.split('.');
+      let obj: any = overridden;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i];
+        if (part.match(/^\d+$/)) {
+          obj = obj[parseInt(part, 10)];
+        } else {
+          obj = obj[part] = obj[part] || {};
+        }
+      }
+      const lastKey = parts[parts.length - 1];
+      if (lastKey.match(/^\d+$/)) {
+        obj[parseInt(lastKey, 10)] = value;
+      } else {
+        obj[lastKey] = value;
+      }
+    });
+    
+    return overridden;
+  };
+
   // ── Run backtest ────────────────────────────────────────────
   const runBacktest = async () => {
     if (!selectedPair || !selectedTimeframe) {
@@ -346,7 +457,7 @@ export function ChartBacktestPanel({
         const approxStart = last - 90 * 24 * 3600;
         timerange = `${unixToYYYYMMDD(approxStart)}-${unixToYYYYMMDD(last)}`;
       } else {
-        setBtError('No time range selected. Click "Select Range" or enter dates manually.');
+        setBtError('No time range selected. Click the chart to set start/end or enter dates manually.');
         return;
       }
     }
@@ -361,8 +472,11 @@ export function ChartBacktestPanel({
     setTrades([]);
 
     try {
+      // Build gene with parameter overrides applied
+      const geneWithOverrides = buildGeneWithOverrides();
+      
       const res = await api.startBacktest({
-        strategy_gene: gene as any,
+        strategy_gene: geneWithOverrides as any,
         timerange,
         pairs: [selectedPair],
         timeframe: selectedTimeframe,
@@ -462,9 +576,10 @@ export function ChartBacktestPanel({
             trades={currentPairTrades}
             indicators={visibleIndicatorLines}
             height={400}
-            onCandleClick={rangeMode !== 'off' ? handleCandleClick : undefined}
+            onCandleClick={handleCandleClick}
             selectionRange={selectionRange}
             onNeedMoreData={handleNeedMoreData}
+            onNeedNewerData={handleNeedNewerData}
             moreDataLoading={moreDataLoading}
           />
         </>
@@ -479,22 +594,11 @@ export function ChartBacktestPanel({
       {/* ── Range selection controls ── */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
-          {rangeMode === 'off' ? (
-            <button
-              onClick={() => { setRangeMode('picking_start'); setRangeStart(null); setRangeEnd(null); }}
-              className="flex items-center gap-1.5 text-xs bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 px-3 py-1.5 rounded-lg hover:bg-indigo-500/25 transition-colors"
-            >
-              <Crosshair className="w-3 h-3" /> Select Range
-            </button>
-          ) : (
-            <button
-              onClick={() => setRangeMode('off')}
-              className="flex items-center gap-1.5 text-xs bg-yellow-500/15 text-yellow-300 border border-yellow-500/30 px-3 py-1.5 rounded-lg hover:bg-yellow-500/25 transition-colors animate-pulse"
-            >
-              <Crosshair className="w-3 h-3" />
-              {rangeMode === 'picking_start' ? 'Click start candle…' : 'Click end candle…'}
-            </button>
-          )}
+          <span className="text-xs text-indigo-300 bg-indigo-500/10 border border-indigo-500/30 px-3 py-1.5 rounded-lg">
+            {rangeStart == null || rangeEnd != null
+              ? 'Click chart to set range start'
+              : 'Click chart again to set range end'}
+          </span>
 
           {(rangeStart || rangeEnd) && (
             <button
@@ -595,43 +699,186 @@ export function ChartBacktestPanel({
 
       {/* ── Advanced section ── */}
       {showAdvanced && (
-        <div className="bg-surface-2/40 border border-white/5 rounded-xl p-4 space-y-3">
-          <p className="text-[10px] text-gray-500 uppercase tracking-wider">Advanced Configuration</p>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] text-gray-500 uppercase">Max Open Trades</label>
-              <input
-                type="number"
-                min="1"
-                max="20"
-                step="1"
-                value={maxOpenTrades}
-                onChange={(e) => setMaxOpenTrades(e.target.value)}
-                className="bg-surface-2 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
-              />
+        <div className="bg-surface-2/40 border border-white/5 rounded-xl p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] text-gray-500 uppercase tracking-wider">Advanced Configuration</p>
+            {Object.keys(parameterOverrides).length > 0 && (
+              <button
+                onClick={() => setParameterOverrides({})}
+                className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-300 transition-colors"
+                title="Reset all overrides to defaults"
+              >
+                <RotateCcw className="w-3 h-3" /> Reset
+              </button>
+            )}
+          </div>
+
+          {/* ── Core Strategy Parameters ── */}
+          <div className="bg-surface-3/50 border border-white/5 rounded-lg p-3 space-y-3">
+            <p className="text-[9px] text-gray-600 uppercase tracking-wider">Core Strategy</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {/* Strategy Timeframe (independent from chart) */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-gray-500 uppercase">Strategy Timeframe</label>
+                <select
+                  value={strategyTimeframe}
+                  onChange={(e) => setStrategyTimeframe(e.target.value)}
+                  className="bg-surface-2 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
+                >
+                  {['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d'].map((tf) => (
+                    <option key={tf} value={tf}>{tf}</option>
+                  ))}
+                </select>
+                <p className="text-[8px] text-gray-600 mt-0.5">Chart timeframe is independent</p>
+              </div>
+
+              {/* Stoploss (from quick config, shown again here for reference) */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-gray-500 uppercase">Stoploss (%)</label>
+                <input
+                  type="number"
+                  min="0.1"
+                  max="50"
+                  step="0.1"
+                  value={stoplossInput}
+                  onChange={(e) => setStoplossInput(e.target.value)}
+                  className="bg-surface-2 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
+                />
+              </div>
+
+              {/* Max Open Trades */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-gray-500 uppercase">Max Open Trades</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  step="1"
+                  value={maxOpenTrades}
+                  onChange={(e) => setMaxOpenTrades(e.target.value)}
+                  className="bg-surface-2 border border-white/10 rounded px-2 py-1.5 text-xs font-mono text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
+                />
+              </div>
+
+              {/* Trailing Stop */}
+              <div className="flex flex-col gap-1">
+                <label className="text-[10px] text-gray-500 uppercase">Trailing Stop</label>
+                <button
+                  type="button"
+                  onClick={() => setTrailingStop(!trailingStop)}
+                  className={[
+                    'flex items-center gap-2 px-3 py-1.5 rounded border text-xs transition-colors',
+                    trailingStop
+                      ? 'bg-accent/20 border-accent/30 text-accent'
+                      : 'bg-surface-2 border-white/10 text-gray-400',
+                  ].join(' ')}
+                >
+                  <span className={[
+                    'w-3.5 h-3.5 rounded-full border-2 transition-colors',
+                    trailingStop ? 'bg-accent border-accent' : 'bg-transparent border-gray-500',
+                  ].join(' ')} />
+                  {trailingStop ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
             </div>
-            <div className="flex flex-col gap-1">
-              <label className="text-[10px] text-gray-500 uppercase">Trailing Stop</label>
+          </div>
+
+          {/* ── Indicators ── */}
+          {gene.indicators && gene.indicators.length > 0 && (
+            <div className="bg-surface-3/50 border border-white/5 rounded-lg p-3 space-y-2">
+              <p className="text-[9px] text-gray-600 uppercase tracking-wider">Indicators</p>
+              <div className="space-y-2">
+                {gene.indicators.map((ind, idx) => {
+                  const hasParams = ind.parameters && Object.keys(ind.parameters).length > 0;
+                  return (
+                    <div key={`ind-${idx}`} className="bg-surface-2/50 border border-white/5 rounded p-2">
+                      <div className="flex items-start justify-between gap-2 mb-1">
+                        <div>
+                          <p className="text-xs font-mono text-gray-300">{ind.type}</p>
+                          <p className="text-[8px] text-gray-600">ID: {ind.instance_id ?? '—'}</p>
+                        </div>
+                        <span className="text-[9px] text-gray-600">w: {(ind.weight ?? 1).toFixed(2)}</span>
+                      </div>
+                      {hasParams && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2">
+                          {Object.entries(ind.parameters).map(([key, val]) => {
+                            const overrideKey = `indicators.${idx}.parameters.${key}`;
+                            const currentVal = (parameterOverrides[overrideKey] ?? val) as any;
+                            return (
+                              <div key={`${idx}-${key}`} className="flex flex-col gap-0.5">
+                                <label className="text-[8px] text-gray-600 uppercase">{key}</label>
+                                <input
+                                  type={typeof val === 'number' ? 'number' : 'text'}
+                                  value={String(currentVal)}
+                                  onChange={(e) => {
+                                    const parsed = typeof val === 'number'
+                                      ? parseFloat(e.target.value) || 0
+                                      : e.target.value;
+                                    setParameterOverrides((prev) => ({
+                                      ...prev,
+                                      [overrideKey]: parsed,
+                                    }));
+                                  }}
+                                  className="bg-surface-1 border border-white/10 rounded px-1.5 py-0.5 text-[10px] font-mono text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
+                                />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ── ROI Table ── */}
+          {gene.minimal_roi && Object.keys(gene.minimal_roi).length > 0 && (
+            <div className="bg-surface-3/50 border border-white/5 rounded-lg p-3 space-y-2">
               <button
                 type="button"
-                onClick={() => setTrailingStop(!trailingStop)}
-                className={[
-                  'flex items-center gap-2 px-3 py-1.5 rounded border text-xs transition-colors',
-                  trailingStop
-                    ? 'bg-accent/20 border-accent/30 text-accent'
-                    : 'bg-surface-2 border-white/10 text-gray-400',
-                ].join(' ')}
+                onClick={() => setShowROITable(!showROITable)}
+                className="flex items-center gap-2 text-[9px] text-gray-600 uppercase tracking-wider hover:text-gray-400 transition-colors"
               >
-                <span className={[
-                  'w-3.5 h-3.5 rounded-full border-2 transition-colors',
-                  trailingStop ? 'bg-accent border-accent' : 'bg-transparent border-gray-500',
-                ].join(' ')} />
-                {trailingStop ? 'Enabled' : 'Disabled'}
+                {showROITable ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                ROI Table
               </button>
+              {showROITable && (
+                <div className="space-y-2">
+                  {Object.entries(gene.minimal_roi).map(([timeStr, roi]) => {
+                    const overrideKey = `minimal_roi.${timeStr}`;
+                    const currentVal = parameterOverrides[overrideKey] ?? roi;
+                    return (
+                      <div key={`roi-${timeStr}`} className="flex items-center gap-2">
+                        <span className="text-[9px] text-gray-600 w-12">{timeStr}m</span>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={String(currentVal)}
+                          onChange={(e) => {
+                            setParameterOverrides((prev) => ({
+                              ...prev,
+                              [overrideKey]: parseFloat(e.target.value) || 0,
+                            }));
+                          }}
+                          className="flex-1 bg-surface-2 border border-white/10 rounded px-2 py-1 text-[10px] font-mono text-gray-200 focus:outline-none focus:ring-1 focus:ring-accent/50"
+                        />
+                        <span className="text-[9px] text-gray-600">
+                          {((currentVal as number) * 100).toFixed(2)}%
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
-            <div className="col-span-2 text-[10px] text-gray-600 self-end pb-1">
-              All other parameters (ROI table, indicators, conditions) are inherited from the strategy gene.
-            </div>
+          )}
+
+          {/* ── Info ── */}
+          <div className="text-[9px] text-gray-600 bg-surface-1/50 border border-white/5 rounded p-2">
+            💡 Override indicator parameters above and they'll be applied to the backtest. Leave unchanged to use defaults from the strategy gene.
           </div>
         </div>
       )}
