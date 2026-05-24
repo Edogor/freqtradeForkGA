@@ -175,6 +175,21 @@ def main(argv: list[str] | None = None) -> int:
     db_path = db_sub.add_parser("path", help="Print absolute DB path")
     db_init = db_sub.add_parser("init", help="Create or upgrade the schema in-place")
 
+    # --- holdout (T1.2) --------------------------------------------------
+    p_h = sub.add_parser("holdout", help="Out-of-time holdout tooling (T1.2)")
+    h_sub = p_h.add_subparsers(dest="holdout_cmd")
+    h_check = h_sub.add_parser("check", help="Show how the lockbox would clip a config")
+    h_check.add_argument("config", help="Path to YAML config file")
+    h_run = h_sub.add_parser("run", help="Backtest HoF entries on the holdout timerange")
+    h_run.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_run.add_argument("--config", required=True, help="YAML config to drive the backtester")
+    h_run.add_argument("--timerange", default=None,
+                       help="Holdout timerange (YYYYMMDD-YYYYMMDD). Defaults to "
+                            "the one computed from holdout.lock_start in the config.")
+    h_run.add_argument("--top", type=int, default=10)
+    h_run.add_argument("--out", default=None, help="Report output path (default: next to HoF)")
+    h_run.add_argument("--csv", default=None, help="Optional CSV companion path")
+
     args = parser.parse_args(argv)
 
     # Setup logging
@@ -209,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_hof(args)
         elif args.command == "db":
             return _cmd_db(args)
+        elif args.command == "holdout":
+            return _cmd_holdout(args)
         else:
             parser.print_help()
             return 1
@@ -717,4 +734,44 @@ def _cmd_db(args) -> int:
         return 0
 
     print("Usage: python -m genetic_algorithm db {runs|show|top|path|init}")
+    return 1
+
+
+def _cmd_holdout(args) -> int:
+    """T1.2 — Out-of-time holdout tooling."""
+    from genetic_algorithm.tools import holdout as holdout_tools
+    import yaml as _yaml
+    from pathlib import Path as _Path
+
+    if args.holdout_cmd == "check":
+        with open(args.config, "r") as f:
+            cfg = _yaml.safe_load(f) or {}
+        info = holdout_tools.check_lockbox(cfg)
+        print(json.dumps(info, indent=2))
+        return 0
+
+    if args.holdout_cmd == "run":
+        with open(args.config, "r") as f:
+            cfg = _yaml.safe_load(f) or {}
+        # Resolve the holdout timerange: CLI flag wins; else derive from lockbox.
+        holdout_tr = args.timerange
+        if not holdout_tr:
+            info = holdout_tools.check_lockbox(cfg)
+            holdout_tr = info.get("holdout_timerange")
+        if not holdout_tr:
+            print("ERROR: no --timerange and no holdout.lock_start in config.")
+            return 2
+
+        hof_file = _Path(args.hof_file)
+        report = holdout_tools.run_holdout(hof_file, holdout_tr, cfg, top_n=args.top)
+        out = _Path(args.out) if args.out else holdout_tools.default_report_path(hof_file)
+        holdout_tools.write_report(report, out)
+        print(f"Wrote holdout report → {out}")
+        if args.csv:
+            holdout_tools.write_report_csv(report, _Path(args.csv))
+            print(f"Wrote CSV companion → {args.csv}")
+        print(json.dumps(report.summary, indent=2))
+        return 0
+
+    print("Usage: python -m genetic_algorithm holdout {check|run}")
     return 1

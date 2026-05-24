@@ -133,6 +133,19 @@ class RunEngine:
 
     def _setup(self, resume_from):
         """Pre-loop initialisation: diagnostics, monitor, population, pareto."""
+        # T1.2 — enforce the holdout lockbox *before* anything else reads
+        # the training timerange.  This guarantees the GA can never train
+        # on data reserved for ex-post hold-out validation.
+        try:
+            from genetic_algorithm.tools.holdout import enforce_lockbox
+            lockbox = enforce_lockbox(self.ga.config)
+            if lockbox.applied and lockbox.holdout_timerange:
+                self.ga.config.setdefault("holdout", {})["_resolved_timerange"] = (
+                    lockbox.holdout_timerange
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.warning(f"[HOLDOUT] Lockbox enforcement failed: {exc}")
+
         self.ga.diagnostics.start_run(self.ga.config)
         self.ga.monitor.start(self.ga.config)
 
