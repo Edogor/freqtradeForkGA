@@ -133,6 +133,19 @@ class RunEngine:
 
     def _setup(self, resume_from):
         """Pre-loop initialisation: diagnostics, monitor, population, pareto."""
+        # T2.7 — resolve the cost profile *before* anything else reads
+        # backtesting.fee / slippage so every evaluator (and the
+        # snapshotted config) sees the same realistic values.
+        try:
+            from genetic_algorithm.evaluation.cost_profile import apply_profile_to_config
+            resolved = apply_profile_to_config(self.ga.config)
+            self.logger.info(
+                f"[COSTS] profile={resolved['profile_name']} fee={resolved['fee']:.5f} "
+                f"slippage_pct={resolved['slippage_pct']:.5f}"
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            self.logger.warning(f"[COSTS] Profile resolution failed: {exc}")
+
         self.ga.diagnostics.start_run(self.ga.config)
         self.ga.monitor.start(self.ga.config)
 
