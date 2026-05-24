@@ -13,10 +13,16 @@ from genetic_algorithm.core.individual import Individual
 from genetic_algorithm.core.strategy_gene import StrategyGene
 
 
-# ---------- Module-level configuration (set once from GA config) ----------
+# Module-level configuration (set once from GA config) ----------
 # Behavioral distance weight: 0 = pure structural, 1 = pure behavioral.
 # Modified at runtime by GeneticAlgorithm.__init__() when the config is loaded.
 _BEHAVIORAL_DISTANCE_WEIGHT: float = 0.0
+
+# T3.5 — Genome-Distance Niching toggle.
+# 'legacy'    : Original coarse structural distance (set-of-types based).
+# 'genome_v2' : New richer distance — parameters + condition graph.
+# 'blend'     : 0.5 * legacy + 0.5 * genome_v2 (transition mode).
+_GENOME_DISTANCE_MODE: str = "legacy"
 
 
 @dataclass
@@ -119,6 +125,10 @@ def calculate_strategy_distance(ind1: Individual, ind2: Individual) -> float:
     module-level ``_BEHAVIORAL_DISTANCE_WEIGHT`` (0 = pure structural,
     1 = pure behavioral, default 0).
 
+    The structural distance metric itself is selected by
+    ``_GENOME_DISTANCE_MODE`` ('legacy' | 'genome_v2' | 'blend') —
+    see T3.5 in the GA roadmap.
+
     Args:
         ind1: First individual
         ind2: Second individual
@@ -126,7 +136,21 @@ def calculate_strategy_distance(ind1: Individual, ind2: Individual) -> float:
     Returns:
         Distance score (0 = identical, higher = more different)
     """
-    # --- Structural distance (original) ---
+    # --- Structural distance ---
+    structural = _structural_distance(ind1, ind2)
+
+    # --- Blend with behavioral distance if enabled ---
+    bw = _BEHAVIORAL_DISTANCE_WEIGHT
+    if bw > 0:
+        bd = calculate_behavioral_distance(ind1, ind2)
+        if bd is not None:
+            return (1.0 - bw) * structural + bw * bd
+    return structural
+
+
+def _legacy_structural_distance(ind1: Individual, ind2: Individual) -> float:
+    """Original coarse structural distance — set-of-indicator-types,
+    condition counts, timeframe, stoploss magnitude, trailing flag."""
     gene1 = ind1.strategy_gene
     gene2 = ind2.strategy_gene
 
@@ -157,13 +181,21 @@ def calculate_strategy_distance(ind1: Individual, ind2: Individual) -> float:
     if gene1.trailing_stop != gene2.trailing_stop:
         structural += 0.15
 
-    # --- Blend with behavioral distance if enabled ---
-    bw = _BEHAVIORAL_DISTANCE_WEIGHT
-    if bw > 0:
-        bd = calculate_behavioral_distance(ind1, ind2)
-        if bd is not None:
-            return (1.0 - bw) * structural + bw * bd
     return structural
+
+
+def _structural_distance(ind1: Individual, ind2: Individual) -> float:
+    """Dispatch the configured structural distance metric."""
+    mode = (_GENOME_DISTANCE_MODE or "legacy").lower()
+    if mode == "genome_v2":
+        from genetic_algorithm.core.genome_distance import calculate_genome_distance
+        return calculate_genome_distance(ind1, ind2)
+    if mode == "blend":
+        from genetic_algorithm.core.genome_distance import calculate_genome_distance
+        legacy = _legacy_structural_distance(ind1, ind2)
+        v2 = calculate_genome_distance(ind1, ind2)
+        return 0.5 * legacy + 0.5 * v2
+    return _legacy_structural_distance(ind1, ind2)
 
 
 def calculate_pairwise_distances(individuals: List[Individual]) -> List[List[float]]:
