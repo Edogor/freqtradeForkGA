@@ -119,6 +119,47 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8000)
 
+    # --- hof (T1.1 + T1.6) -----------------------------------------------
+    # Replay / stress-test Hall-of-Fame entries with arbitrary cost settings.
+    p_hof = sub.add_parser("hof", help="Hall-of-Fame replay, stress, list, show")
+    h_sub = p_hof.add_subparsers(dest="hof_cmd")
+
+    h_list = h_sub.add_parser("list", help="List entries in a HoF file")
+    h_list.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_list.add_argument("--limit", type=int, default=10)
+
+    h_show = h_sub.add_parser("show", help="Show a single HoF entry by id")
+    h_show.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_show.add_argument("entry_id", help="Entry id (e.g. hof_abc123def456)")
+
+    h_replay = h_sub.add_parser("replay", help="Re-backtest HoF entries with custom cost settings")
+    h_replay.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_replay.add_argument("--config", required=True, help="Base config (path or preset name) — supplies pairs/timerange defaults")
+    h_replay.add_argument("--fee", type=float, default=None, help="Override fee (e.g. 0.0015)")
+    h_replay.add_argument("--slippage", type=float, default=None, help="Override slippage")
+    h_replay.add_argument("--timerange", default=None, help="Override timerange (YYYYMMDD-YYYYMMDD)")
+    h_replay.add_argument("--pair", action="append", default=None, help="Override pair list (repeatable)")
+    h_replay.add_argument("--entry-id", action="append", default=None, help="Limit to specific entry id(s)")
+    h_replay.add_argument("--top", type=int, default=None, help="Replay only the top-N entries")
+    h_replay.add_argument("--min-fitness", type=float, default=None, help="Skip entries below this fitness")
+    h_replay.add_argument("--out", default=None, help="Write CSV report to this path")
+
+    h_stress = h_sub.add_parser("stress", help="Cost-sensitivity grid sweep (T1.6)")
+    h_stress.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_stress.add_argument("--config", required=True, help="Base config (path or preset name)")
+    h_stress.add_argument("--fees", default="0.0005,0.001,0.0015,0.002",
+                          help="Comma-separated fee grid")
+    h_stress.add_argument("--slippages", default="0.0,0.0005,0.001,0.002",
+                          help="Comma-separated slippage grid")
+    h_stress.add_argument("--max-open-trades", default=None,
+                          help="Comma-separated max_open_trades grid (optional)")
+    h_stress.add_argument("--timerange", default=None)
+    h_stress.add_argument("--pair", action="append", default=None)
+    h_stress.add_argument("--entry-id", action="append", default=None)
+    h_stress.add_argument("--top", type=int, default=None)
+    h_stress.add_argument("--min-fitness", type=float, default=None)
+    h_stress.add_argument("--out", default=None, help="Write CSV report to this path")
+
     args = parser.parse_args(argv)
 
     # Setup logging
@@ -149,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_config(args)
         elif args.command == "serve":
             return _cmd_serve(args)
+        elif args.command == "hof":
+            return _cmd_hof(args)
         else:
             parser.print_help()
             return 1
@@ -542,3 +585,60 @@ def _detect_ga_type(config: dict) -> str:
     if config.get("island_model", {}).get("enabled"):
         return "island"
     return "standard"
+
+
+def _cmd_hof(args) -> int:
+    """T1.1 + T1.6 — Hall-of-Fame replay / stress / list / show."""
+    from genetic_algorithm.tools import hof_replay as hr
+
+    hof_path = Path(args.hof_file)
+
+    if args.hof_cmd == "list":
+        print(hr.list_hof_entries(hof_path, limit=args.limit))
+        return 0
+
+    if args.hof_cmd == "show":
+        print(hr.show_hof_entry(hof_path, args.entry_id))
+        return 0
+
+    if args.hof_cmd == "replay":
+        config = hr.load_base_config(args.config)
+        results = hr.replay_hof_file(
+            hof_path, config,
+            fee=args.fee, slippage=args.slippage,
+            timerange=args.timerange, pairs=args.pair,
+            entry_ids=args.entry_id, top_n=args.top,
+            min_fitness=args.min_fitness,
+        )
+        print(hr.render_replay_table(results))
+        if args.out:
+            hr.write_replay_csv(results, Path(args.out))
+            print(f"\nCSV written to {args.out}")
+        # Exit non-zero if any replay both failed AND the original was successful.
+        bad = [r for r in results if not r.success]
+        return 0 if not bad else 2
+
+    if args.hof_cmd == "stress":
+        config = hr.load_base_config(args.config)
+        fees = [float(x) for x in args.fees.split(",") if x.strip()]
+        slippages = [float(x) for x in args.slippages.split(",") if x.strip()]
+        mot_grid = (
+            [int(x) for x in args.max_open_trades.split(",") if x.strip()]
+            if args.max_open_trades else None
+        )
+        reports = hr.stress_hof_file(
+            hof_path, config,
+            fees=fees, slippages=slippages,
+            max_open_trades_grid=mot_grid,
+            entry_ids=args.entry_id, top_n=args.top,
+            min_fitness=args.min_fitness,
+            timerange=args.timerange, pairs=args.pair,
+        )
+        print(hr.render_stress_table(reports))
+        if args.out:
+            hr.write_stress_csv(reports, Path(args.out))
+            print(f"\nCSV written to {args.out}")
+        return 0
+
+    print("Usage: python -m genetic_algorithm hof {list|show|replay|stress} ...")
+    return 1
