@@ -1,0 +1,61 @@
+# MAP-Elites Quality-Diversity Template — T3.2
+#
+# This template enables the behavioral MAP-Elites archive that preserves
+# the best strategy in each behavior niche (defined by trade frequency ×
+# average hold duration).  The archive doubles as a diversity-aware Hall
+# of Fame: use ``archive.to_hall_of_fame()`` to export the grid as the
+# final result set instead of the standard top-N-by-fitness HoF.
+#
+# Pair with island model + NSGA-II for best quality-diversity coverage.
+
+genetic_algorithm:
+  population_size: 80
+  generations: 50
+  mode: nsga2
+  crossover_rate: 0.7
+  mutation_rate: 0.25
+  fitness_sharing: true
+  sharing_radius: 0.30
+  # Genome-distance niching from T3.5 complements MAP-Elites:
+  # one preserves *behavioral* diversity (MAP-Elites), the other
+  # preserves *genotypic* diversity (fitness sharing).
+  genome_distance_mode: genome_v2
+
+  # Random injection helps fill empty MAP-Elites cells.
+  random_immigrants: 6
+
+map_elites:
+  enabled: true
+  # 5 × 5 = 25 cells.  Increase for finer behavioral resolution at the
+  # cost of more random injections to keep cells filled.
+  frequency_bins: 5
+  duration_bins: 5
+  # Fitness bonus for placing in an empty cell (added to selection
+  # fitness before tournament).  Keep small to avoid hijacking selection.
+  exploration_bonus: 0.05
+  # Strategies sampled from diverse cells per generation for migration
+  # and diversity injection.
+  injection_count: 3
+  # Bin edges (override if your strategies have very different freq/hold
+  # distributions; defaults work for crypto 5m-1h timeframes).
+  frequency_edges: [0, 2, 5, 10, 25]
+  duration_edges: [0, 1, 4, 12, 48]
+
+# NSGA-II objectives — quality-diversity works best when fitness is
+# multi-objective so the grid can host non-dominated trade-offs.
+nsga2:
+  objectives:
+    - name: profit
+      direction: maximize
+    - name: sharpe_ratio
+      direction: maximize
+    - name: max_drawdown
+      direction: minimize
+
+parallel_evaluation:
+  enabled: true
+  # T3.9 thread backend pairs well: shared FitnessEvaluator cache,
+  # crash-safe even when a single strategy stalls.
+  backend: thread
+  num_workers: 4
+  backtest_timeout: 120

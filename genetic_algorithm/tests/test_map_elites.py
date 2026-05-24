@@ -302,3 +302,96 @@ class TestSerialization:
         assert 'occupancy' in report
         assert 'filled_cells' in report
         assert 'total_cells' in report
+
+
+# =============================================================================
+# T3.2 — HALL-OF-FAME EXPORT
+# =============================================================================
+
+
+class TestHallOfFameExport:
+    def test_empty_archive_returns_empty_list(self):
+        archive = MAPElitesArchive(_default_config())
+        assert archive.to_hall_of_fame() == []
+        assert archive.to_hall_of_fame(n=5) == []
+
+    def test_returns_all_cells_by_default(self):
+        archive = MAPElitesArchive(_default_config())
+        # Three distinct behaviors → three cells
+        inds = [
+            _make_ind(fitness=0.9, trade_count=3, avg_duration_hours=0.5),
+            _make_ind(fitness=0.7, trade_count=30, avg_duration_hours=8),
+            _make_ind(fitness=0.5, trade_count=80, avg_duration_hours=24),
+        ]
+        archive.update(inds)
+        hof = archive.to_hall_of_fame()
+        assert len(hof) == 3
+
+    def test_default_sorts_by_fitness_descending(self):
+        archive = MAPElitesArchive(_default_config())
+        inds = [
+            _make_ind(fitness=0.3, trade_count=3, avg_duration_hours=0.5),
+            _make_ind(fitness=0.9, trade_count=30, avg_duration_hours=8),
+            _make_ind(fitness=0.5, trade_count=80, avg_duration_hours=24),
+        ]
+        archive.update(inds)
+        hof = archive.to_hall_of_fame()
+        fitnesses = [i.fitness for i in hof]
+        assert fitnesses == sorted(fitnesses, reverse=True)
+
+    def test_n_limits_size(self):
+        archive = MAPElitesArchive(_default_config())
+        inds = [
+            _make_ind(fitness=0.9, trade_count=3, avg_duration_hours=0.5),
+            _make_ind(fitness=0.7, trade_count=30, avg_duration_hours=8),
+            _make_ind(fitness=0.5, trade_count=80, avg_duration_hours=24),
+        ]
+        archive.update(inds)
+        assert len(archive.to_hall_of_fame(n=2)) == 2
+        assert len(archive.to_hall_of_fame(n=0)) == 0
+
+    def test_cell_sort_order_is_deterministic(self):
+        archive = MAPElitesArchive(_default_config())
+        inds = [
+            _make_ind(fitness=0.5, trade_count=80, avg_duration_hours=24),
+            _make_ind(fitness=0.9, trade_count=3, avg_duration_hours=0.5),
+        ]
+        archive.update(inds)
+        a = archive.to_hall_of_fame(sort_by="cell")
+        b = archive.to_hall_of_fame(sort_by="cell")
+        assert [id(x) for x in a] == [id(x) for x in b]
+
+
+# =============================================================================
+# T3.2 — TEMPLATE FILE
+# =============================================================================
+
+
+class TestMapElitesTemplate:
+    def test_template_exists_and_loads(self):
+        import os
+        import yaml
+
+        here = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(here, "config", "templates", "map_elites.yaml")
+        assert os.path.exists(path), f"Missing template: {path}"
+        with open(path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["map_elites"]["enabled"] is True
+        assert cfg["map_elites"]["frequency_bins"] >= 2
+        assert cfg["map_elites"]["duration_bins"] >= 2
+        assert cfg["genetic_algorithm"]["genome_distance_mode"] == "genome_v2"
+        # Pairs with T3.9 thread backend
+        assert cfg["parallel_evaluation"]["backend"] == "thread"
+
+    def test_template_instantiates_archive(self):
+        import os
+        import yaml
+
+        here = os.path.dirname(os.path.dirname(__file__))
+        path = os.path.join(here, "config", "templates", "map_elites.yaml")
+        with open(path) as f:
+            cfg = yaml.safe_load(f)
+        archive = MAPElitesArchive(cfg)
+        assert archive.enabled
+        assert archive.total_cells == archive.freq_bins * archive.dur_bins
