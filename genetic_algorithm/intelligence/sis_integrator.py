@@ -1227,6 +1227,38 @@ class SISIntegrator:
 
         return synergy_weights
 
+    # ── T4.3 Anti-pattern penalty helpers ──────────────────────────────────────
+
+    def anti_pattern_penalty(self, indicators: List[str]) -> float:
+        """Multiplicative fitness penalty in [floor, 1.0] for an
+        indicator set.  Returns 1.0 when no anti-pattern graph is loaded
+        or no pairs match.  See ``intelligence.anti_pattern``.
+        """
+        if not self._anti_patterns:
+            return 1.0
+        from genetic_algorithm.intelligence.anti_pattern import (
+            anti_pattern_multiplier,
+        )
+        cfg = self._sis_config.get('anti_pattern', {}) or {}
+        scale = float(cfg.get('scale', 0.5))
+        floor = float(cfg.get('floor', 0.6))
+        return anti_pattern_multiplier(
+            indicators, self._anti_patterns, scale=scale, floor=floor
+        )
+
+    def explain_anti_pattern(self, indicators: List[str]) -> Dict[str, Any]:
+        """Diagnostics record describing matched anti-pattern pairs
+        and the resulting multiplier.  Empty pairs list when none."""
+        from genetic_algorithm.intelligence.anti_pattern import (
+            summarise_anti_patterns,
+        )
+        cfg = self._sis_config.get('anti_pattern', {}) or {}
+        scale = float(cfg.get('scale', 0.5))
+        floor = float(cfg.get('floor', 0.6))
+        return summarise_anti_patterns(
+            indicators, self._anti_patterns, scale=scale, floor=floor
+        )
+
     # ── Regime-archetype affinity ──────────────────────────────────────────────
 
     def _build_regime_archetype_affinity(self) -> None:
