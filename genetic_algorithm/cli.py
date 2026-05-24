@@ -160,6 +160,21 @@ def main(argv: list[str] | None = None) -> int:
     h_stress.add_argument("--min-fitness", type=float, default=None)
     h_stress.add_argument("--out", default=None, help="Write CSV report to this path")
 
+    # --- db (T1.3) -------------------------------------------------------
+    # Read-only inspector for the experiments SQLite DB.
+    p_db = sub.add_parser("db", help="Inspect the experiments database (T1.3)")
+    db_sub = p_db.add_subparsers(dest="db_cmd")
+    db_runs = db_sub.add_parser("runs", help="List runs")
+    db_runs.add_argument("--status", default=None)
+    db_runs.add_argument("--limit", type=int, default=25)
+    db_show = db_sub.add_parser("show", help="Show run details")
+    db_show.add_argument("run_id")
+    db_show.add_argument("--top", type=int, default=10, help="Show top-N strategies")
+    db_top = db_sub.add_parser("top", help="Top strategies across all runs")
+    db_top.add_argument("--limit", type=int, default=25)
+    db_path = db_sub.add_parser("path", help="Print absolute DB path")
+    db_init = db_sub.add_parser("init", help="Create or upgrade the schema in-place")
+
     args = parser.parse_args(argv)
 
     # Setup logging
@@ -192,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_serve(args)
         elif args.command == "hof":
             return _cmd_hof(args)
+        elif args.command == "db":
+            return _cmd_db(args)
         else:
             parser.print_help()
             return 1
@@ -641,4 +658,63 @@ def _cmd_hof(args) -> int:
         return 0
 
     print("Usage: python -m genetic_algorithm hof {list|show|replay|stress} ...")
+    return 1
+
+
+def _cmd_db(args) -> int:
+    """T1.3 — Inspect the experiments database."""
+    from genetic_algorithm.data.experiment_db import ExperimentDB
+    db = ExperimentDB()
+
+    if args.db_cmd == "path":
+        print(db.path.resolve())
+        return 0
+
+    if args.db_cmd == "init":
+        with db.session():
+            pass  # schema bootstrap happens inside connect()
+        print(f"Initialised schema at {db.path}")
+        return 0
+
+    if args.db_cmd == "runs":
+        rows = db.list_runs(status=args.status, limit=args.limit)
+        if not rows:
+            print("No runs found.")
+            return 0
+        print(f"{'run_id':<32}{'status':<10}{'fitness':>10}{'profit':>10}{'gens':>6}  started_at")
+        print("-" * 92)
+        for r in rows:
+            from datetime import datetime
+            ts = datetime.fromtimestamp(r['started_at']).strftime("%Y-%m-%d %H:%M")
+            print(f"{(r['run_id'] or '')[:32]:<32}{(r['status'] or '')[:10]:<10}"
+                  f"{(r['best_fitness'] or 0):>10.4f}"
+                  f"{(r['best_profit'] or 0):>10.2f}"
+                  f"{(r['generations_total'] or 0):>6}  {ts}")
+        return 0
+
+    if args.db_cmd == "show":
+        run = db.get_run(args.run_id)
+        if run is None:
+            print(f"Run not found: {args.run_id}")
+            return 1
+        print(json.dumps(run, indent=2, default=str))
+        print("\nTop strategies for this run:")
+        strats = db.get_strategies_for_run(args.run_id, limit=args.top)
+        for s in strats:
+            print(f"  rank={s['rank']} fit={s['fitness']:.4f} profit={s['profit']:.2f}"
+                  f" sharpe={s['sharpe']:.2f} dd={s['drawdown']:.2f}"
+                  f" pinned={'yes' if s['code_pinned'] else 'no'}  id={s['strategy_id']}")
+        return 0
+
+    if args.db_cmd == "top":
+        rows = db.top_strategies_overall(limit=args.limit)
+        print(f"{'strategy_id':<36}{'run':<24}{'fit':>10}{'profit':>10}{'sharpe':>8}{'dd':>8}")
+        print("-" * 96)
+        for s in rows:
+            print(f"{(s['strategy_id'] or '')[:36]:<36}{(s['run_id'] or '')[:24]:<24}"
+                  f"{(s['fitness'] or 0):>10.4f}{(s['profit'] or 0):>10.2f}"
+                  f"{(s['sharpe'] or 0):>8.2f}{(s['drawdown'] or 0):>8.2f}")
+        return 0
+
+    print("Usage: python -m genetic_algorithm db {runs|show|top|path|init}")
     return 1

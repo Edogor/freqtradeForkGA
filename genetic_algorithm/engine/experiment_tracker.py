@@ -39,6 +39,23 @@ class ExperimentTracker:
         self._started_at = time.time()
         self._event_path = self.run_dir / "events.jsonl"
         self._initialised = False
+        # T1.3 — Experiments DB writer.  ``None`` until first use; opened
+        # lazily so legacy callers without sqlite remain unaffected.
+        self._db = None  # type: Optional[Any]
+
+    def _get_db(self):
+        """Lazy-init the ExperimentDB writer (T1.3)."""
+        if self._db is False:
+            return None
+        if self._db is None:
+            try:
+                from genetic_algorithm.data.experiment_db import ExperimentDB
+                self._db = ExperimentDB()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug(f"[TRACKER] ExperimentDB unavailable: {exc}")
+                self._db = False  # type: ignore[assignment]
+                return None
+        return self._db
 
     def initialise(self):
         """Create run directory and write config. Call once at experiment start."""
@@ -50,6 +67,21 @@ class ExperimentTracker:
         self._atomic_write_yaml(config_path, self.config)
         self._append_event("STARTED", {"run_id": self.run_id})
         self._initialised = True
+        # T1.3 — register the run in the experiments DB.
+        db = self._get_db()
+        if db is not None:
+            try:
+                ga_cfg = self.config.get('genetic_algorithm', {})
+                generations_total = ga_cfg.get('generations')
+                db.record_run_start(
+                    self.run_id,
+                    name=self.run_id,
+                    ga_type=_detect_ga_type_from_config(self.config),
+                    generations_total=generations_total,
+                    config=self.config,
+                )
+            except Exception as exc:
+                logger.debug(f"[TRACKER] DB record_run_start failed: {exc}")
         logger.info(f"[TRACKER] Initialised run directory: {self.run_dir}")
 
     def save_generation(self, generation: int, stats, population, island_stats: Optional[List[Dict]] = None):
@@ -144,6 +176,29 @@ class ExperimentTracker:
             "best_fitness": result.get("best_fitness"),
             "total_generations": result.get("total_generations"),
         })
+        # T1.3 — persist completion + best individual into experiments DB.
+        db = self._get_db()
+        if db is not None:
+            try:
+                db.record_run_completion(
+                    self.run_id,
+                    best_fitness=result.get("best_fitness"),
+                    best_profit=(result.get("best_metrics") or {}).get("profit"),
+                    elapsed_seconds=result.get("elapsed_seconds"),
+                    status="completed",
+                )
+                if best_individual is not None:
+                    bi = result.get("best_individual") or {}
+                    db.record_strategy(
+                        self.run_id,
+                        strategy_id=f"{self.run_id}_best",
+                        rank=1,
+                        fitness=result.get("best_fitness"),
+                        metrics=result.get("best_metrics") or {},
+                        gene_dict=bi.get("strategy_gene") if isinstance(bi, dict) else None,
+                    )
+            except Exception as exc:
+                logger.debug(f"[TRACKER] DB record completion failed: {exc}")
         logger.info(f"[TRACKER] Final results saved to {path}")
 
     # ── Internal helpers ──────────────────────────────────────────
@@ -191,3 +246,12 @@ class ExperimentTracker:
                 f.write(json.dumps(event, default=str) + '\n')
         except Exception as e:
             logger.debug(f"[TRACKER] Failed to append event: {e}")
+
+
+def _detect_ga_type_from_config(config: Dict[str, Any]) -> str:
+    """Mirror of ``cli._detect_ga_type`` to avoid a circular import."""
+    if (config.get("generic_island_model") or {}).get("enabled"):
+        return "generic_island"
+    if (config.get("island_model") or {}).get("enabled"):
+        return "island"
+    return "standard"
