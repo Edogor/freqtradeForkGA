@@ -1,0 +1,398 @@
+{
+  "anti_patterns": {
+    "ADX": {
+      "MFI": 0.554
+    },
+    "AROON": {
+      "TEMA": 0.63,
+      "VROC": 0.535
+    },
+    "ATR": {
+      "CDL_DOJI": 0.574,
+      "DONCHIAN": 0.571,
+      "MACD": 0.551,
+      "MFI": 0.532,
+      "PSAR": 0.6,
+      "TEMA": 0.512,
+      "VROC": 0.632,
+      "WILLR": 0.488
+    },
+    "BBANDS": {
+      "ICHIMOKU": 0.596,
+      "MFI": 0.732,
+      "TEMA": 0.556,
+      "WILLR": 0.541
+    },
+    "CCI": {
+      "CDL_DOJI": 0.524,
+      "CDL_EVENINGSTAR": 0.512,
+      "DONCHIAN": 0.523,
+      "ICHIMOKU": 0.574,
+      "MFI": 0.522,
+      "TEMA": 0.608,
+      "VROC": 0.378,
+      "WILLR": 0.476
+    },
+    "CDL_3BLACKCROWS": {
+      "CDL_SHOOTINGSTAR": 0.524,
+      "MACD": 0.545,
+      "PSAR": 0.5
+    },
+    "CDL_DOJI": {
+      "ATR": 0.574,
+      "CCI": 0.524,
+      "RSI": 0.528,
+      "VROC": 0.489
+    },
+    "CDL_ENGULFING": {
+      "VROC": 0.512
+    },
+    "CDL_EVENINGSTAR": {
+      "CCI": 0.512,
+      "RSI": 0.512,
+      "SMA": 0.5,
+      "STOCH": 0.535
+    },
+    "CDL_HAMMER": {
+      "STOCH": 0.535,
+      "VROC": 0.524
+    },
+    "CDL_HARAMI": {
+      "STOCH": 0.556,
+      "VROC": 0.512
+    },
+    "CDL_SHOOTINGSTAR": {
+      "CDL_3BLACKCROWS": 0.524
+    },
+    "CMF": {
+      "EMA": 0.577,
+      "MACD": 0.51,
+      "STOCH": 0.377,
+      "VROC": 0.558
+    },
+    "DONCHIAN": {
+      "ATR": 0.571,
+      "CCI": 0.523,
+      "ICHIMOKU": 0.618,
+      "MFI": 0.488,
+      "RSI": 0.6,
+      "TEMA": 0.556
+    },
+    "EMA": {
+      "CMF": 0.577,
+      "VROC": 0.416
+    },
+    "ICHIMOKU": {
+      "BBANDS": 0.596,
+      "CCI": 0.574,
+      "DONCHIAN": 0.618,
+      "RSI": 0.535
+    },
+    "KAMA": {
+      "STOCH": 0.556,
+      "SUPERTREND": 0.512,
+      "VROC": 0.512
+    },
+    "MACD": {
+      "ATR": 0.551,
+      "CDL_3BLACKCROWS": 0.545,
+      "CMF": 0.51,
+      "VROC": 0.541,
+      "WILLR": 0.542
+    },
+    "MFI": {
+      "ADX": 0.554,
+      "ATR": 0.532,
+      "BBANDS": 0.732,
+      "CCI": 0.522,
+      "SMA": 0.618,
+      "STOCH": 0.585,
+      "TEMA": 0.512,
+      "VROC": 0.728
+    },
+    "PSAR": {
+      "ATR": 0.6,
+      "CDL_3BLACKCROWS": 0.5,
+      "RSI": 0.574,
+      "STOCH": 0.524,
+      "VROC": 0.556
+    },
+    "ROC": {
+      "RSI": 0.608
+    },
+    "RSI": {
+      "CDL_DOJI": 0.528,
+      "CDL_EVENINGSTAR": 0.512,
+      "DONCHIAN": 0.6,
+      "ICHIMOKU": 0.535,
+      "MFI": 0.506,
+      "PSAR": 0.574,
+      "ROC": 0.608,
+      "TEMA": 0.636
+    },
+    "SMA": {
+      "CDL_EVENINGSTAR": 0.5,
+      "MFI": 0.618,
+      "VROC": 0.423,
+      "WILLR": 0.446
+    },
+    "STOCH": {
+      "CDL_EVENINGSTAR": 0.535,
+      "CDL_HAMMER": 0.535,
+      "CDL_HARAMI": 0.556,
+      "KAMA": 0.556,
+      "MFI": 0.585,
+      "PSAR": 0.524,
+      "TEMA": 0.535,
+      "VROC": 0.512
+    },
+    "SUPERTREND": {
+      "KAMA": 0.512,
+      "VROC": 0.673
+    },
+    "TEMA": {
+      "AROON": 0.63,
+      "BBANDS": 0.556,
+      "CCI": 0.608,
+      "DONCHIAN": 0.556,
+      "MFI": 0.512,
+      "RSI": 0.636,
+      "STOCH": 0.535,
+      "VROC": 0.667
+    },
+    "VROC": {
+      "AROON": 0.535,
+      "ATR": 0.632,
+      "CMF": 0.558,
+      "MACD": 0.541,
+      "MFI": 0.728,
+      "PSAR": 0.556,
+      "SUPERTREND": 0.673,
+      "TEMA": 0.667
+    },
+    "VWAP": {
+      "VROC": 0.5
+    },
+    "WILLR": {
+      "ATR": 0.488,
+      "BBANDS": 0.541,
+      "CCI": 0.476,
+      "MACD": 0.542,
+      "SMA": 0.446
+    }
+  },
+  "indicator_enrichment": {
+    "ADX": 1.375,
+    "ADX_4H": 1.408,
+    "AROON": 0.684,
+    "ATR": 0.905,
+    "BBANDS": 1.265,
+    "CCI": 1.088,
+    "CDL_3BLACKCROWS": 0.329,
+    "CDL_3WHITESOLDIERS": 0.659,
+    "CDL_DARKCLOUD": 0.465,
+    "CDL_DOJI": 0.615,
+    "CDL_ENGULFING": 0.612,
+    "CDL_EVENINGSTAR": 0.552,
+    "CDL_HAMMER": 0.346,
+    "CDL_HARAMI": 0.389,
+    "CDL_MORNINGSTAR": 0.663,
+    "CDL_PIERCING": 0.84,
+    "CDL_SHOOTINGSTAR": 0.397,
+    "CMF": 0.701,
+    "DONCHIAN": 1.027,
+    "EMA": 1.021,
+    "ICHIMOKU": 0.466,
+    "KAMA": 0.354,
+    "MACD": 0.921,
+    "MFI": 0.31,
+    "OBV": 0.542,
+    "PSAR": 0.343,
+    "ROC": 1.364,
+    "RSI": 1.109,
+    "SAR": 1.435,
+    "SMA": 1.228,
+    "STOCH": 1.054,
+    "SUPERTREND": 0.797,
+    "TEMA": 0.304,
+    "VROC": 0.565,
+    "VWAP": 0.692,
+    "WILLR": 0.476
+  },
+  "metadata": {
+    "base_t1_rate": 0.0895,
+    "min_support": 5,
+    "n_t1": 424,
+    "n_total": 4738,
+    "weight_range": [
+      0.3,
+      2.0
+    ]
+  },
+  "operator_enrichment": {},
+  "synergy_graph": {
+    "ADX": {
+      "ATR": 1.336,
+      "BBANDS": 2.745,
+      "CCI": 1.731,
+      "EMA": 1.499,
+      "MACD": 1.416,
+      "RSI": 2.53,
+      "SMA": 1.648,
+      "STOCH": 2.551
+    },
+    "ADX_4H": {
+      "BBANDS": 1.629
+    },
+    "AROON": {
+      "CDL_EVENINGSTAR": 1.113,
+      "ICHIMOKU": 1.075,
+      "ROC": 2.176
+    },
+    "ATR": {
+      "ADX": 1.336,
+      "BBANDS": 1.45,
+      "CCI": 1.182,
+      "EMA": 1.541,
+      "RSI": 1.143,
+      "SMA": 2.008,
+      "STOCH": 1.086
+    },
+    "BBANDS": {
+      "ADX": 2.745,
+      "ADX_4H": 1.629,
+      "ATR": 1.45,
+      "EMA": 1.911,
+      "MACD": 1.275,
+      "RSI": 1.512,
+      "SMA": 2.158,
+      "SUPERTREND": 1.325
+    },
+    "CCI": {
+      "ADX": 1.731,
+      "BBANDS": 1.267,
+      "CDL_PIERCING": 1.199,
+      "EMA": 1.233,
+      "MACD": 1.263,
+      "ROC": 1.964,
+      "RSI": 1.86,
+      "SMA": 1.484
+    },
+    "CDL_DARKCLOUD": {
+      "DONCHIAN": 1.199,
+      "ROC": 1.039
+    },
+    "CDL_DOJI": {
+      "ROC": 2.087,
+      "SMA": 1.305
+    },
+    "CDL_ENGULFING": {
+      "DONCHIAN": 1.323,
+      "SUPERTREND": 1.199
+    },
+    "CDL_EVENINGSTAR": {
+      "AROON": 1.113,
+      "DONCHIAN": 1.049,
+      "ROC": 2.022
+    },
+    "CDL_MORNINGSTAR": {
+      "ROC": 1.199
+    },
+    "CDL_PIERCING": {
+      "CCI": 1.199,
+      "DONCHIAN": 1.247
+    },
+    "DONCHIAN": {
+      "CDL_DARKCLOUD": 1.199,
+      "CDL_ENGULFING": 1.323,
+      "CDL_EVENINGSTAR": 1.049,
+      "CDL_PIERCING": 1.247,
+      "ROC": 3.866,
+      "SUPERTREND": 1.033,
+      "VWAP": 1.47
+    },
+    "EMA": {
+      "ADX": 1.499,
+      "ATR": 1.541,
+      "BBANDS": 1.911,
+      "CCI": 1.233,
+      "MACD": 1.37,
+      "RSI": 1.455,
+      "SMA": 2.197,
+      "STOCH": 1.414
+    },
+    "ICHIMOKU": {
+      "AROON": 1.075,
+      "ROC": 1.412
+    },
+    "MACD": {
+      "ADX": 1.416,
+      "BBANDS": 1.275,
+      "CCI": 1.263,
+      "EMA": 1.37,
+      "RSI": 1.218,
+      "SMA": 1.374,
+      "STOCH": 1.073
+    },
+    "OBV": {
+      "ROC": 1.039
+    },
+    "ROC": {
+      "AROON": 2.176,
+      "CCI": 1.964,
+      "CDL_DOJI": 2.087,
+      "CDL_EVENINGSTAR": 2.022,
+      "DONCHIAN": 3.866,
+      "SAR": 2.059,
+      "SMA": 1.813,
+      "VWAP": 1.797
+    },
+    "RSI": {
+      "ADX": 2.53,
+      "ATR": 1.143,
+      "BBANDS": 1.512,
+      "CCI": 1.86,
+      "EMA": 1.455,
+      "MACD": 1.218,
+      "SMA": 1.243,
+      "STOCH": 1.694
+    },
+    "SAR": {
+      "ROC": 2.059
+    },
+    "SMA": {
+      "ADX": 1.648,
+      "ATR": 2.008,
+      "BBANDS": 2.158,
+      "CCI": 1.484,
+      "EMA": 2.197,
+      "MACD": 1.374,
+      "ROC": 1.813,
+      "STOCH": 1.726
+    },
+    "STOCH": {
+      "ADX": 2.551,
+      "ATR": 1.086,
+      "BBANDS": 1.266,
+      "EMA": 1.414,
+      "MACD": 1.073,
+      "RSI": 1.694,
+      "SMA": 1.726
+    },
+    "SUPERTREND": {
+      "BBANDS": 1.325,
+      "CDL_ENGULFING": 1.199,
+      "DONCHIAN": 1.033,
+      "RSI": 1.136,
+      "SMA": 1.259
+    },
+    "VWAP": {
+      "DONCHIAN": 1.47,
+      "ROC": 1.797,
+      "SMA": 1.039
+    },
+    "WILLR": {
+      "EMA": 1.006
+    }
+  }
+}

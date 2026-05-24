@@ -494,6 +494,41 @@ class SISIntegrator:
         self._pattern_enrichment: Dict[str, float] = {}
         self._pattern_operator_weights: Dict[str, float] = {}
         self._synergy_graph: Dict[str, Dict[str, float]] = dict(SYNERGY_GRAPH)
+
+        # T4.1 — Data-driven priors loaded from YAML/JSON (non-fatal).
+        # These override hardcoded baselines but are themselves overridden
+        # by PatternMiner if it was trained.
+        self._fallback_indicator_enrichment: Dict[str, float] = dict(SIS_INDICATOR_ENRICHMENT)
+        self._fallback_operator_enrichment: Dict[str, float] = dict(SIS_OPERATOR_ENRICHMENT)
+        self._anti_patterns: Dict[str, Dict[str, float]] = {}
+        priors_file = (
+            self._sis_config.get('priors_file')
+            or config.get('intelligence', {}).get('priors_file')
+        )
+        if priors_file:
+            try:
+                from genetic_algorithm.intelligence.prior_loader import (
+                    load_data_driven_priors,
+                )
+                ind, op, syn, anti = load_data_driven_priors(
+                    priors_file,
+                    base_indicator=self._fallback_indicator_enrichment,
+                    base_operator=self._fallback_operator_enrichment,
+                    base_synergy=self._synergy_graph,
+                )
+                self._fallback_indicator_enrichment = ind
+                self._fallback_operator_enrichment = op
+                self._synergy_graph = syn
+                self._anti_patterns = anti
+                self.logger.info(
+                    f"[SIS] Loaded data-driven priors from {priors_file}: "
+                    f"{len(ind)} indicators, {len(op)} operators, "
+                    f"{sum(len(v) for v in anti.values())} anti-pattern edges"
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"[SIS] Failed to load data-driven priors from {priors_file}: {e}"
+                )
         try:
             from genetic_algorithm.intelligence.pattern_mining import PatternMiner
             miner = PatternMiner.load(models_dir)
@@ -543,9 +578,9 @@ class SISIntegrator:
 
         # ── v3: Adaptive weight tracker ────────────────────────────────────────
         ind_prior = self._pattern_enrichment if self._pattern_enrichment \
-            else SIS_INDICATOR_ENRICHMENT
+            else self._fallback_indicator_enrichment
         op_prior = self._pattern_operator_weights if self._pattern_operator_weights \
-            else SIS_OPERATOR_ENRICHMENT
+            else self._fallback_operator_enrichment
         self._adaptive_weights = AdaptiveWeightTracker(
             ind_prior, op_prior,
             evidence_trust_max=self._evidence_trust_max,
@@ -1089,7 +1124,7 @@ class SISIntegrator:
         enrichment_source = self._adaptive_weights.get_blended_indicator_weights()
         if not enrichment_source:
             enrichment_source = self._pattern_enrichment if self._pattern_enrichment \
-                else SIS_INDICATOR_ENRICHMENT
+                else self._fallback_indicator_enrichment
 
         if base_weights:
             all_keys = set(enrichment_source.keys()) | set(base_weights.keys())
@@ -1155,7 +1190,7 @@ class SISIntegrator:
         source = self._adaptive_weights.get_blended_operator_weights()
         if not source:
             source = self._pattern_operator_weights if self._pattern_operator_weights \
-                else SIS_OPERATOR_ENRICHMENT
+                else self._fallback_operator_enrichment
 
         effective_scale = scale * state_params["weight_bias_strength"]
 
