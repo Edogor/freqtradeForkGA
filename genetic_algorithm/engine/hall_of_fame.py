@@ -28,7 +28,19 @@ DEFAULT_MAX_SIZE = 50
 
 @dataclass
 class HallOfFameEntry:
-    """A single hall of fame entry."""
+    """A single hall of fame entry.
+
+    ``strategy_code`` (T1.5 — Code Pinning):
+        Optional snapshot of the generated FreqTrade strategy Python code at
+        the moment of induction.  Pinning the code makes HoF entries fully
+        reproducible: future replays use *this exact* code, immune to drifts
+        in the indicator factory / code generator / library versions.
+        When absent (legacy entries) the replay tool will regenerate code
+        from ``strategy_gene_dict`` and emit a warning.
+    ``code_hash``: SHA-256 of the pinned code for fast equality checks.
+    ``code_pinned_version``: Free-form version tag of the producing toolchain
+        (``"v1"`` for the initial pinning format).
+    """
     strategy_gene_dict: Dict[str, Any]
     fitness: float
     metrics: Dict[str, Any]
@@ -37,16 +49,23 @@ class HallOfFameEntry:
     run_id: str = ""
     individual_id: int = 0
     entry_id: str = ""
-    
+    # T1.5 — Code Pinning
+    strategy_code: Optional[str] = None
+    code_hash: Optional[str] = None
+    code_pinned_version: Optional[str] = None
+
     def __post_init__(self):
-        """Generate a stable entry_id if not provided."""
+        """Generate a stable entry_id and (if code given) a code hash."""
         if not self.entry_id:
             import hashlib
             fp = json.dumps(self.strategy_gene_dict, sort_keys=True, default=str)
             self.entry_id = f"hof_{hashlib.sha256(fp.encode()).hexdigest()[:12]}"
-    
+        if self.strategy_code and not self.code_hash:
+            import hashlib
+            self.code_hash = hashlib.sha256(self.strategy_code.encode("utf-8")).hexdigest()
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             'id': self.entry_id,
             'strategy_gene': self.strategy_gene_dict,
             'fitness': self.fitness,
@@ -56,7 +75,12 @@ class HallOfFameEntry:
             'run_timestamp': self.run_timestamp,
             'run_id': self.run_id,
         }
-    
+        if self.strategy_code is not None:
+            d['strategy_code'] = self.strategy_code
+            d['code_hash'] = self.code_hash
+            d['code_pinned_version'] = self.code_pinned_version or "v1"
+        return d
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'HallOfFameEntry':
         return cls(
@@ -68,7 +92,14 @@ class HallOfFameEntry:
             run_id=data.get('run_id', ''),
             individual_id=data.get('individual_id', 0),
             entry_id=data.get('id', ''),
+            strategy_code=data.get('strategy_code'),
+            code_hash=data.get('code_hash'),
+            code_pinned_version=data.get('code_pinned_version'),
         )
+
+    def has_pinned_code(self) -> bool:
+        """True iff a code snapshot was stored with this entry."""
+        return self.strategy_code is not None and len(self.strategy_code) > 0
 
 
 class HallOfFame:
@@ -86,13 +117,18 @@ class HallOfFame:
                  directory: str = DEFAULT_HOF_DIR,
                  max_size: int = DEFAULT_MAX_SIZE,
                  min_fitness: float = 0.0,
-                 run_id: Optional[str] = None):
+                 run_id: Optional[str] = None,
+                 strategy_generator: Optional[Any] = None):
         """
         Args:
             directory: Directory to store hall of fame files.
             max_size: Maximum number of strategies to keep.
             min_fitness: Minimum fitness threshold to enter the hall.
             run_id: Optional run identifier; auto-generated from timestamp if omitted.
+            strategy_generator: Optional ``StrategyGenerator`` instance.  When
+                provided, every newly added HoF entry will receive a pinned
+                copy of its generated Python strategy code (T1.5).  Older
+                entries can be migrated via :meth:`pin_codes_for_all_entries`.
         """
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -101,6 +137,10 @@ class HallOfFame:
         self.entries: List[HallOfFameEntry] = []
         self._fingerprint_cache: set = set()
         self.run_id = run_id or f"run_{int(time.time())}"
+        # T1.5 — optional code pinner.  Stored as attribute so callers may
+        # set/replace it post-construction (e.g. legacy code paths that
+        # build the HoF before the generator exists).
+        self.strategy_generator = strategy_generator
         
         # Load existing hall of fame
         self._load()
@@ -220,6 +260,9 @@ class HallOfFame:
             # Check if it qualifies — use raw_fitness (pre-sharing) for true performance
             actual_fitness = getattr(ind, 'raw_fitness', None) or ind.fitness
             if len(self.entries) < self.max_size or actual_fitness > self.entries[-1].fitness:
+                # T1.5 — try to pin the generated strategy code so future
+                # replays are immune to code-generator / indicator drift.
+                pinned_code = self._try_pin_code(ind.strategy_gene)
                 entry = HallOfFameEntry(
                     strategy_gene_dict=gene_dict,
                     fitness=actual_fitness,
@@ -228,6 +271,8 @@ class HallOfFame:
                     run_timestamp=time.time(),
                     run_id=self.run_id,
                     individual_id=getattr(ind, 'id', 0) if hasattr(ind, 'id') else 0,
+                    strategy_code=pinned_code,
+                    code_pinned_version="v1" if pinned_code else None,
                 )
                 self.entries.append(entry)
                 self._fingerprint_cache.add(self._fingerprint(gene_dict))
@@ -307,6 +352,7 @@ class HallOfFame:
             'worst_fitness': self.entries[-1].fitness,
             'avg_fitness': sum(e.fitness for e in self.entries) / len(self.entries),
             'unique_runs': len(set(e.run_id for e in self.entries if e.run_id)),
+            'pinned_entries': sum(1 for e in self.entries if e.has_pinned_code()),
             'top_5': [
                 {
                     'fitness': round(e.fitness, 4),
@@ -314,7 +360,63 @@ class HallOfFame:
                     'sharpe': round(e.metrics.get('sharpe_ratio', 0), 2),
                     'generation': e.generation_found,
                     'run_id': e.run_id[:16],
+                    'pinned': e.has_pinned_code(),
                 }
                 for e in self.entries[:5]
             ],
         }
+
+    # -- T1.5 — Code Pinning helpers --------------------------------
+
+    def _try_pin_code(self, strategy_gene) -> Optional[str]:
+        """Generate strategy code via ``self.strategy_generator`` if set.
+
+        Returns the generated source on success, ``None`` if no generator is
+        attached or generation failed (failures are swallowed and logged so
+        that they never break the HoF write path).
+        """
+        if self.strategy_generator is None:
+            return None
+        try:
+            return self.strategy_generator.generate_strategy_code(strategy_gene)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(f"[HOF] Code pinning failed for individual: {exc}")
+            return None
+
+    def pin_codes_for_all_entries(self, strategy_generator: Any) -> int:
+        """Backfill pinned strategy code for every entry that lacks one.
+
+        Useful for migrating legacy HoF files in-place.  Returns the number
+        of entries that received a freshly generated code snapshot.
+        """
+        import hashlib as _hl
+        from genetic_algorithm.core.strategy_gene import StrategyGene
+
+        if strategy_generator is None:
+            return 0
+
+        added = 0
+        for entry in self.entries:
+            if entry.has_pinned_code():
+                continue
+            try:
+                gene = StrategyGene.from_dict(entry.strategy_gene_dict)
+                code = strategy_generator.generate_strategy_code(gene)
+                if code:
+                    entry.strategy_code = code
+                    entry.code_hash = _hl.sha256(code.encode("utf-8")).hexdigest()
+                    entry.code_pinned_version = "v1-backfill"
+                    added += 1
+            except Exception as exc:
+                logger.debug(f"[HOF] Backfill code pinning failed for {entry.entry_id}: {exc}")
+        if added > 0:
+            self._save()
+            logger.info(f"[HALL OF FAME] Pinned code for {added} legacy entries")
+        return added
+
+    def get_entry_by_id(self, entry_id: str) -> Optional[HallOfFameEntry]:
+        """Lookup a HoF entry by its stable ``entry_id`` (sha-prefixed)."""
+        for e in self.entries:
+            if e.entry_id == entry_id:
+                return e
+        return None

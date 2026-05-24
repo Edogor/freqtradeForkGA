@@ -239,13 +239,20 @@ class IslandModelEvolution:
         )
         self.mtf_weights = regime_det_cfg.get('mtf_weights', None)
 
-        # Shared hall of fame
+        # Shared hall of fame.  Attach a StrategyGenerator so newly added
+        # entries receive a pinned copy of their source code (T1.5).
+        from genetic_algorithm.genome.codegen import StrategyGenerator
         hof_cfg = self.config.get('hall_of_fame', {})
         hof_dir = hof_cfg.get('directory', 'genetic_algorithm/data/hall_of_fame')
+        try:
+            _hof_codegen = StrategyGenerator(self.config)
+        except Exception:
+            _hof_codegen = None
         self.hall_of_fame = HallOfFame(
             directory=hof_dir,
             max_size=hof_cfg.get('max_size', 50),
             min_fitness=hof_cfg.get('min_fitness', 0.0),
+            strategy_generator=_hof_codegen,
         )
 
         # ── Parallel island evolution ──

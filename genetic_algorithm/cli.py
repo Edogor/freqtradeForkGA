@@ -119,6 +119,77 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8000)
 
+    # --- hof (T1.1 + T1.6) -----------------------------------------------
+    # Replay / stress-test Hall-of-Fame entries with arbitrary cost settings.
+    p_hof = sub.add_parser("hof", help="Hall-of-Fame replay, stress, list, show")
+    h_sub = p_hof.add_subparsers(dest="hof_cmd")
+
+    h_list = h_sub.add_parser("list", help="List entries in a HoF file")
+    h_list.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_list.add_argument("--limit", type=int, default=10)
+
+    h_show = h_sub.add_parser("show", help="Show a single HoF entry by id")
+    h_show.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_show.add_argument("entry_id", help="Entry id (e.g. hof_abc123def456)")
+
+    h_replay = h_sub.add_parser("replay", help="Re-backtest HoF entries with custom cost settings")
+    h_replay.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_replay.add_argument("--config", required=True, help="Base config (path or preset name) — supplies pairs/timerange defaults")
+    h_replay.add_argument("--fee", type=float, default=None, help="Override fee (e.g. 0.0015)")
+    h_replay.add_argument("--slippage", type=float, default=None, help="Override slippage")
+    h_replay.add_argument("--timerange", default=None, help="Override timerange (YYYYMMDD-YYYYMMDD)")
+    h_replay.add_argument("--pair", action="append", default=None, help="Override pair list (repeatable)")
+    h_replay.add_argument("--entry-id", action="append", default=None, help="Limit to specific entry id(s)")
+    h_replay.add_argument("--top", type=int, default=None, help="Replay only the top-N entries")
+    h_replay.add_argument("--min-fitness", type=float, default=None, help="Skip entries below this fitness")
+    h_replay.add_argument("--out", default=None, help="Write CSV report to this path")
+
+    h_stress = h_sub.add_parser("stress", help="Cost-sensitivity grid sweep (T1.6)")
+    h_stress.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_stress.add_argument("--config", required=True, help="Base config (path or preset name)")
+    h_stress.add_argument("--fees", default="0.0005,0.001,0.0015,0.002",
+                          help="Comma-separated fee grid")
+    h_stress.add_argument("--slippages", default="0.0,0.0005,0.001,0.002",
+                          help="Comma-separated slippage grid")
+    h_stress.add_argument("--max-open-trades", default=None,
+                          help="Comma-separated max_open_trades grid (optional)")
+    h_stress.add_argument("--timerange", default=None)
+    h_stress.add_argument("--pair", action="append", default=None)
+    h_stress.add_argument("--entry-id", action="append", default=None)
+    h_stress.add_argument("--top", type=int, default=None)
+    h_stress.add_argument("--min-fitness", type=float, default=None)
+    h_stress.add_argument("--out", default=None, help="Write CSV report to this path")
+
+    # --- db (T1.3) -------------------------------------------------------
+    # Read-only inspector for the experiments SQLite DB.
+    p_db = sub.add_parser("db", help="Inspect the experiments database (T1.3)")
+    db_sub = p_db.add_subparsers(dest="db_cmd")
+    db_runs = db_sub.add_parser("runs", help="List runs")
+    db_runs.add_argument("--status", default=None)
+    db_runs.add_argument("--limit", type=int, default=25)
+    db_show = db_sub.add_parser("show", help="Show run details")
+    db_show.add_argument("run_id")
+    db_show.add_argument("--top", type=int, default=10, help="Show top-N strategies")
+    db_top = db_sub.add_parser("top", help="Top strategies across all runs")
+    db_top.add_argument("--limit", type=int, default=25)
+    db_path = db_sub.add_parser("path", help="Print absolute DB path")
+    db_init = db_sub.add_parser("init", help="Create or upgrade the schema in-place")
+
+    # --- holdout (T1.2) --------------------------------------------------
+    p_h = sub.add_parser("holdout", help="Out-of-time holdout tooling (T1.2)")
+    h_sub = p_h.add_subparsers(dest="holdout_cmd")
+    h_check = h_sub.add_parser("check", help="Show how the lockbox would clip a config")
+    h_check.add_argument("config", help="Path to YAML config file")
+    h_run = h_sub.add_parser("run", help="Backtest HoF entries on the holdout timerange")
+    h_run.add_argument("hof_file", help="Path to hall_of_fame.json")
+    h_run.add_argument("--config", required=True, help="YAML config to drive the backtester")
+    h_run.add_argument("--timerange", default=None,
+                       help="Holdout timerange (YYYYMMDD-YYYYMMDD). Defaults to "
+                            "the one computed from holdout.lock_start in the config.")
+    h_run.add_argument("--top", type=int, default=10)
+    h_run.add_argument("--out", default=None, help="Report output path (default: next to HoF)")
+    h_run.add_argument("--csv", default=None, help="Optional CSV companion path")
+
     args = parser.parse_args(argv)
 
     # Setup logging
@@ -149,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_config(args)
         elif args.command == "serve":
             return _cmd_serve(args)
+        elif args.command == "hof":
+            return _cmd_hof(args)
+        elif args.command == "db":
+            return _cmd_db(args)
+        elif args.command == "holdout":
+            return _cmd_holdout(args)
         else:
             parser.print_help()
             return 1
@@ -542,3 +619,159 @@ def _detect_ga_type(config: dict) -> str:
     if config.get("island_model", {}).get("enabled"):
         return "island"
     return "standard"
+
+
+def _cmd_hof(args) -> int:
+    """T1.1 + T1.6 — Hall-of-Fame replay / stress / list / show."""
+    from genetic_algorithm.tools import hof_replay as hr
+
+    hof_path = Path(args.hof_file)
+
+    if args.hof_cmd == "list":
+        print(hr.list_hof_entries(hof_path, limit=args.limit))
+        return 0
+
+    if args.hof_cmd == "show":
+        print(hr.show_hof_entry(hof_path, args.entry_id))
+        return 0
+
+    if args.hof_cmd == "replay":
+        config = hr.load_base_config(args.config)
+        results = hr.replay_hof_file(
+            hof_path, config,
+            fee=args.fee, slippage=args.slippage,
+            timerange=args.timerange, pairs=args.pair,
+            entry_ids=args.entry_id, top_n=args.top,
+            min_fitness=args.min_fitness,
+        )
+        print(hr.render_replay_table(results))
+        if args.out:
+            hr.write_replay_csv(results, Path(args.out))
+            print(f"\nCSV written to {args.out}")
+        # Exit non-zero if any replay both failed AND the original was successful.
+        bad = [r for r in results if not r.success]
+        return 0 if not bad else 2
+
+    if args.hof_cmd == "stress":
+        config = hr.load_base_config(args.config)
+        fees = [float(x) for x in args.fees.split(",") if x.strip()]
+        slippages = [float(x) for x in args.slippages.split(",") if x.strip()]
+        mot_grid = (
+            [int(x) for x in args.max_open_trades.split(",") if x.strip()]
+            if args.max_open_trades else None
+        )
+        reports = hr.stress_hof_file(
+            hof_path, config,
+            fees=fees, slippages=slippages,
+            max_open_trades_grid=mot_grid,
+            entry_ids=args.entry_id, top_n=args.top,
+            min_fitness=args.min_fitness,
+            timerange=args.timerange, pairs=args.pair,
+        )
+        print(hr.render_stress_table(reports))
+        if args.out:
+            hr.write_stress_csv(reports, Path(args.out))
+            print(f"\nCSV written to {args.out}")
+        return 0
+
+    print("Usage: python -m genetic_algorithm hof {list|show|replay|stress} ...")
+    return 1
+
+
+def _cmd_db(args) -> int:
+    """T1.3 — Inspect the experiments database."""
+    from genetic_algorithm.data.experiment_db import ExperimentDB
+    db = ExperimentDB()
+
+    if args.db_cmd == "path":
+        print(db.path.resolve())
+        return 0
+
+    if args.db_cmd == "init":
+        with db.session():
+            pass  # schema bootstrap happens inside connect()
+        print(f"Initialised schema at {db.path}")
+        return 0
+
+    if args.db_cmd == "runs":
+        rows = db.list_runs(status=args.status, limit=args.limit)
+        if not rows:
+            print("No runs found.")
+            return 0
+        print(f"{'run_id':<32}{'status':<10}{'fitness':>10}{'profit':>10}{'gens':>6}  started_at")
+        print("-" * 92)
+        for r in rows:
+            from datetime import datetime
+            ts = datetime.fromtimestamp(r['started_at']).strftime("%Y-%m-%d %H:%M")
+            print(f"{(r['run_id'] or '')[:32]:<32}{(r['status'] or '')[:10]:<10}"
+                  f"{(r['best_fitness'] or 0):>10.4f}"
+                  f"{(r['best_profit'] or 0):>10.2f}"
+                  f"{(r['generations_total'] or 0):>6}  {ts}")
+        return 0
+
+    if args.db_cmd == "show":
+        run = db.get_run(args.run_id)
+        if run is None:
+            print(f"Run not found: {args.run_id}")
+            return 1
+        print(json.dumps(run, indent=2, default=str))
+        print("\nTop strategies for this run:")
+        strats = db.get_strategies_for_run(args.run_id, limit=args.top)
+        for s in strats:
+            print(f"  rank={s['rank']} fit={s['fitness']:.4f} profit={s['profit']:.2f}"
+                  f" sharpe={s['sharpe']:.2f} dd={s['drawdown']:.2f}"
+                  f" pinned={'yes' if s['code_pinned'] else 'no'}  id={s['strategy_id']}")
+        return 0
+
+    if args.db_cmd == "top":
+        rows = db.top_strategies_overall(limit=args.limit)
+        print(f"{'strategy_id':<36}{'run':<24}{'fit':>10}{'profit':>10}{'sharpe':>8}{'dd':>8}")
+        print("-" * 96)
+        for s in rows:
+            print(f"{(s['strategy_id'] or '')[:36]:<36}{(s['run_id'] or '')[:24]:<24}"
+                  f"{(s['fitness'] or 0):>10.4f}{(s['profit'] or 0):>10.2f}"
+                  f"{(s['sharpe'] or 0):>8.2f}{(s['drawdown'] or 0):>8.2f}")
+        return 0
+
+    print("Usage: python -m genetic_algorithm db {runs|show|top|path|init}")
+    return 1
+
+
+def _cmd_holdout(args) -> int:
+    """T1.2 — Out-of-time holdout tooling."""
+    from genetic_algorithm.tools import holdout as holdout_tools
+    import yaml as _yaml
+    from pathlib import Path as _Path
+
+    if args.holdout_cmd == "check":
+        with open(args.config, "r") as f:
+            cfg = _yaml.safe_load(f) or {}
+        info = holdout_tools.check_lockbox(cfg)
+        print(json.dumps(info, indent=2))
+        return 0
+
+    if args.holdout_cmd == "run":
+        with open(args.config, "r") as f:
+            cfg = _yaml.safe_load(f) or {}
+        # Resolve the holdout timerange: CLI flag wins; else derive from lockbox.
+        holdout_tr = args.timerange
+        if not holdout_tr:
+            info = holdout_tools.check_lockbox(cfg)
+            holdout_tr = info.get("holdout_timerange")
+        if not holdout_tr:
+            print("ERROR: no --timerange and no holdout.lock_start in config.")
+            return 2
+
+        hof_file = _Path(args.hof_file)
+        report = holdout_tools.run_holdout(hof_file, holdout_tr, cfg, top_n=args.top)
+        out = _Path(args.out) if args.out else holdout_tools.default_report_path(hof_file)
+        holdout_tools.write_report(report, out)
+        print(f"Wrote holdout report → {out}")
+        if args.csv:
+            holdout_tools.write_report_csv(report, _Path(args.csv))
+            print(f"Wrote CSV companion → {args.csv}")
+        print(json.dumps(report.summary, indent=2))
+        return 0
+
+    print("Usage: python -m genetic_algorithm holdout {check|run}")
+    return 1
