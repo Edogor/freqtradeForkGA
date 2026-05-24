@@ -318,12 +318,37 @@ class GeneticAlgorithm:
         self.parallel_evaluator = None
         
         if self.parallel_enabled:
-            if is_parallel_available():
+            backend = (parallel_config.get('backend') or 'process').lower().strip()
+            num_workers = parallel_config.get('num_workers')
+            if backend == 'thread':
+                # T3.9 — crash-safe in-process thread pool
+                from genetic_algorithm.evaluation.thread_pool_evaluator import (
+                    ThreadPoolEvaluator,
+                )
+                self.parallel_evaluator = ThreadPoolEvaluator(
+                    self.config, num_workers=num_workers
+                )
+                self.logger.info("=" * 70)
+                self.logger.info("PARALLEL EVALUATION ENABLED (backend=thread, T3.9)")
+                self.logger.info(f"  Threads: {self.parallel_evaluator.num_workers}")
+                self.logger.info("  Crash-safe in-process pool; expect 2-3x speedup")
+                self.logger.info("=" * 70)
+            elif backend == 'sequential':
+                from genetic_algorithm.evaluation.thread_pool_evaluator import (
+                    SequentialEvaluator,
+                )
+                self.parallel_evaluator = SequentialEvaluator(
+                    self.config, num_workers=num_workers
+                )
+                self.logger.info("=" * 70)
+                self.logger.info("PARALLEL EVALUATION DISABLED (backend=sequential, T3.9)")
+                self.logger.info("=" * 70)
+            elif is_parallel_available():
                 self.parallel_evaluator = ParallelEvaluator(
                     self.config,
-                    num_workers=parallel_config.get('num_workers'))
+                    num_workers=num_workers)
                 self.logger.info("=" * 70)
-                self.logger.info("PARALLEL EVALUATION ENABLED")
+                self.logger.info("PARALLEL EVALUATION ENABLED (backend=process)")
                 self.logger.info(f"  Workers: {self.parallel_evaluator.num_workers}")
                 self.logger.info("  Expect 3-6x speedup on multi-core systems")
                 self.logger.info("=" * 70)
