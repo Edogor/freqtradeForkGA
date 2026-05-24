@@ -227,10 +227,17 @@ class GenericIslandModelEvolution:
         self.generation_stats: Dict[str, list] = {}
         self.migration_history: List[GenericMigrationEvent] = []
         hof_cfg = self.config.get('hall_of_fame', {})
+        # T1.5 — Pin generated strategy code into HoF entries.
+        from genetic_algorithm.genome.codegen import StrategyGenerator
+        try:
+            _hof_codegen = StrategyGenerator(self.config)
+        except Exception:
+            _hof_codegen = None
         self.hall_of_fame = HallOfFame(
             directory=hof_cfg.get('directory', 'genetic_algorithm/data/hall_of_fame'),
             max_size=hof_cfg.get('max_size', 50),
             min_fitness=hof_cfg.get('min_fitness', 0.0),
+            strategy_generator=_hof_codegen,
         )
 
         # External migration (cross-machine strategy exchange)

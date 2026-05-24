@@ -364,7 +364,8 @@ class GeneticAlgorithm:
         hof_max = hof_config.get('max_size', 50)
         hof_min_fitness = hof_config.get('min_fitness', 0.0)
         self.hall_of_fame = HallOfFame(
-            directory=hof_dir, max_size=hof_max, min_fitness=hof_min_fitness)
+            directory=hof_dir, max_size=hof_max, min_fitness=hof_min_fitness,
+            strategy_generator=getattr(self, 'strategy_generator', None))
         self.hof_inject_count = hof_config.get('inject_count', 3)
         if self.hall_of_fame.entries:
             self.logger.info(
