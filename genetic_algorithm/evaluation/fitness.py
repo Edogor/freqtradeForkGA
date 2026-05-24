@@ -1161,6 +1161,29 @@ class FitnessEvaluator:
         except Exception as _exc:  # pragma: no cover - defensive
             logger.debug(f"[TAIL] compute_tail_risk_metrics failed: {_exc}")
 
+        # T2.6 — Bootstrap-CI conservative profit replacement.
+        # Only runs when fitness.use_bootstrap_ci=true.  Stores the raw
+        # profit in `profit_raw` and overwrites `profit` with the
+        # lower-CI bootstrap total of trade returns scaled to %.
+        try:
+            from genetic_algorithm.evaluation.bootstrap_ci import (
+                is_bootstrap_ci_enabled, bootstrap_ci_settings, bootstrap_lower_ci,
+            )
+            if is_bootstrap_ci_enabled(self.config):
+                settings = bootstrap_ci_settings(self.config)
+                trade_returns_pct = [r * 100.0 for r in (result.trade_profit_ratios or [])]
+                lower = bootstrap_lower_ci(
+                    trade_returns_pct,
+                    n_iter=settings['n_iter'],
+                    ci=settings['ci'],
+                    seed=settings['seed'],
+                )
+                metrics['profit_raw'] = metrics.get('profit', 0)
+                metrics['profit_lower_ci'] = lower
+                metrics['profit'] = lower
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug(f"[BOOTSTRAP_CI] computation failed: {_exc}")
+
         return metrics
     
     def calculate_fitness(self, metrics: Dict[str, float], strategy_gene: StrategyGene = None) -> float:
