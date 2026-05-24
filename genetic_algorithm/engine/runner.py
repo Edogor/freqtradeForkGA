@@ -459,11 +459,26 @@ class RunEngine:
                     if population.individuals
                     else None
                 )
-                coevo_genes = ga._coevolution.run(template_gene=template)
-                if coevo_genes:
-                    self.logger.info(
-                        f"[COEVOLUTION] Produced {len(coevo_genes)} modular strategies"
+                coevo_cfg = ga.config.get("coevolution", {})
+                inject_into_hof = coevo_cfg.get("inject_into_hof", False)
+                if inject_into_hof and hasattr(ga, "hall_of_fame") and ga.hall_of_fame:
+                    # T3.4: evaluate composed strategies and feed them into HoF
+                    # instead of dropping them on the floor.
+                    ga._coevolution.run(template_gene=template)
+                    individuals = ga._coevolution.evaluate_composed_for_hof(
+                        template_gene=template,
+                        n=coevo_cfg.get("hof_inject_count", 5),
                     )
+                    added = ga.hall_of_fame.update(individuals, ga.current_generation)
+                    self.logger.info(
+                        f"[COEVOLUTION] Injected {added} composed strategies into HoF"
+                    )
+                else:
+                    coevo_genes = ga._coevolution.run(template_gene=template)
+                    if coevo_genes:
+                        self.logger.info(
+                            f"[COEVOLUTION] Produced {len(coevo_genes)} modular strategies"
+                        )
             except Exception as e:
                 self.logger.warning(f"Coevolution finishing phase failed: {e}")
 

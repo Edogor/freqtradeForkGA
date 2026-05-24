@@ -1,0 +1,42 @@
+# Cooperative Coevolution Pilot Template — T3.4
+#
+# Decomposes the strategy genome into three sub-populations:
+#   * Entry  — indicators + condition signature for opens
+#   * Exit   — indicators + condition signature for closes
+#   * Risk   — stoploss, ROI table, trailing parameters
+#
+# Each sub-population evolves with its own GA loop; fitness is assigned
+# via cooperative collaboration (each component is rated by composing it
+# with several random partners and averaging the resulting full-strategy
+# fitness).  Useful for breaking entry/exit/risk overfitting interactions
+# that single-objective GA can lock into.
+#
+# This is a PILOT.  Wave-vs-wave A/B against a standard island run is
+# documented in the hardware verification plan.
+
+genetic_algorithm:
+  population_size: 60
+  generations: 30
+  mode: classic
+  fitness_sharing: true
+  sharing_radius: 0.30
+
+coevolution:
+  enabled: true
+  sub_population_size: 12
+  generations: 15
+  collaborators_per_eval: 3
+  elite_size: 2
+  crossover_rate: 0.70
+  mutation_rate: 0.20
+
+  # T3.4 — feed composed strategies back into the HoF instead of logging.
+  inject_into_hof: true
+  hof_inject_count: 5
+
+# Cost realism — required for the A/B vs standard run to be fair.
+parallel_evaluation:
+  enabled: true
+  backend: thread
+  num_workers: 4
+  backtest_timeout: 120
