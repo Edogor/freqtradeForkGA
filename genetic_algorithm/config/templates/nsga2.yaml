@@ -1,0 +1,124 @@
+# NSGA-II Multi-Objective GA Template (T2.4)
+#
+# This template is the recommended starting point for new GA experiments
+# that want to optimize a Pareto-front of strategies instead of a single
+# scalar fitness score.  It is a *drop-in alternative* to standard.yaml.
+#
+# Why NSGA-II?
+#   * The single-objective scalar fitness collapses profit, Sharpe,
+#     drawdown, win-rate, etc. into one number using static weights.
+#     Strategies that excel on one axis but lose on another are
+#     discarded.
+#   * NSGA-II keeps an entire **Pareto front** — strategies that are
+#     not dominated by any other on the chosen objectives — and gives
+#     you a *menu* of trade-offs (e.g., "high profit, high drawdown"
+#     vs. "moderate profit, low drawdown").
+#   * The Hall-of-Fame in NSGA-II mode is the Pareto front itself, not
+#     a Top-N list — see HoF docs for the new layout.
+#
+# How to use:
+#   1. Copy this file: cp nsga2.yaml my_run.yaml
+#   2. Edit pairs, timerange, population_size, generations to taste.
+#   3. Run: python -m genetic_algorithm run --config my_run.yaml
+#
+# Roadmap reference: T2.4 — Multi-Objective Default-On.
+
+genetic_algorithm:
+  population_size: 50
+  generations: 40
+  elite_size: 6
+  random_immigrants: 5
+  mutation_rate: 0.18
+  crossover_rate: 0.78
+
+  # The key flip — NSGA-II selection is enabled here.
+  mode: 'nsga2'
+
+# === NSGA-II Multi-Objective Configuration ===
+nsga2:
+  # Three orthogonal objectives.  Add a fourth (e.g. sortino_ratio)
+  # only when you have a strong reason — NSGA-II scales poorly beyond
+  # 3-4 objectives; consider NSGA-III for >4.
+  objectives:
+    - name: 'profit'           # Total profit %
+      type: 'maximize'
+      scale: 100.0
+    - name: 'max_drawdown'     # Drawdown magnitude
+      type: 'minimize'
+      scale: 1.0
+    - name: 'sharpe_ratio'     # Risk-adjusted return
+      type: 'maximize'
+      scale: 3.0
+  pareto_front_size: 25
+  # Minimum trade count for a strategy to enter the Pareto front
+  # (avoids low-sample winners hijacking the front).
+  min_trades: 20
+
+# === Pareto Archive ===
+# Persists the running Pareto front across generations.  When
+# combined with mode: 'nsga2' the HoF.json output is the archived
+# Pareto front rather than a Top-N list.
+pareto_archive:
+  enabled: true
+  max_size: 100               # Cap to prevent unbounded growth
+  output_file: 'pareto_front.json'
+
+# === Fitness weights ===
+# Still consumed for tie-breaking and reporting.  Use a balanced
+# profile so weighted_fitness has reasonable values for monitoring.
+fitness_weights:
+  profit: 0.28
+  sharpe_ratio: 0.18
+  sortino_ratio: 0.13
+  profit_factor: 0.08
+  drawdown: 0.15
+  win_rate: 0.05
+  trade_frequency: 0.05
+  monthly_stability: 0.04
+  cross_pair: 0.04
+
+# === Recommended T2 quality knobs (opt-in) ===
+# Pair the Pareto front with the new T2 quality features for a
+# strong "robust strategies by default" setup.
+fitness:
+  # T2.6 — Bootstrap-CI conservative profit:
+  use_bootstrap_ci: false        # set true for hedge-fund-grade selection
+  bootstrap_n_iter: 1000
+  bootstrap_ci: 0.05
+  # T2.5 — IC penalty (passive until upstream pipeline emits median_ic_magnitude):
+  ic_penalty:
+    enabled: false
+    threshold: 0.02
+    max_penalty: 0.30
+
+# === Realistic cost profile (T2.7) ===
+backtesting:
+  cost_profile: 'realistic'      # optimistic / realistic (default) / stress
+  pairs:
+    - BTC/USDT
+    - ETH/USDT
+    - SOL/USDT
+  timerange: '20230101-20240601'
+  initial_balance: 1000
+  max_open_trades: 4
+  stake_amount: 250
+
+# Pair-split validation (user prefers over walk-forward / holdout)
+pair_validation:
+  enabled: true
+  train_ratio: 0.6
+  validate_top_n_only: 25
+
+walk_forward:
+  enabled: false
+holdout:
+  enabled: false
+
+# Penalties (same defaults as standard.yaml)
+fitness_penalties:
+  min_trades: 12
+  max_drawdown: 0.25
+  min_win_rate: 0.35
+  complexity_weight: 0.015
+  unused_indicator_weight: 0.02
+  pair_loss_threshold: -8.0
