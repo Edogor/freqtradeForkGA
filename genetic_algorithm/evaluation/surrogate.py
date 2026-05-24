@@ -13,15 +13,20 @@ Config:
         retrain_interval: 3         # Retrain every N generations
         validation_fraction: 0.2    # Hold out 20% for accuracy monitoring
         model: "random_forest"      # "random_forest" or "gradient_boosting"
+        acquisition: "expected_improvement"  # T3.8 — optional; default
+                                              # is plain predicted-fitness ranking
 
 Usage:
     surrogate = SurrogateModel(config)
     # After each generation:
     surrogate.add_training_data(population)
     surrogate.maybe_retrain()
-    # Before expensive evaluation:
+    # Before expensive evaluation (plain ranking):
     to_backtest, to_skip = surrogate.filter_candidates(offspring)
-    # to_skip individuals get surrogate-estimated fitness
+    # OR with Expected Improvement (T3.8 — explores high-variance points):
+    to_backtest, to_skip = surrogate.filter_candidates_ei(
+        offspring, best_so_far=hof.best_fitness
+    )
 """
 
 import logging
@@ -359,6 +364,159 @@ class SurrogateModel:
         logger.info(f"[SURROGATE] Filtered {len(individuals)} candidates: "
                     f"{len(to_backtest)} to backtest, {len(to_skip)} surrogate-scored "
                     f"(R²={self._last_validation_r2:.3f})" if self._last_validation_r2 else "")
+        return to_backtest, to_skip
+
+    def predict_with_uncertainty(
+        self, strategy_gene
+    ) -> Optional[Tuple[float, float]]:
+        """T3.8 — Predict (mean, std) for a single gene.
+
+        Standard deviation is estimated from individual tree predictions
+        when the underlying model is a RandomForest.  For other model
+        types (e.g. GradientBoosting), uncertainty is returned as ``0.0``
+        which makes Expected Improvement degenerate to plain ranking by
+        predicted mean — still safe.
+
+        Returns ``None`` if the model is not ready or feature extraction
+        fails.
+        """
+        if not self.ready:
+            return None
+        try:
+            features = extract_features(strategy_gene)
+        except Exception:
+            return None
+
+        try:
+            mean = float(self._model.predict([features])[0])
+        except Exception:
+            return None
+
+        std = 0.0
+        estimators = getattr(self._model, "estimators_", None)
+        if estimators:
+            try:
+                preds = []
+                for est in estimators:
+                    # GradientBoosting nests estimators in a 2D ndarray
+                    if hasattr(est, "predict"):
+                        preds.append(float(est.predict([features])[0]))
+                if len(preds) >= 2:
+                    mean_p = sum(preds) / len(preds)
+                    var = sum((p - mean_p) ** 2 for p in preds) / (len(preds) - 1)
+                    std = math.sqrt(max(0.0, var))
+            except Exception:
+                std = 0.0
+        return mean, std
+
+    def expected_improvement(
+        self, strategy_gene, best_so_far: float, xi: float = 0.01
+    ) -> Optional[float]:
+        """T3.8 — Expected Improvement acquisition.
+
+        EI(x) = (μ - f* - ξ) · Φ(z) + σ · φ(z)   if σ > 0
+              = max(0, μ - f* - ξ)                if σ = 0
+
+        Where μ, σ are surrogate mean and std at x, f* is the incumbent
+        best fitness, ξ is an exploration knob (higher ξ → more
+        exploration).  We *maximize* fitness so the formula matches the
+        Mockus EI for maximization problems.
+
+        Returns ``None`` if surrogate is not ready.
+        """
+        result = self.predict_with_uncertainty(strategy_gene)
+        if result is None:
+            return None
+        mean, std = result
+        improvement = mean - best_so_far - xi
+        if std <= 1e-12:
+            return max(0.0, improvement)
+        try:
+            from statistics import NormalDist
+
+            z = improvement / std
+            normal = NormalDist()
+            cdf = normal.cdf(z)
+            pdf = normal.pdf(z)
+        except Exception:
+            return max(0.0, improvement)
+        return improvement * cdf + std * pdf
+
+    def filter_candidates_ei(
+        self,
+        individuals: list,
+        best_so_far: float,
+        xi: float = 0.01,
+    ) -> Tuple[list, list]:
+        """Variant of :meth:`filter_candidates` that ranks by Expected
+        Improvement instead of raw predicted fitness.
+
+        EI prefers candidates whose *uncertainty* gives them a real
+        chance of beating the incumbent, which prevents the surrogate
+        from greedily exploiting a single high-fitness basin and
+        starving exploration.
+
+        Falls back to the standard filter when the surrogate is not
+        ready.
+        """
+        if not self.ready or not self.enabled:
+            return individuals, []
+
+        scored: List[Tuple[Any, float]] = []
+        failed: List[Any] = []
+        for ind in individuals:
+            ei = self.expected_improvement(ind.strategy_gene, best_so_far, xi=xi)
+            if ei is not None:
+                scored.append((ind, ei))
+            else:
+                failed.append(ind)
+
+        if not scored:
+            return individuals, []
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        cutoff = max(1, int(len(scored) * self.filter_percentile / 100))
+        to_backtest = [ind for ind, _ in scored[:cutoff]] + failed
+        to_skip: list = []
+
+        for ind, ei_score in scored[cutoff:]:
+            # We still need a fitness number for skipped individuals.
+            # Use the surrogate mean rather than EI (EI can be ~0 for
+            # high-mean low-variance points which are still fine).
+            pred = self.predict(ind.strategy_gene)
+            if pred is None:
+                # Safety net: leave un-evaluated so the runner can keep
+                # them in the backtest queue.
+                continue
+            if self.mutate_skipped:
+                try:
+                    from genetic_algorithm.core.mutation import mutate
+
+                    mutation_rate = self._ga_config.get("mutation_rate", 0.18)
+                    ind = mutate(ind, mutation_rate, self._ga_config)
+                except Exception as e:
+                    logger.debug(f"[SURROGATE] EI mutation failed: {e}")
+            discount = 0.85
+            ind.fitness = pred * discount
+            ind.raw_fitness = pred * discount
+            ind.evaluated = True
+            ind.surrogate_evaluated = True
+            if hasattr(ind, "metrics") and isinstance(ind.metrics, dict):
+                ind.metrics["surrogate_fitness"] = pred
+                ind.metrics["surrogate_ei"] = ei_score
+                ind.metrics["surrogate_evaluated"] = True
+                ind.metrics["acquisition"] = "expected_improvement"
+            to_skip.append(ind)
+
+        logger.info(
+            "[SURROGATE] EI filter: %d candidates → %d backtest, %d skipped "
+            "(R²=%s, best_so_far=%.4f)",
+            len(individuals),
+            len(to_backtest),
+            len(to_skip),
+            f"{self._last_validation_r2:.3f}" if self._last_validation_r2 else "n/a",
+            best_so_far,
+        )
         return to_backtest, to_skip
 
     # ------------------------------------------------------------------
