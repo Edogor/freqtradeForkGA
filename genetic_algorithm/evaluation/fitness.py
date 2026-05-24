@@ -30,6 +30,8 @@ VALID_FITNESS_WEIGHT_KEYS = frozenset({
     'profit', 'sharpe_ratio', 'sortino_ratio', 'profit_factor',
     'drawdown', 'win_rate', 'trade_frequency',
     'monthly_stability', 'cross_pair', 'drawdown_duration', 'consecutive_losses',
+    # T2.2 — Tail-risk weights (default 0; opt-in via config)
+    'tail_cvar_95', 'tail_recovery_factor', 'tail_ulcer_index', 'tail_mae_median',
 })
 
 # Deprecated key aliases from older configs
@@ -1134,7 +1136,54 @@ class FitnessEvaluator:
             metrics['monthly_return_std'] = (sum((m - mean_monthly) ** 2 for m in monthly) / len(monthly)) ** 0.5
             # Positive months ratio
             metrics['positive_months_ratio'] = sum(1 for m in monthly if m > 0) / len(monthly)
-        
+
+        # T2.2 — Tail-risk metric bundle.
+        # Always computed (never raises); inert in fitness unless the
+        # corresponding tail_* weights in fitness_weights are non-zero.
+        try:
+            from genetic_algorithm.evaluation.tail_risk import compute_tail_risk_metrics
+            trade_returns = result.trade_profit_ratios or []
+            # Synthesize an equity curve from cumulative trade returns
+            # so ulcer_index has something meaningful to work with
+            # until BacktestResult exposes a real bar-level equity series.
+            equity = []
+            running = 100.0  # starting capital reference (unit-less)
+            for r in trade_returns:
+                running *= (1.0 + r)
+                equity.append(running)
+            tail = compute_tail_risk_metrics(
+                trade_returns=trade_returns,
+                equity_curve=equity,
+                net_profit=result.profit_percent,
+                max_drawdown=result.max_drawdown,
+            )
+            metrics.update(tail)
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug(f"[TAIL] compute_tail_risk_metrics failed: {_exc}")
+
+        # T2.6 — Bootstrap-CI conservative profit replacement.
+        # Only runs when fitness.use_bootstrap_ci=true.  Stores the raw
+        # profit in `profit_raw` and overwrites `profit` with the
+        # lower-CI bootstrap total of trade returns scaled to %.
+        try:
+            from genetic_algorithm.evaluation.bootstrap_ci import (
+                is_bootstrap_ci_enabled, bootstrap_ci_settings, bootstrap_lower_ci,
+            )
+            if is_bootstrap_ci_enabled(self.config):
+                settings = bootstrap_ci_settings(self.config)
+                trade_returns_pct = [r * 100.0 for r in (result.trade_profit_ratios or [])]
+                lower = bootstrap_lower_ci(
+                    trade_returns_pct,
+                    n_iter=settings['n_iter'],
+                    ci=settings['ci'],
+                    seed=settings['seed'],
+                )
+                metrics['profit_raw'] = metrics.get('profit', 0)
+                metrics['profit_lower_ci'] = lower
+                metrics['profit'] = lower
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug(f"[BOOTSTRAP_CI] computation failed: {_exc}")
+
         return metrics
     
     def calculate_fitness(self, metrics: Dict[str, float], strategy_gene: StrategyGene = None) -> float:
@@ -1221,6 +1270,13 @@ class FitnessEvaluator:
         w_cross_pair = w.get('cross_pair', 0.06)
         w_dd_duration = w.get('drawdown_duration', 0.02)
         w_consec_losses = w.get('consecutive_losses', 0.02)
+        # T2.2 — Tail-risk weights default to 0 so this is a no-op
+        # unless the user opts in.  Recommended starting values are
+        # documented in docs/fitness.md.
+        w_tail_cvar = w.get('tail_cvar_95', 0.0)
+        w_tail_recovery = w.get('tail_recovery_factor', 0.0)
+        w_tail_ulcer = w.get('tail_ulcer_index', 0.0)
+        w_tail_mae = w.get('tail_mae_median', 0.0)
         
         # === Tail-risk scores ===
         # Drawdown duration: 0 days = 1.0, 90+ days = 0.0 (linear)
@@ -1267,7 +1323,11 @@ class FitnessEvaluator:
             'monthly_stability': w_stability,
             'cross_pair': w_cross_pair,
             'drawdown_duration': w_dd_duration,
-            'consecutive_losses': w_consec_losses
+            'consecutive_losses': w_consec_losses,
+            'tail_cvar_95': w_tail_cvar,
+            'tail_recovery_factor': w_tail_recovery,
+            'tail_ulcer_index': w_tail_ulcer,
+            'tail_mae_median': w_tail_mae,
         }
         total_weight = sum(weights_dict.values())
         if total_weight > 0:
@@ -1282,7 +1342,19 @@ class FitnessEvaluator:
             w_cross_pair = weights_dict['cross_pair'] / total_weight
             w_dd_duration = weights_dict['drawdown_duration'] / total_weight
             w_consec_losses = weights_dict['consecutive_losses'] / total_weight
-        
+            w_tail_cvar = weights_dict['tail_cvar_95'] / total_weight
+            w_tail_recovery = weights_dict['tail_recovery_factor'] / total_weight
+            w_tail_ulcer = weights_dict['tail_ulcer_index'] / total_weight
+            w_tail_mae = weights_dict['tail_mae_median'] / total_weight
+
+        # T2.2 — Tail-risk normalised contributions (0 when weights are 0).
+        from genetic_algorithm.evaluation.tail_risk import normalised_tail_score
+        tail_norm = normalised_tail_score(metrics)
+        norm_tail_cvar = tail_norm['tail_cvar_95_norm']
+        norm_tail_recovery = tail_norm['tail_recovery_factor_norm']
+        norm_tail_ulcer = tail_norm['tail_ulcer_index_norm']
+        norm_tail_mae = tail_norm['tail_mae_median_norm']
+
         # Calculate weighted fitness
         fitness = (
             w_profit * norm_profit + 
@@ -1295,7 +1367,11 @@ class FitnessEvaluator:
             w_stability * norm_stability +
             w_cross_pair * norm_cross_pair +
             w_dd_duration * norm_dd_duration +
-            w_consec_losses * norm_consec_losses
+            w_consec_losses * norm_consec_losses +
+            w_tail_cvar * norm_tail_cvar +
+            w_tail_recovery * norm_tail_recovery +
+            w_tail_ulcer * norm_tail_ulcer +
+            w_tail_mae * norm_tail_mae
         )
         
         # ==================================================================================
@@ -1514,6 +1590,28 @@ class FitnessEvaluator:
             wr_penalty = 1.0 - wr_raw * confidence  # 0.6–1.0 range, scaled by confidence
             fitness *= wr_penalty
         
+        # T2.5 — Information-Coefficient penalty (passive integration).
+        # When the upstream pipeline supplies `median_ic_magnitude` in the
+        # metrics dict AND the user opted in via fitness.ic_penalty, this
+        # softly punishes strategies whose key indicators carry low signal.
+        try:
+            from genetic_algorithm.evaluation.information_coefficient import (
+                ic_penalty_settings, low_ic_penalty,
+            )
+            ic_enabled, ic_threshold, ic_max = ic_penalty_settings(self.config)
+            if ic_enabled and 'median_ic_magnitude' in metrics:
+                ic_mult = low_ic_penalty(
+                    float(metrics.get('median_ic_magnitude', 0.0)),
+                    threshold=ic_threshold,
+                    max_penalty=ic_max,
+                )
+                if ic_mult < 1.0:
+                    fitness *= ic_mult
+                    logger.debug(f"[FITNESS] IC penalty x{ic_mult:.3f} "
+                                 f"(median |IC|={metrics['median_ic_magnitude']:.4f})")
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug(f"[IC] penalty application failed: {_exc}")
+
         # Complexity penalty: penalize overly complex strategies
         # Applied multiplicatively for consistency with other penalties
         if strategy_gene is not None:
