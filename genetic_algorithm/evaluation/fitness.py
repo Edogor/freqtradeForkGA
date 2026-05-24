@@ -1590,6 +1590,28 @@ class FitnessEvaluator:
             wr_penalty = 1.0 - wr_raw * confidence  # 0.6–1.0 range, scaled by confidence
             fitness *= wr_penalty
         
+        # T2.5 — Information-Coefficient penalty (passive integration).
+        # When the upstream pipeline supplies `median_ic_magnitude` in the
+        # metrics dict AND the user opted in via fitness.ic_penalty, this
+        # softly punishes strategies whose key indicators carry low signal.
+        try:
+            from genetic_algorithm.evaluation.information_coefficient import (
+                ic_penalty_settings, low_ic_penalty,
+            )
+            ic_enabled, ic_threshold, ic_max = ic_penalty_settings(self.config)
+            if ic_enabled and 'median_ic_magnitude' in metrics:
+                ic_mult = low_ic_penalty(
+                    float(metrics.get('median_ic_magnitude', 0.0)),
+                    threshold=ic_threshold,
+                    max_penalty=ic_max,
+                )
+                if ic_mult < 1.0:
+                    fitness *= ic_mult
+                    logger.debug(f"[FITNESS] IC penalty x{ic_mult:.3f} "
+                                 f"(median |IC|={metrics['median_ic_magnitude']:.4f})")
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug(f"[IC] penalty application failed: {_exc}")
+
         # Complexity penalty: penalize overly complex strategies
         # Applied multiplicatively for consistency with other penalties
         if strategy_gene is not None:
