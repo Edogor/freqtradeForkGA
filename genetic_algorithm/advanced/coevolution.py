@@ -328,11 +328,27 @@ class CoevolutionEngine:
                     risk.fitness_accumulator += fitness
                     risk.eval_count += 1
 
-        # Also evaluate each exit and risk with random partners (balanced)
+        # Also evaluate each exit and risk with random partners (balanced).
+        # Without dedicated loops, exit/risk components are only ever rated
+        # as passengers of entry-driven triples, which under-samples their
+        # design space (credit-assignment bias).
         for exit_ in self.exit_pop:
             for _ in range(max(1, self.collaborators - 1)):
                 entry = random.choice(self.entry_pop)
                 risk = random.choice(self.risk_pop)
+                fitness = self._eval_triple(entry, exit_, risk, template_gene)
+                if fitness is not None:
+                    entry.fitness_accumulator += fitness
+                    entry.eval_count += 1
+                    exit_.fitness_accumulator += fitness
+                    exit_.eval_count += 1
+                    risk.fitness_accumulator += fitness
+                    risk.eval_count += 1
+
+        for risk in self.risk_pop:
+            for _ in range(max(1, self.collaborators - 1)):
+                entry = random.choice(self.entry_pop)
+                exit_ = random.choice(self.exit_pop)
                 fitness = self._eval_triple(entry, exit_, risk, template_gene)
                 if fitness is not None:
                     entry.fitness_accumulator += fitness
@@ -449,6 +465,54 @@ class CoevolutionEngine:
 
         logger.info(f"[COEVOLUTION] Composed {len(results)} final strategies")
         return results
+
+    # ------------------------------------------------------------------
+    # HoF integration (T3.4)
+    # ------------------------------------------------------------------
+
+    def evaluate_composed_for_hof(
+        self, template_gene=None, n: int = 5
+    ) -> list:
+        """Compose top strategies and evaluate each as a full Individual.
+
+        Previously :meth:`run` returned raw genes that the runner only
+        logged — the resulting strategies were discarded.  This helper
+        wraps each composed gene in an :class:`Individual`, evaluates
+        it with the shared fitness evaluator, and returns the list
+        ready to be fed into :meth:`HallOfFame.update`.
+
+        Args:
+            template_gene: Template gene supplying timeframe/metadata.
+            n: How many composed strategies to evaluate.
+
+        Returns:
+            List of evaluated Individual objects (skipping eval failures).
+        """
+        from genetic_algorithm.genome.individual import Individual
+
+        composed_genes = self._compose_best(template_gene, n=n)
+        individuals: list = []
+        for i, gene in enumerate(composed_genes):
+            try:
+                fitness, metrics = self.fitness_evaluator.evaluate(gene)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[COEVOLUTION] HoF eval failed: {e}")
+                continue
+            if fitness is None:
+                continue
+            ind = Individual(
+                strategy_gene=gene,
+                fitness=fitness,
+                raw_fitness=fitness,
+                metrics=metrics or {},
+                evaluated=True,
+            )
+            individuals.append(ind)
+        logger.info(
+            f"[COEVOLUTION] Prepared {len(individuals)}/{len(composed_genes)} "
+            "composed strategies for HoF injection"
+        )
+        return individuals
 
     # ------------------------------------------------------------------
     # Serialization

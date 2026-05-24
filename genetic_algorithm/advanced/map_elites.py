@@ -229,6 +229,38 @@ class MAPElitesArchive:
 
         return [self._grid[c][0] for c in selected]
 
+    def to_hall_of_fame(
+        self, n: Optional[int] = None, sort_by: str = "fitness"
+    ) -> List[Any]:
+        """T3.2 — Export the archive as a Hall-of-Fame list.
+
+        The MAP-Elites grid is itself a *diversity-preserving* HoF:
+        every cell holds the best strategy that exhibits a distinct
+        behavior signature.  This method returns those individuals in
+        a deterministic order.
+
+        Args:
+            n: Optional cap on the number of returned individuals.
+               If ``None``, returns every occupant.
+            sort_by: ``'fitness'`` (descending fitness, default) or
+               ``'cell'`` (raster-scan over grid cells).
+
+        Returns:
+            List of evaluated Individual objects.  Empty list if the
+            archive is empty or disabled.
+        """
+        if not self._grid:
+            return []
+        items = [(cell, ind, fit) for cell, (ind, fit) in self._grid.items()]
+        if sort_by == "cell":
+            items.sort(key=lambda x: (x[0][0], x[0][1]))
+        else:
+            items.sort(key=lambda x: x[2], reverse=True)
+        out = [ind for _, ind, _ in items]
+        if n is not None and n >= 0:
+            out = out[:n]
+        return out
+
     # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------

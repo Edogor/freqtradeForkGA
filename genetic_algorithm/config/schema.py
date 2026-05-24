@@ -63,6 +63,7 @@ DEFAULTS: Dict[str, Any] = {
         "mutation_cooldown_factor": 0.5,
         "adaptive_tournament": False,
         "behavioral_distance_weight": 0.0,
+        "genome_distance_mode": "legacy",  # T3.5: 'legacy' | 'genome_v2' | 'blend'
         "fitness_sharing": True,
         "sharing_radius": 0.25,
         "diversity_threshold": 0.15,
