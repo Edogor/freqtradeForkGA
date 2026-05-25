@@ -268,11 +268,6 @@ class AdaptiveWeightTracker:
             self._evidence_trust_initial = min(0.4, self._evidence_trust_max * 0.5)
         elif max_generations <= 40:
             self._evidence_trust_initial = min(0.3, self._evidence_trust_max * 0.35)
-        # Also scale retrain interval so the predictor adapts mid-run.
-        # Default interval=10 fires only at gen 10 in a 10-gen run (too late).
-        # Rule: fire ~3× per run (min interval=2 to avoid thrashing).
-        if not self._sis_config.get('online_retrain_interval'):
-            self._online_retrain_interval = max(2, max_generations // 3)
 
     def _current_evidence_trust(self) -> float:
         """Adaptive evidence trust: ramps up with generation and observations."""
@@ -421,6 +416,8 @@ class SISIntegrator:
         self._min_observations: int = self._sis_config.get('min_observations', 5)
         self._observation_halflife: int = self._sis_config.get('observation_halflife', 15)
         self._online_retrain_interval: int = self._sis_config.get('online_retrain_interval', 10)
+        if 'online_retrain_interval' not in self._sis_config:
+            self._online_retrain_interval = max(2, self.config.get('genetic_algorithm', {}).get('generations', 30) // 3)
         self._max_immigrants_fraction: float = self._sis_config.get('max_immigrants_fraction', 0.25)
 
         models_dir = Path(
@@ -748,6 +745,20 @@ class SISIntegrator:
 
         if not self._hook_enabled['immigrants']:
             self._hook_skips['immigrants'] += 1
+            pop_inds: List[Individual] = []
+            if hasattr(ga, 'population') and ga.population is not None:
+                pop_inds = list(ga.population.individuals)
+            if pop_inds:
+                fitnesses = [ind.fitness for ind in pop_inds if ind.fitness is not None]
+                if fitnesses:
+                    self._evo_state.update(
+                        generation,
+                        max(fitnesses),
+                        float(np.mean(fitnesses)),
+                        len(pop_inds),
+                    )
+                self._adaptive_weights.observe_generation(pop_inds, generation)
+                self.log_generation(generation, pop_inds, {})
             return immigrants
 
         if not self._classifier_ready:
@@ -1328,9 +1339,10 @@ class SISIntegrator:
 
             # Collect pair-split generalization ratios from validated individuals
             gen_ratios = [
-                ind.metrics['pair_generalization_ratio']
+                metrics['pair_generalization_ratio']
                 for ind in population
-                if ind.metrics and ind.metrics.get('pair_generalization_ratio') is not None
+                for metrics in [getattr(ind, 'metrics', None)]
+                if metrics and metrics.get('pair_generalization_ratio') is not None
             ]
 
             entry = {
