@@ -1,0 +1,244 @@
+experiment_name: phone_sis_P5_sis_weights_only
+genetic_algorithm:
+  random_seed: 42
+  population_size: 8
+  generations: 6
+  mutation_rate: 0.2
+  crossover_rate: 0.7
+  elite_size: 1
+  tournament_size: 2
+  selection_method: tournament
+  convergence_patience: 4
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.1
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: false
+  allow_self_crossover: false
+  random_immigrants: 1
+  mode: single_objective
+surrogate:
+  enabled: false
+  min_training_samples: 30
+  filter_percentile: 60
+  retrain_interval: 3
+  model: gradient_boosting
+  mutate_skipped: true
+generic_island_model:
+  enabled: true
+  num_islands: 2
+  population_per_island: 4
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.5
+    pair_rotation: false
+  migration:
+    topology: ring
+    interval: 2
+    count: 1
+    merge_rounds: false
+  generations: 6
+fitness_weights:
+  profit: 0.18
+  sharpe_ratio: 0.16
+  sortino_ratio: 0.11
+  profit_factor: 0.08
+  drawdown: 0.12
+  win_rate: 0.07
+  trade_frequency: 0.2
+  monthly_stability: 0.04
+  cross_pair: 0.04
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: asymmetric
+fitness_penalties:
+  min_trades: 3
+  min_trades_per_month: 1
+  min_trades_per_month_penalty: 0.02
+  max_drawdown: 0.5
+  min_win_rate: 0.2
+  complexity_weight: 0.005
+backtesting:
+  timerange: 20250101-20250301
+  stake_amount: 100
+  pairs:
+  - BTC/USDT
+  - ETH/USDT
+  max_open_trades: 3
+  fee: 0.001
+  exchange: binance
+  auto_download_data: true
+  enable_cache: true
+  timeout: 120
+  timeframes:
+  - 15m
+walk_forward:
+  enabled: false
+  preset: intraday
+  mode: rolling
+  aggregation: harmonic_mean
+  embargo_days: 3
+  min_train_trades: 8
+  max_windows: 10
+  gap_penalty:
+    enabled: true
+    threshold: 0.1
+    max_penalty: 0.5
+pair_validation:
+  enabled: true
+  training_pairs:
+  - BTC/USDT
+  validation_pairs:
+  - ETH/USDT
+  weight_train: 0.7
+  weight_val: 0.3
+  min_val_fitness: -1.0
+  validate_top_n_only: 2
+holdout_validation:
+  enabled: false
+  holdout_pct: 0.15
+holdout_monitoring:
+  enabled: false
+  interval: 3
+  top_n: 3
+  early_stop: true
+  early_stop_threshold: 0.6
+  early_stop_checks: 3
+  fitness_penalty: true
+  penalty_factor: 0.8
+monte_carlo:
+  enabled: false
+  num_permutations: 15
+  methods:
+  - bootstrap
+  - shuffle
+  - slippage_jitter
+  slippage_std: 0.0005
+strategy_constraints:
+  min_trades: 3
+  max_drawdown: 0.5
+  min_win_rate: 0.2
+  timeframes:
+  - 15m
+  stoploss_range:
+  - -0.12
+  - -0.02
+  roi_range:
+  - 0.005
+  - 0.06
+  max_open_trades_range:
+  - 1
+  - 3
+  trailing_stop_positive_range:
+  - 0.005
+  - 0.03
+  trailing_stop_offset_addition_range:
+  - 0.005
+  - 0.03
+indicators:
+  available:
+  - RSI
+  - MACD
+  - BBANDS
+  - EMA
+  - SMA
+  - ADX
+  - ATR
+  - CCI
+  - STOCH
+  - DONCHIAN
+  - ROC
+  - AROON
+  - MFI
+  - WILLR
+  - TEMA
+  - KAMA
+  - PSAR
+  min_per_strategy: 2
+  max_per_strategy: 4
+storage:
+  database: genetic_algorithm/data/phone_sis/phone_sis_P5_sis_weights_only.db
+  strategy_dir: user_data/strategies/phone_sis/phone_sis_P5_sis_weights_only
+  checkpoint_dir: genetic_algorithm/data/phone_sis/phone_sis_P5_sis_weights_only_checkpoints
+  checkpoint_interval: 2
+  keep_history: true
+  min_disk_gb: 1.0
+  min_disk_gb_runtime: 1.0
+  max_cache_disk_mb: 1000
+logging:
+  level: INFO
+  file: genetic_algorithm/logs/phone_sis/phone_sis_P5_sis_weights_only.log
+  console: true
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+visualization:
+  enabled: false
+  update_interval: 1
+  output_dir: genetic_algorithm/output/sis_comparison/v2/ctrl/plots
+terminal_monitor:
+  enabled: false
+  default_mode: simple
+hall_of_fame:
+  enabled: true
+  max_size: 10
+  inject_count: 1
+  min_fitness: -1.0
+  directory: genetic_algorithm/data/phone_sis/phone_sis_P5_sis_weights_only_hof
+deflated_sharpe:
+  enabled: true
+  min_trades: 10
+  benchmark_sr: 0.0
+  skewness_correction: true
+advanced:
+  parallel_evaluation: false
+  max_workers: 1
+  enable_dry_run: false
+  enable_ml_fitness: false
+  llm:
+    enabled: false
+    provider: groq
+    api_key: ''
+    model: llama-3.3-70b-versatile
+    temperature: 0.7
+    max_retries: 3
+    timeout: 60
+    seed_ratio: 0.2
+    immigrants_per_generation: 2
+    immigrant_ratio: 0.5
+    batch_enabled: true
+    max_batch_size: 5
+    max_calls_per_generation: 15
+    max_calls_per_run: 400
+island_model:
+  enabled: false
+sis:
+  enabled: true
+  corpus_path: genetic_algorithm/data/strategy_corpus_clustered.parquet
+  models_dir: genetic_algorithm/ml/models
+  filter_fraction: 0.0
+  immigrants_per_gen: 0
+  indicator_weight_scale: 1.5
+  operator_weight_scale: 1.2
+  log_file: genetic_algorithm/logs/phone_sis/phone_sis_P5_sis_weights_only_sis_events.jsonl
+  auto_rebuild: false
+  hooks:
+    seed_filtering: false
+    immigrants: false
+    indicator_weights: true
+    operator_weights: true
+    synergy_weights: true
+  anti_pattern:
+    scale: 0.5
+    floor: 0.6
+parallel_evaluation:
+  enabled: false
+  num_workers: 1
+  worker_log_level: WARNING
+  backtest_timeout: 120
+output:
+  dir: genetic_algorithm/output/phone_sis/phone_sis_P5_sis_weights_only
+  save_stats: true
+  stats_file: evolution_stats.json
+  save_snapshots: true
+  snapshot_interval: 1

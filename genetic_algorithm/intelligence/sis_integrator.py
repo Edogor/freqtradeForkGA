@@ -268,11 +268,6 @@ class AdaptiveWeightTracker:
             self._evidence_trust_initial = min(0.4, self._evidence_trust_max * 0.5)
         elif max_generations <= 40:
             self._evidence_trust_initial = min(0.3, self._evidence_trust_max * 0.35)
-        # Also scale retrain interval so the predictor adapts mid-run.
-        # Default interval=10 fires only at gen 10 in a 10-gen run (too late).
-        # Rule: fire ~3× per run (min interval=2 to avoid thrashing).
-        if not self._sis_config.get('online_retrain_interval'):
-            self._online_retrain_interval = max(2, max_generations // 3)
 
     def _current_evidence_trust(self) -> float:
         """Adaptive evidence trust: ramps up with generation and observations."""
@@ -421,6 +416,8 @@ class SISIntegrator:
         self._min_observations: int = self._sis_config.get('min_observations', 5)
         self._observation_halflife: int = self._sis_config.get('observation_halflife', 15)
         self._online_retrain_interval: int = self._sis_config.get('online_retrain_interval', 10)
+        if 'online_retrain_interval' not in self._sis_config:
+            self._online_retrain_interval = max(2, self.config.get('genetic_algorithm', {}).get('generations', 30) // 3)
         self._max_immigrants_fraction: float = self._sis_config.get('max_immigrants_fraction', 0.25)
 
         models_dir = Path(
@@ -494,6 +491,41 @@ class SISIntegrator:
         self._pattern_enrichment: Dict[str, float] = {}
         self._pattern_operator_weights: Dict[str, float] = {}
         self._synergy_graph: Dict[str, Dict[str, float]] = dict(SYNERGY_GRAPH)
+
+        # T4.1 — Data-driven priors loaded from YAML/JSON (non-fatal).
+        # These override hardcoded baselines but are themselves overridden
+        # by PatternMiner if it was trained.
+        self._fallback_indicator_enrichment: Dict[str, float] = dict(SIS_INDICATOR_ENRICHMENT)
+        self._fallback_operator_enrichment: Dict[str, float] = dict(SIS_OPERATOR_ENRICHMENT)
+        self._anti_patterns: Dict[str, Dict[str, float]] = {}
+        priors_file = (
+            self._sis_config.get('priors_file')
+            or config.get('intelligence', {}).get('priors_file')
+        )
+        if priors_file:
+            try:
+                from genetic_algorithm.intelligence.prior_loader import (
+                    load_data_driven_priors,
+                )
+                ind, op, syn, anti = load_data_driven_priors(
+                    priors_file,
+                    base_indicator=self._fallback_indicator_enrichment,
+                    base_operator=self._fallback_operator_enrichment,
+                    base_synergy=self._synergy_graph,
+                )
+                self._fallback_indicator_enrichment = ind
+                self._fallback_operator_enrichment = op
+                self._synergy_graph = syn
+                self._anti_patterns = anti
+                self.logger.info(
+                    f"[SIS] Loaded data-driven priors from {priors_file}: "
+                    f"{len(ind)} indicators, {len(op)} operators, "
+                    f"{sum(len(v) for v in anti.values())} anti-pattern edges"
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"[SIS] Failed to load data-driven priors from {priors_file}: {e}"
+                )
         try:
             from genetic_algorithm.intelligence.pattern_mining import PatternMiner
             miner = PatternMiner.load(models_dir)
@@ -543,9 +575,9 @@ class SISIntegrator:
 
         # ── v3: Adaptive weight tracker ────────────────────────────────────────
         ind_prior = self._pattern_enrichment if self._pattern_enrichment \
-            else SIS_INDICATOR_ENRICHMENT
+            else self._fallback_indicator_enrichment
         op_prior = self._pattern_operator_weights if self._pattern_operator_weights \
-            else SIS_OPERATOR_ENRICHMENT
+            else self._fallback_operator_enrichment
         self._adaptive_weights = AdaptiveWeightTracker(
             ind_prior, op_prior,
             evidence_trust_max=self._evidence_trust_max,
@@ -713,6 +745,20 @@ class SISIntegrator:
 
         if not self._hook_enabled['immigrants']:
             self._hook_skips['immigrants'] += 1
+            pop_inds: List[Individual] = []
+            if hasattr(ga, 'population') and ga.population is not None:
+                pop_inds = list(ga.population.individuals)
+            if pop_inds:
+                fitnesses = [ind.fitness for ind in pop_inds if ind.fitness is not None]
+                if fitnesses:
+                    self._evo_state.update(
+                        generation,
+                        max(fitnesses),
+                        float(np.mean(fitnesses)),
+                        len(pop_inds),
+                    )
+                self._adaptive_weights.observe_generation(pop_inds, generation)
+                self.log_generation(generation, pop_inds, {})
             return immigrants
 
         if not self._classifier_ready:
@@ -1089,7 +1135,7 @@ class SISIntegrator:
         enrichment_source = self._adaptive_weights.get_blended_indicator_weights()
         if not enrichment_source:
             enrichment_source = self._pattern_enrichment if self._pattern_enrichment \
-                else SIS_INDICATOR_ENRICHMENT
+                else self._fallback_indicator_enrichment
 
         if base_weights:
             all_keys = set(enrichment_source.keys()) | set(base_weights.keys())
@@ -1155,7 +1201,7 @@ class SISIntegrator:
         source = self._adaptive_weights.get_blended_operator_weights()
         if not source:
             source = self._pattern_operator_weights if self._pattern_operator_weights \
-                else SIS_OPERATOR_ENRICHMENT
+                else self._fallback_operator_enrichment
 
         effective_scale = scale * state_params["weight_bias_strength"]
 
@@ -1191,6 +1237,38 @@ class SISIntegrator:
                     synergy_weights[partner] = max(current, math.log1p(lift))
 
         return synergy_weights
+
+    # ── T4.3 Anti-pattern penalty helpers ──────────────────────────────────────
+
+    def anti_pattern_penalty(self, indicators: List[str]) -> float:
+        """Multiplicative fitness penalty in [floor, 1.0] for an
+        indicator set.  Returns 1.0 when no anti-pattern graph is loaded
+        or no pairs match.  See ``intelligence.anti_pattern``.
+        """
+        if not self._anti_patterns:
+            return 1.0
+        from genetic_algorithm.intelligence.anti_pattern import (
+            anti_pattern_multiplier,
+        )
+        cfg = self._sis_config.get('anti_pattern', {}) or {}
+        scale = float(cfg.get('scale', 0.5))
+        floor = float(cfg.get('floor', 0.6))
+        return anti_pattern_multiplier(
+            indicators, self._anti_patterns, scale=scale, floor=floor
+        )
+
+    def explain_anti_pattern(self, indicators: List[str]) -> Dict[str, Any]:
+        """Diagnostics record describing matched anti-pattern pairs
+        and the resulting multiplier.  Empty pairs list when none."""
+        from genetic_algorithm.intelligence.anti_pattern import (
+            summarise_anti_patterns,
+        )
+        cfg = self._sis_config.get('anti_pattern', {}) or {}
+        scale = float(cfg.get('scale', 0.5))
+        floor = float(cfg.get('floor', 0.6))
+        return summarise_anti_patterns(
+            indicators, self._anti_patterns, scale=scale, floor=floor
+        )
 
     # ── Regime-archetype affinity ──────────────────────────────────────────────
 
@@ -1261,9 +1339,10 @@ class SISIntegrator:
 
             # Collect pair-split generalization ratios from validated individuals
             gen_ratios = [
-                ind.metrics['pair_generalization_ratio']
+                metrics['pair_generalization_ratio']
                 for ind in population
-                if ind.metrics and ind.metrics.get('pair_generalization_ratio') is not None
+                for metrics in [getattr(ind, 'metrics', None)]
+                if metrics and metrics.get('pair_generalization_ratio') is not None
             ]
 
             entry = {
