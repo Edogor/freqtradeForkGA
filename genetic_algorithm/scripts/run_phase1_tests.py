@@ -48,51 +48,51 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ──────────────────────────────────────────────────────────────────
 
-CONFIG_DIR = _PROJECT_ROOT / 'genetic_algorithm' / 'config'
-LOG_DIR = _PROJECT_ROOT / 'genetic_algorithm' / 'logs'
-OUTPUT_DIR = _PROJECT_ROOT / 'genetic_algorithm' / 'output' / 'phase1_tests'
+CONFIG_DIR = _PROJECT_ROOT / "genetic_algorithm" / "config"
+LOG_DIR = _PROJECT_ROOT / "genetic_algorithm" / "logs"
+OUTPUT_DIR = _PROJECT_ROOT / "genetic_algorithm" / "output" / "phase1_tests"
 
 # Test matrix: label → (config filename, description, ml_pretrain_label_mode)
 TEST_MATRIX: Dict[str, Dict[str, Any]] = {
-    'P1A': {
-        'config': 'ga_config_phase1_test_A_control.yaml',
-        'description': 'Control — ensemble, no Phase 1',
-        'ml_pretrain': None,
+    "P1A": {
+        "config": "ga_config_phase1_test_A_control.yaml",
+        "description": "Control — ensemble, no Phase 1",
+        "ml_pretrain": None,
     },
-    'P1B': {
-        'config': 'ga_config_phase1_test_B_autocal_single.yaml',
-        'description': 'Auto-calibrate single pair (BTC)',
-        'ml_pretrain': None,
+    "P1B": {
+        "config": "ga_config_phase1_test_B_autocal_single.yaml",
+        "description": "Auto-calibrate single pair (BTC)",
+        "ml_pretrain": None,
     },
-    'P1C': {
-        'config': 'ga_config_phase1_test_C_autocal_multi.yaml',
-        'description': 'Auto-calibrate multi-pair (BTC+ETH)',
-        'ml_pretrain': None,
+    "P1C": {
+        "config": "ga_config_phase1_test_C_autocal_multi.yaml",
+        "description": "Auto-calibrate multi-pair (BTC+ETH)",
+        "ml_pretrain": None,
     },
-    'P1D': {
-        'config': 'ga_config_phase1_test_D_ensemble_score.yaml',
-        'description': 'Ensemble continuous score, no auto-cal',
-        'ml_pretrain': None,
+    "P1D": {
+        "config": "ga_config_phase1_test_D_ensemble_score.yaml",
+        "description": "Ensemble continuous score, no auto-cal",
+        "ml_pretrain": None,
     },
-    'P1E': {
-        'config': 'ga_config_phase1_test_E_tf_sweep.yaml',
-        'description': 'Timeframe sweep + auto-cal + quality report',
-        'ml_pretrain': None,
+    "P1E": {
+        "config": "ga_config_phase1_test_E_tf_sweep.yaml",
+        "description": "Timeframe sweep + auto-cal + quality report",
+        "ml_pretrain": None,
     },
-    'P1F': {
-        'config': 'ga_config_phase1_test_F_full_stack.yaml',
-        'description': 'Full stack — all features combined',
-        'ml_pretrain': None,
+    "P1F": {
+        "config": "ga_config_phase1_test_F_full_stack.yaml",
+        "description": "Full stack — all features combined",
+        "ml_pretrain": None,
     },
-    'P1G': {
-        'config': 'ga_config_phase1_test_G_ml_scoreband.yaml',
-        'description': 'ML trainer with score_band labels',
-        'ml_pretrain': 'score_band',
+    "P1G": {
+        "config": "ga_config_phase1_test_G_ml_scoreband.yaml",
+        "description": "ML trainer with score_band labels",
+        "ml_pretrain": "score_band",
     },
-    'P1H': {
-        'config': 'ga_config_phase1_test_H_ml_advensemble.yaml',
-        'description': 'ML trainer with advanced_ensemble labels',
-        'ml_pretrain': 'advanced_ensemble',
+    "P1H": {
+        "config": "ga_config_phase1_test_H_ml_advensemble.yaml",
+        "description": "ML trainer with advanced_ensemble labels",
+        "ml_pretrain": "advanced_ensemble",
     },
 }
 
@@ -112,7 +112,7 @@ def smoke_test_all(run_ids: List[str]) -> List[Tuple[str, bool, str]]:
 
     # Import check
     ok, msg = smoke_test_import()
-    results.append(('IMPORTS', ok, msg))
+    results.append(("IMPORTS", ok, msg))
     if not ok:
         logger.error("Import check failed: %s", msg)
 
@@ -122,7 +122,7 @@ def smoke_test_all(run_ids: List[str]) -> List[Tuple[str, bool, str]]:
             results.append((run_id, False, f"Unknown run ID: {run_id}"))
             continue
 
-        config_path = str(CONFIG_DIR / entry['config'])
+        config_path = str(CONFIG_DIR / entry["config"])
         ok, msg = smoke_test_config(config_path)
         results.append((run_id, ok, msg))
 
@@ -143,20 +143,27 @@ def pretrain_ml_model(
     Retrain the ML regime model with the specified label mode.
     Runs as a subprocess.
     """
-    log_file = LOG_DIR / f'ml_pretrain_{run_id}.log'
+    log_file = LOG_DIR / f"ml_pretrain_{run_id}.log"
 
     cmd = [
-        sys.executable, '-m', 'genetic_algorithm.ml.train_regime',
-        '--config', config_path,
-        '--pairs', 'BTC/USDT',
-        '--timeframe', '4h',
-        '--timerange', '20230101-20260228',
-        '--label-mode', label_mode,
+        sys.executable,
+        "-m",
+        "genetic_algorithm.ml.train_regime",
+        "--config",
+        config_path,
+        "--pairs",
+        "BTC/USDT",
+        "--timeframe",
+        "4h",
+        "--timerange",
+        "20230101-20260228",
+        "--label-mode",
+        label_mode,
     ]
 
     logger.info("[%s] Pre-training ML model with label_mode=%s", run_id, label_mode)
     try:
-        with open(log_file, 'w') as lf:
+        with open(log_file, "w") as lf:
             result = subprocess.run(
                 cmd,
                 stdout=lf,
@@ -192,39 +199,38 @@ def run_single_config(
     This function is designed to be called from ProcessPoolExecutor.
     """
     config_path = str(CONFIG_DIR / config_filename)
-    log_file = str(LOG_DIR / f'ga_p1test_{run_id}.log')
+    log_file = str(LOG_DIR / f"ga_p1test_{run_id}.log")
     run_output_dir = str(OUTPUT_DIR / (output_subdir or run_id))
 
-    # Set output_dir in environment so the GA can find it
-    env = os.environ.copy()
-    env['GA_OUTPUT_DIR'] = run_output_dir
-
     result = {
-        'run_id': run_id,
-        'config': config_filename,
-        'description': description,
-        'config_path': config_path,
-        'log_file': log_file,
-        'output_dir': run_output_dir,
-        'start_time': datetime.now().isoformat(),
-        'end_time': None,
-        'duration_seconds': None,
-        'exit_code': None,
-        'status': 'STARTED',
-        'error': None,
+        "run_id": run_id,
+        "config": config_filename,
+        "description": description,
+        "config_path": config_path,
+        "log_file": log_file,
+        "output_dir": run_output_dir,
+        "start_time": datetime.now().isoformat(),
+        "end_time": None,
+        "duration_seconds": None,
+        "exit_code": None,
+        "status": "STARTED",
+        "error": None,
     }
 
     cmd = [
-        sys.executable, '-m', 'genetic_algorithm.run_ga',
-        '--config', config_path,
-        '--no-interactive',
-        '--yes',
+        sys.executable,
+        "-m",
+        "genetic_algorithm.run_ga",
+        "--config",
+        config_path,
+        "--no-interactive",
+        "--yes",
     ]
 
     start = time.monotonic()
 
     try:
-        with open(log_file, 'w') as lf:
+        with open(log_file, "w") as lf:
             # Write header
             lf.write(f"# Phase 1 Test: {run_id} — {description}\n")
             lf.write(f"# Config: {config_path}\n")
@@ -238,35 +244,34 @@ def run_single_config(
                 stdout=lf,
                 stderr=subprocess.STDOUT,
                 cwd=str(_PROJECT_ROOT),
-                env=env,
                 timeout=3600,  # 1 hour timeout per run
             )
-            result['exit_code'] = proc.returncode
+            result["exit_code"] = proc.returncode
 
     except subprocess.TimeoutExpired:
-        result['exit_code'] = -1
-        result['error'] = 'TIMEOUT after 3600s'
-        result['status'] = 'TIMEOUT'
+        result["exit_code"] = -1
+        result["error"] = "TIMEOUT after 3600s"
+        result["status"] = "TIMEOUT"
     except Exception as e:
-        result['exit_code'] = -2
-        result['error'] = str(e)
-        result['status'] = 'ERROR'
+        result["exit_code"] = -2
+        result["error"] = str(e)
+        result["status"] = "ERROR"
 
     elapsed = time.monotonic() - start
-    result['end_time'] = datetime.now().isoformat()
-    result['duration_seconds'] = round(elapsed, 1)
+    result["end_time"] = datetime.now().isoformat()
+    result["duration_seconds"] = round(elapsed, 1)
 
-    if result['exit_code'] == 0:
-        result['status'] = 'PASS'
-    elif result['status'] == 'STARTED':
-        result['status'] = f"FAIL (exit={result['exit_code']})"
+    if result["exit_code"] == 0:
+        result["status"] = "PASS"
+    elif result["status"] == "STARTED":
+        result["status"] = f"FAIL (exit={result['exit_code']})"
 
     # Save runner metadata in output dir
     try:
         out_dir = Path(run_output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        meta_path = out_dir / 'runner_metadata.json'
-        with open(meta_path, 'w') as f:
+        meta_path = out_dir / "runner_metadata.json"
+        with open(meta_path, "w") as f:
             json.dump(result, f, indent=2, default=str)
     except Exception:
         pass
@@ -285,12 +290,12 @@ def print_summary(results: List[Dict[str, Any]]):
     print("  PHASE 1 TEST SUITE — RESULTS SUMMARY")
     print("=" * 78)
 
-    total_time = sum(r.get('duration_seconds', 0) or 0 for r in results)
-    passed = sum(1 for r in results if r.get('status') == 'PASS')
+    total_time = sum(r.get("duration_seconds", 0) or 0 for r in results)
+    passed = sum(1 for r in results if r.get("status") == "PASS")
     failed = len(results) - passed
 
     print(f"\n  Total runs: {len(results)}  |  Passed: {passed}  |  Failed: {failed}")
-    print(f"  Total time: {total_time:.0f}s ({total_time/60:.1f}m)")
+    print(f"  Total time: {total_time:.0f}s ({total_time / 60:.1f}m)")
     print()
 
     # Table
@@ -299,18 +304,15 @@ def print_summary(results: List[Dict[str, Any]]):
     print("  " + "─" * (len(header) - 2))
 
     for r in results:
-        dur = r.get('duration_seconds')
+        dur = r.get("duration_seconds")
         dur_str = f"{dur:.0f}s" if dur else "—"
-        status = r.get('status', '?')
-        if status == 'PASS':
-            status_str = '✓ PASS'
+        status = r.get("status", "?")
+        if status == "PASS":
+            status_str = "✓ PASS"
         else:
-            status_str = f'✗ {status}'
+            status_str = f"✗ {status}"
 
-        print(
-            f"  {r['run_id']:<6} {status_str:<16} {dur_str:>8} "
-            f"{r.get('description', ''):<45}"
-        )
+        print(f"  {r['run_id']:<6} {status_str:<16} {dur_str:>8} {r.get('description', ''):<45}")
 
     print()
 
@@ -326,7 +328,9 @@ def run_comparison_report(results: List[Dict[str, Any]]):
     """Run the Phase 1 diagnostics comparison after all tests complete."""
     try:
         from genetic_algorithm.tools.phase1_diagnostics import (
-            Phase1Comparator, RunResult, find_run_dirs,
+            Phase1Comparator,
+            RunResult,
+            find_run_dirs,
         )
 
         dirs = find_run_dirs(OUTPUT_DIR)
@@ -340,8 +344,8 @@ def run_comparison_report(results: List[Dict[str, Any]]):
         print(report)
 
         # Save JSON report
-        report_path = OUTPUT_DIR / 'phase1_comparison.json'
-        with open(report_path, 'w') as f:
+        report_path = OUTPUT_DIR / "phase1_comparison.json"
+        with open(report_path, "w") as f:
             json.dump(comparator.to_json(), f, indent=2, default=str)
         print(f"\n  JSON comparison report: {report_path}")
 
@@ -354,36 +358,47 @@ def main():
         description="Phase 1 Test Runner — parallel execution of P1A-P1H configs",
     )
     parser.add_argument(
-        '--runs', nargs='*', default=None,
-        help='Specific runs to execute (e.g. P1A P1B). Default: all.',
+        "--runs",
+        nargs="*",
+        default=None,
+        help="Specific runs to execute (e.g. P1A P1B). Default: all.",
     )
     parser.add_argument(
-        '--workers', type=int, default=7,
-        help='Number of parallel worker processes (default: 7)',
+        "--workers",
+        type=int,
+        default=7,
+        help="Number of parallel worker processes (default: 7)",
     )
     parser.add_argument(
-        '--smoke-only', action='store_true',
-        help='Only run smoke tests, do not execute GA runs.',
+        "--smoke-only",
+        action="store_true",
+        help="Only run smoke tests, do not execute GA runs.",
     )
     parser.add_argument(
-        '--skip-smoke', action='store_true',
-        help='Skip smoke tests before running.',
+        "--skip-smoke",
+        action="store_true",
+        help="Skip smoke tests before running.",
     )
     parser.add_argument(
-        '--skip-ml-pretrain', action='store_true',
-        help='Skip ML model pre-training for P1G/P1H.',
+        "--skip-ml-pretrain",
+        action="store_true",
+        help="Skip ML model pre-training for P1G/P1H.",
     )
     parser.add_argument(
-        '--skip-comparison', action='store_true',
-        help='Skip comparison report after runs complete.',
+        "--skip-comparison",
+        action="store_true",
+        help="Skip comparison report after runs complete.",
     )
     parser.add_argument(
-        '--sequential', action='store_true',
-        help='Run sequentially instead of in parallel (for debugging).',
+        "--sequential",
+        action="store_true",
+        help="Run sequentially instead of in parallel (for debugging).",
     )
     parser.add_argument(
-        '--verbose', '-v', action='store_true',
-        help='Enable DEBUG logging.',
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable DEBUG logging.",
     )
 
     args = parser.parse_args()
@@ -405,10 +420,10 @@ def main():
         # Normalize: accept both "A" and "P1A"
         run_ids = []
         for r in args.runs:
-            if r.startswith('P1'):
+            if r.startswith("P1"):
                 run_ids.append(r)
             else:
-                run_ids.append(f'P1{r}')
+                run_ids.append(f"P1{r}")
     else:
         run_ids = list(TEST_MATRIX.keys())
 
@@ -435,7 +450,7 @@ def main():
 
         all_pass = True
         for label, ok, msg in smoke_results:
-            status = '✓' if ok else '✗'
+            status = "✓" if ok else "✗"
             print(f"  {status} {label}: {msg}")
             if not ok:
                 all_pass = False
@@ -454,20 +469,21 @@ def main():
 
     # === ML PRE-TRAINING ===
     if not args.skip_ml_pretrain:
-        ml_runs = [r for r in run_ids if TEST_MATRIX[r].get('ml_pretrain')]
+        ml_runs = [r for r in run_ids if TEST_MATRIX[r].get("ml_pretrain")]
         if ml_runs:
             print("\n── Phase 0.5: ML Model Pre-Training ──")
             for run_id in ml_runs:
                 entry = TEST_MATRIX[run_id]
-                config_path = str(CONFIG_DIR / entry['config'])
+                config_path = str(CONFIG_DIR / entry["config"])
                 ok, msg = pretrain_ml_model(
-                    entry['ml_pretrain'], config_path, run_id,
+                    entry["ml_pretrain"],
+                    config_path,
+                    run_id,
                 )
-                status = '✓' if ok else '✗'
+                status = "✓" if ok else "✗"
                 print(f"  {status} {run_id}: {msg}")
                 if not ok:
-                    print(f"    ⚠ ML pre-training failed for {run_id}, "
-                          f"GA run may use stale model")
+                    print(f"    ⚠ ML pre-training failed for {run_id}, GA run may use stale model")
 
     # === MAIN RUNS ===
     print(f"\n── Phase 1: Running {len(run_ids)} GA Tests ──")
@@ -482,8 +498,8 @@ def main():
             print(f"\n  [{run_id}] Starting: {entry['description']}")
             result = run_single_config(
                 run_id=run_id,
-                config_filename=entry['config'],
-                description=entry['description'],
+                config_filename=entry["config"],
+                description=entry["description"],
                 output_subdir=run_id,
             )
             results.append(result)
@@ -499,8 +515,8 @@ def main():
                 future = executor.submit(
                     run_single_config,
                     run_id=run_id,
-                    config_filename=entry['config'],
-                    description=entry['description'],
+                    config_filename=entry["config"],
+                    description=entry["description"],
                     output_subdir=run_id,
                 )
                 futures[future] = run_id
@@ -514,40 +530,42 @@ def main():
                 try:
                     result = future.result()
                     results.append(result)
-                    dur = result.get('duration_seconds', 0)
-                    status = result.get('status', '?')
+                    dur = result.get("duration_seconds", 0)
+                    status = result.get("status", "?")
                     print(f"  ◆ {run_id} completed: {status} ({dur:.0f}s)")
                 except Exception as e:
-                    results.append({
-                        'run_id': run_id,
-                        'status': f'EXCEPTION: {e}',
-                        'exit_code': -3,
-                        'duration_seconds': 0,
-                        'description': TEST_MATRIX[run_id]['description'],
-                        'log_file': str(LOG_DIR / f'ga_p1test_{run_id}.log'),
-                    })
+                    results.append(
+                        {
+                            "run_id": run_id,
+                            "status": f"EXCEPTION: {e}",
+                            "exit_code": -3,
+                            "duration_seconds": 0,
+                            "description": TEST_MATRIX[run_id]["description"],
+                            "log_file": str(LOG_DIR / f"ga_p1test_{run_id}.log"),
+                        }
+                    )
                     print(f"  ◆ {run_id} EXCEPTION: {e}")
 
     suite_elapsed = time.monotonic() - suite_start
 
     # Sort results by run_id for consistent display
-    results.sort(key=lambda r: r.get('run_id', ''))
+    results.sort(key=lambda r: r.get("run_id", ""))
 
     # === SUMMARY ===
     print_summary(results)
-    print(f"  Suite wall-clock: {suite_elapsed:.0f}s ({suite_elapsed/60:.1f}m)")
+    print(f"  Suite wall-clock: {suite_elapsed:.0f}s ({suite_elapsed / 60:.1f}m)")
 
     # Save suite summary
     suite_meta = {
-        'started': datetime.now().isoformat(),
-        'total_runs': len(results),
-        'workers': args.workers,
-        'sequential': args.sequential,
-        'suite_duration_seconds': round(suite_elapsed, 1),
-        'results': results,
+        "started": datetime.now().isoformat(),
+        "total_runs": len(results),
+        "workers": args.workers,
+        "sequential": args.sequential,
+        "suite_duration_seconds": round(suite_elapsed, 1),
+        "results": results,
     }
-    summary_path = OUTPUT_DIR / 'suite_summary.json'
-    with open(summary_path, 'w') as f:
+    summary_path = OUTPUT_DIR / "suite_summary.json"
+    with open(summary_path, "w") as f:
         json.dump(suite_meta, f, indent=2, default=str)
     print(f"  Suite summary: {summary_path}")
 
@@ -559,5 +577,5 @@ def main():
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

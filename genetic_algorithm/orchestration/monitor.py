@@ -1,8 +1,9 @@
 """
 ExperimentMonitor — terminal dashboard for running GA experiments.
 
-Replaces ``ga_monitor_v2.sh`` with a Python implementation that
-parses log files for metrics and displays a dashboard.
+Replaces ``ga_monitor_v2.sh`` with a Python implementation that displays the
+authoritative SQLite lifecycle plus non-authoritative log progress. Economic
+metrics are read only from canonical structured catalog evidence.
 
 Usage::
 
@@ -17,12 +18,15 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-from genetic_algorithm.orchestration.registry import ExperimentRegistry
+from genetic_algorithm.orchestration.attempt_state_v2 import AttemptStateStoreV2
+from genetic_algorithm.orchestration.experiment_catalog_v2 import ExperimentCatalogV2
+from genetic_algorithm.orchestration.runner_v2 import default_state_path
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +40,8 @@ _TAIL_LINES = 300
 # Compiled regex patterns for log parsing
 _RE_GENERATION_SUMMARY = re.compile(r"\[SUMMARY\] Gen (\d+)/(\d+)")
 _RE_GENERATION_PLAIN = re.compile(r"GENERATION (\d+)/(\d+)")
-_RE_BEST_STATS = re.compile(r"\[STATS\] Best: ([0-9.]+)")
-_RE_BEST_ISLAND = re.compile(r"island_[^=]+=([0-9.]+)")
-_RE_BEST_NEW = re.compile(r"\[NEW BEST\].*fitness.?([0-9.]+)")
-_RE_AVG_STATS = re.compile(r"\[STATS\].*Avg: ([0-9.]+)")
-_RE_DIVERSITY = re.compile(r"diversity[=: ]+([0-9.]+)", re.IGNORECASE)
-_RE_PROFIT = re.compile(r"profit=([0-9.+-]+)%?")
 _RE_EVAL_PROGRESS = re.compile(r"\[EVAL\] Progress: (\d+)/(\d+)")
 _RE_ERRORS = re.compile(r"\[ERROR\]|\bTraceback\b")
-_RE_COMPLETE = re.compile(r"GA RUN COMPLETE|Evolution complete")
 
 
 @dataclass
@@ -65,12 +62,13 @@ class ExperimentMetrics:
     eta: Optional[str] = None
     pid: Optional[int] = None
     log_path: Optional[str] = None
+    metric_basis: Optional[str] = None
 
 
 def extract_metrics(log_path: Path, tail_lines: int = _TAIL_LINES) -> ExperimentMetrics:
-    """Extract GA metrics from the tail of a log file.
+    """Extract non-authoritative progress diagnostics from a log tail.
 
-    Returns an ExperimentMetrics with whatever data could be parsed.
+    Fitness, return, risk, diversity and lifecycle are deliberately excluded.
     """
     m = ExperimentMetrics()
 
@@ -101,43 +99,6 @@ def extract_metrics(log_path: Path, tail_lines: int = _TAIL_LINES) -> Experiment
             m.generation = int(match.group(1))
             m.total_generations = int(match.group(2))
 
-    # Best fitness - try multiple sources
-    match = None
-    for match in _RE_BEST_STATS.finditer(buf):
-        pass
-    if match:
-        m.best_fitness = float(match.group(1))
-    else:
-        # Try island summary (max across islands)
-        island_vals = _RE_BEST_ISLAND.findall(buf)
-        if island_vals:
-            m.best_fitness = max(float(v) for v in island_vals)
-        else:
-            match = None
-            for match in _RE_BEST_NEW.finditer(buf):
-                pass
-            if match:
-                m.best_fitness = float(match.group(1))
-
-    # Average fitness
-    match = None
-    for match in _RE_AVG_STATS.finditer(buf):
-        pass
-    if match:
-        m.avg_fitness = float(match.group(1))
-
-    # Diversity
-    match = None
-    for match in _RE_DIVERSITY.finditer(buf):
-        pass
-    if match:
-        m.diversity = float(match.group(1))
-
-    # Best profit
-    profits = _RE_PROFIT.findall(buf)
-    if profits:
-        m.best_profit = max(float(p) for p in profits)
-
     # Eval progress
     match = None
     for match in _RE_EVAL_PROGRESS.finditer(buf):
@@ -148,48 +109,7 @@ def extract_metrics(log_path: Path, tail_lines: int = _TAIL_LINES) -> Experiment
     # Error count
     m.error_count = len(_RE_ERRORS.findall(buf))
 
-    # Completion check
-    if _RE_COMPLETE.search(buf):
-        m.status = "DONE"
-
     return m
-
-
-def detect_status(
-    log_path: Path, pid: Optional[int] = None, stale_seconds: int = 600
-) -> str:
-    """Determine experiment status: RUNNING, DONE, CRASHED, STALE."""
-    if not log_path.exists():
-        return "UNKNOWN"
-
-    # Check for completion marker
-    try:
-        with open(log_path) as f:
-            lines = f.readlines()
-        tail = "".join(lines[-30:])
-        if _RE_COMPLETE.search(tail):
-            return "DONE"
-    except OSError:
-        return "UNKNOWN"
-
-    # Check if process is alive
-    if pid:
-        try:
-            os.kill(pid, 0)
-            return "RUNNING"
-        except (ProcessLookupError, PermissionError):
-            pass
-
-    # Check log freshness
-    try:
-        mtime = log_path.stat().st_mtime
-        age = time.time() - mtime
-        if age > stale_seconds:
-            return "STALE"
-    except OSError:
-        pass
-
-    return "CRASHED" if pid else "UNKNOWN"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -200,7 +120,7 @@ def detect_status(
 class ExperimentMonitor:
     """Terminal dashboard for GA experiments.
 
-    Uses the experiment registry for state and parses log files
+    Uses the SQLite experiment catalog for state and parses log files
     for real-time metrics like generation, fitness, profit, ETA.
     """
 
@@ -208,10 +128,18 @@ class ExperimentMonitor:
         self,
         experiment_id: Optional[str] = None,
         show_completed: bool = False,
+        *,
+        state_path: str | Path | None = None,
+        include_legacy: bool = False,
+        statuses: List[str] | None = None,
+        tags: List[str] | None = None,
     ) -> None:
         self.experiment_id = experiment_id
         self.show_completed = show_completed
-        self.registry = ExperimentRegistry()
+        self.include_legacy = include_legacy
+        self.statuses = list(statuses) if statuses is not None else None
+        self.tags = list(tags or [])
+        self.catalog = ExperimentCatalogV2(AttemptStateStoreV2(state_path or default_state_path()))
 
     def run(self, interval: int = 10) -> None:
         """Blocking refresh loop printing status to stdout."""
@@ -230,13 +158,23 @@ class ExperimentMonitor:
     def get_metrics(self) -> List[ExperimentMetrics]:
         """Extract metrics for all relevant experiments."""
         if self.experiment_id:
-            experiments = [self.registry.get(self.experiment_id)]
-            experiments = [e for e in experiments if e]
+            record = self.catalog.get_record(
+                self.experiment_id,
+                include_legacy=self.include_legacy,
+            )
+            experiments = [record.compatibility_dict()] if record else []
         else:
-            statuses = ["running"]
-            if self.show_completed:
+            statuses = self.statuses or ["running"]
+            if self.statuses is None and self.show_completed:
                 statuses.extend(["completed", "failed"])
-            experiments = self.registry.list(status=statuses)
+            experiments = [
+                record.compatibility_dict()
+                for record in self.catalog.list_records(
+                    statuses=statuses,
+                    tags=self.tags,
+                    include_legacy=self.include_legacy,
+                )
+            ]
 
         results = []
         for exp in experiments:
@@ -257,19 +195,19 @@ class ExperimentMonitor:
             m.pid = exp.get("pid")
             m.log_path = log_path
 
-            # Override status from registry if available, or detect from log
+            # SQLite lifecycle state is authoritative. Log parsing only adds
+            # non-lifecycle progress metrics.
             reg_status = exp.get("status", "")
-            if reg_status in ("completed", "failed", "cancelled"):
-                m.status = reg_status.upper()
-            else:
-                m.status = detect_status(lp, pid=exp.get("pid"))
+            m.status = reg_status.upper() if reg_status else "UNKNOWN"
 
             # Elapsed time
             started = exp.get("started_at")
             if started:
                 try:
                     start_dt = datetime.fromisoformat(started)
-                    elapsed = datetime.utcnow() - start_dt.replace(tzinfo=None)
+                    if start_dt.utcoffset() is None:
+                        start_dt = start_dt.replace(tzinfo=UTC)
+                    elapsed = datetime.now(UTC) - start_dt.astimezone(UTC)
                     m.elapsed = _format_duration(elapsed.total_seconds())
 
                     # ETA calculation
@@ -286,9 +224,13 @@ class ExperimentMonitor:
                 except (ValueError, TypeError):
                     pass
 
-            # Use registry fitness if log didn't have it
-            if m.best_fitness is None and exp.get("best_fitness"):
-                m.best_fitness = exp["best_fitness"]
+            # Only canonical catalog evidence may populate economic fields.
+            # Legacy imports remain visible as lifecycle history but cannot
+            # masquerade as verified candidate metrics.
+            if exp.get("source") == "CANONICAL_V2":
+                m.best_fitness = exp.get("best_fitness")
+                m.best_profit = exp.get("best_profit")
+                m.metric_basis = exp.get("best_net_return_basis")
             if m.generation is None and exp.get("generation"):
                 m.generation = exp["generation"]
             if m.total_generations is None and exp.get("generations_total"):
@@ -304,7 +246,7 @@ class ExperimentMonitor:
 
         now = datetime.now().strftime("%H:%M:%S")
         running = sum(1 for m in metrics if m.status == "RUNNING")
-        queued = self.registry.count(status="queued")
+        queued = self.catalog.summary(include_legacy=False).get("queued", 0)
 
         print(f"{'=' * 80}")
         print(f"  GA Monitor  |  {now}  |  {running} running  |  {queued} queued")

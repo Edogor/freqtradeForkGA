@@ -853,6 +853,7 @@ def test_backtest_one(default_conf, mocker, testdatadir) -> None:
                 ],
             ],
             "funding_fees": [0.0, 0.0],
+            "funding_fee_events": [[], []],
         }
     )
     pd.testing.assert_frame_equal(results, expected)
@@ -1167,6 +1168,34 @@ def test_backtest_one_detail_futures_funding_fees(
     # the trade is open for 26 hours - hence we expect the 8h fee to apply 4 times.
     # Additional counts will happen due each successful entry, which needs to call this, too.
     assert ff_spy.call_count == ff_updates
+    funding_events = results.iloc[0]["funding_fee_events"]
+    assert funding_events
+    assert [event["timestamp"] for event in funding_events] == sorted(
+        event["timestamp"] for event in funding_events
+    )
+    assert sum(event["amount"] for event in funding_events) == pytest.approx(
+        expected_ff
+    ), funding_events
+
+    # The exported fills and funding cashflows are sufficient to reproduce the
+    # complete GA V2 wallet path, including DCA and forced terminal close.
+    from genetic_algorithm.evaluation.equity_metrics_v2 import (
+        MARK_TO_MARKET_EQUITY,
+        build_mark_to_market_equity,
+    )
+
+    trade_result = results.iloc[0].to_dict()
+    equity = build_mark_to_market_equity(
+        period_start=min_date,
+        period_end=max_date,
+        starting_balance=default_conf_usdt["dry_run_wallet"],
+        trades=[trade_result],
+        ohlcv_by_pair=data,
+        expected_final_balance=(
+            default_conf_usdt["dry_run_wallet"] + trade_result["profit_abs"]
+        ),
+    )
+    assert equity.equity_method == MARK_TO_MARKET_EQUITY
 
     for t in Trade.bt_trades:
         # At least 6 adjustment orders

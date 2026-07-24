@@ -173,10 +173,6 @@ class GenerationStep:
         # Log generation summary
         self._log_summary(offspring_stats, immigrant_stats, llm_mutation_count)
 
-        # NSGA-II environmental selection
-        if self.mode == "nsga2":
-            next_gen = self._nsga2_environmental_selection(population, next_gen)
-
         op_stats = {**offspring_stats, **immigrant_stats, "llm_mutations": llm_mutation_count}
         return next_gen, op_stats
 
@@ -244,6 +240,14 @@ class GenerationStep:
             elite_copy.fitness = elite_copy.raw_fitness
             elite_copy.metrics = individual.metrics.copy() if individual.metrics else {}
             elite_copy.evaluated = True
+            elite_copy.fitness_evidence = individual.fitness_evidence
+            elite_copy.fitness_panel_id = individual.fitness_panel_id
+            elite_copy.fitness_panel_role = individual.fitness_panel_role
+            elite_copy.metrics['fitness_evidence'] = elite_copy.fitness_evidence
+            if elite_copy.fitness_panel_id is not None:
+                elite_copy.metrics['fitness_panel_id'] = elite_copy.fitness_panel_id
+            if elite_copy.fitness_panel_role is not None:
+                elite_copy.metrics['fitness_panel_role'] = elite_copy.fitness_panel_role
             _enforce_min_entry_conditions(elite_copy.strategy_gene, self.config)
             next_gen.add_individual(elite_copy)
 
@@ -761,7 +765,7 @@ class GenerationStep:
 
     # -- NSGA-II environmental selection -------------------------------------
 
-    def _nsga2_environmental_selection(
+    def select_nsga2_survivors(
         self, parents: Population, offspring: Population,
     ) -> Population:
         """NSGA-II (μ+λ) survivor selection.
@@ -809,6 +813,12 @@ class GenerationStep:
             f"{len(next_gen)} survivors across {len(fronts)} fronts"
         )
         return next_gen
+
+    # Backwards-compatible private name for callers/tests that predate the
+    # lifecycle fix.  Selection itself is intentionally no longer performed
+    # by ``execute`` because offspring do not have objectives until the GA's
+    # canonical evaluator has processed them.
+    _nsga2_environmental_selection = select_nsga2_survivors
 
     # -- helpers -------------------------------------------------------------
 

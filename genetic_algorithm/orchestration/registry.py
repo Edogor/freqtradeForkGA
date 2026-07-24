@@ -1,8 +1,9 @@
-"""
-ExperimentRegistry — the single source of truth for all GA experiments.
+"""Deprecated JSON experiment registry retained for migration tests.
 
-Every component reads/writes through this registry instead of scanning
-the filesystem, parsing logs, or inspecting PID files.
+This class is not a source of truth and is not used by production execution,
+monitoring, lifecycle cleanup, or the web service.  Existing JSON snapshots
+must be imported with ``ExperimentCatalogV2.import_legacy_registry``.  New
+runtime state belongs exclusively in the V2 SQLite attempt state machine.
 
 Storage: JSON file with atomic writes (write-to-temp + rename).
 Locking: ``fcntl.flock`` (advisory) to prevent concurrent corruption
@@ -52,7 +53,7 @@ _VALID_STATUSES = frozenset({"queued", "running", "completed", "failed", "cancel
 
 
 class ExperimentRegistry:
-    """Atomic, file-locked JSON registry of all GA experiments.
+    """Deprecated atomic JSON registry for compatibility/migration tooling.
 
     The registry stores a flat dict of experiments keyed by *experiment_id*.
     It supports concurrent readers/writers via ``fcntl.flock`` advisory locks.

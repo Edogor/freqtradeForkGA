@@ -351,6 +351,11 @@ class RunEngine:
     def _teardown(self, population, pareto_archive):
         """Post-evolution: reports, cleanup, return results."""
         ga = self.ga
+        finalists = (
+            population.get_best_measured(len(population.individuals))
+            if population
+            else []
+        )
 
         # Feature importance
         try:
@@ -395,7 +400,7 @@ class RunEngine:
 
         # Diagnostics
         timing_summary = ga.diagnostics.end_run(
-            top_strategies=population.get_best(10) if population else None,
+            top_strategies=finalists[:10] or None,
         )
         if timing_summary:
             self.logger.info(f"[TIMING] {timing_summary}")
@@ -429,7 +434,7 @@ class RunEngine:
             self.logger.info(
                 "[TRADE VIS] Generating trade charts for top strategies..."
             )
-            top = population.get_best(ga.trade_vis_top_n)
+            top = finalists[:ga.trade_vis_top_n]
             for idx, ind in enumerate(top):
                 ga._visualize_strategy_trades(ind, ga.current_generation, idx)
             self.logger.info(
@@ -455,8 +460,8 @@ class RunEngine:
         if ga._coevolution.enabled:
             try:
                 template = (
-                    population.get_best(1)[0].strategy_gene
-                    if population.individuals
+                    finalists[0].strategy_gene
+                    if finalists
                     else None
                 )
                 coevo_genes = ga._coevolution.run(template_gene=template)
@@ -470,7 +475,7 @@ class RunEngine:
         # Lifecycle manager
         if ga._lifecycle.enabled:
             try:
-                top = population.get_best(5) if population else []
+                top = finalists[:5]
                 for ind in top:
                     ga._lifecycle.register_strategy(
                         strategy_id=ind.id,
@@ -492,19 +497,27 @@ class RunEngine:
             )
 
             if pareto_archive is not None and pareto_archive.size > 0:
+                measured_archive = [
+                    item
+                    for item in pareto_archive.get_archive()
+                    if item.has_measured_fitness
+                ]
                 self.logger.info(
-                    f"[ARCHIVE] Returning {pareto_archive.size} archive members"
+                    f"[ARCHIVE] Returning {len(measured_archive)} measured archive members"
                 )
                 return nsga2_crowded_comparison_sort(
-                    pareto_archive.get_archive()
+                    measured_archive
                 )[: ga.pareto_front_size]
-            pareto_front = get_pareto_front(list(population.individuals))
+            pareto_front = get_pareto_front(finalists)
             return nsga2_crowded_comparison_sort(pareto_front)[
                 : ga.pareto_front_size
             ]
         else:
-            population.sort_by_fitness(reverse=True)
-            return population.get_best(10)
+            if not finalists:
+                raise RuntimeError(
+                    "Evolution produced no finalist with successful real-backtest evidence"
+                )
+            return finalists[:10]
 
     # ------------------------------------------------------------------
     # Teardown helpers
@@ -620,7 +633,7 @@ class RunEngine:
         try:
             from genetic_algorithm.core.ensemble_evolution import EnsembleEvolver
 
-            candidates = population.get_best(
+            candidates = population.get_best_measured(
                 ensemble_cfg.get("candidate_pool_size", 20)
             )
             evolver = EnsembleEvolver(self.ga.config, candidates)

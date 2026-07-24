@@ -1,0 +1,128 @@
+# ============================================================================
+# WAVE35 — C: 15m SIS Full Production Island (Server)
+# ============================================================================
+# Hypothesis: SIS validation proved 13.8% fitness lift (V1=0.349 → V3=0.397).
+#             Ablation showed adaptive weights most impactful (+14.7% vs ctrl).
+#             Wave33_C hit fitness 0.562 on 15m — highest in recent waves.
+#             This config combines the proven 15m island recipe from wave32_H
+#             (highest wave32 fitness=0.418) with FULL SIS integration on the
+#             freshly rebuilt corpus (6848 strategies, 6/13 reliable predictors).
+#
+#             Key differences from wave32_H:
+#             - SIS all hooks ON (seed filtering + immigrants + weights)
+#             - 5 pairs (3 train + 2 holdout via cross_pair weight)
+#             - Wider stoploss range [-0.10, -0.03] (SIS shows top strategies
+#               use −0.073 vs bottom −0.056)
+#             - Fewer max_open_trades (2 vs 3, matching SIS pattern: top=2.2)
+#
+# SIS: All hooks enabled — this is the full SIS production test.
+# Target: Server (24 CPU) · Island model · ~3-4 hrs
+# ============================================================================
+
+experiment_name: wave35_C_15m_sis_full_production
+
+genetic_algorithm:
+  population_size: 10
+  generations: 15
+  mutation_rate: 0.18
+  crossover_rate: 0.70
+  elite_size: 2
+  tournament_size: 3
+  selection_method: 'rank'
+  convergence_patience: 12
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.25
+  random_immigrants: 1
+
+backtesting:
+  timerange: "20210301-20260301"
+  timeframe: "15m"
+  pairs: [BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT, BNB/USDT]
+  max_open_trades: 2
+  stake_amount: 0.15
+  enable_cache: true
+  auto_download_data: false
+
+parallel_evaluation:
+  enabled: true
+
+generic_island_model:
+  enabled: true
+  num_islands: 8
+  population_per_island: 10
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.40
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+
+fitness_weights:
+  profit: 0.30
+  sharpe_ratio: 0.16
+  sortino_ratio: 0.10
+  profit_factor: 0.08
+  drawdown: 0.14
+  win_rate: 0.08
+  trade_frequency: 0.06
+  monthly_stability: 0.04
+  cross_pair: 0.04
+
+fitness_penalties:
+  min_trades: 50
+  max_drawdown: 0.18
+  min_win_rate: 0.35
+
+fitness_bounds:
+  profit_min: -15.0
+  profit_max: 50.0
+
+strategy_constraints:
+  stoploss_range: [-0.10, -0.03]
+  roi_range: [0.010, 0.06]
+  max_open_trades_range: [1, 3]
+
+holdout_validation:
+  enabled: true
+  holdout_pct: 0.15
+
+holdout_monitoring:
+  enabled: true
+  interval: 3
+  early_stop: true
+
+deflated_sharpe:
+  enabled: true
+
+surrogate:
+  enabled: true
+  min_training_samples: 60
+  filter_percentile: 70
+  retrain_interval: 3
+  model: "gradient_boosting"
+  mutate_skipped: true
+
+sis:
+  enabled: true
+  corpus_path: "genetic_algorithm/data/strategy_corpus.parquet"
+  models_dir: "genetic_algorithm/ml/models"
+  log_file: "genetic_algorithm/logs/sis_production/wave35_C_sis_events.jsonl"
+  hooks:
+    seed_filtering: true
+    immigrants: true
+    indicator_weights: true
+    operator_weights: true
+    synergy_weights: true
+  immigrants_mode: "full"
+  immigrants_per_generation: 2
+  immigrants_max_fraction: 0.15
+
+terminal_monitor:
+  enabled: true
+  default_mode: simple

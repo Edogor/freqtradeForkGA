@@ -84,7 +84,9 @@ class FeatureImportanceTracker:
         Args:
             population: Evaluated Population object with fitness scores assigned.
         """
-        individuals = [ind for ind in population if ind.evaluated and ind.fitness is not None]
+        individuals = [
+            ind for ind in population if ind.has_measured_fitness
+        ]
         if len(individuals) < 5:
             return  # Not enough data for meaningful analysis
         

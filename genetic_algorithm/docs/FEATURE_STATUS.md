@@ -43,32 +43,34 @@ Status key: ✅ WORKING = tested & reliable, ⚠️ PARTIAL = works but has know
 
 The core genetic algorithm loop (population init → evaluate → select → crossover → mutate → next gen) is stable and well-tested across multiple runs.
 
-**Recommended Config:**
+**Illustrative baseline (not a proven optimum):**
 ```yaml
 genetic_algorithm:
-  population_size: 40         # 30 min for quick tests, 40-60 for validation, 100+ for production
-  generations: 12             # 12 for validation, 30-50 for production
-  mutation_rate: 0.20         # Good default
+  population_size: 40         # Pair alternatives against the same budget/panel
+  generations: 12             # Search-budget factor
+  mutation_rate: 0.20         # Experimental factor
   max_mutation_rate: 0.35     # Cap for adaptive mutation
   crossover_rate: 0.75
-  crossover_method: 'uniform' # Best diversity preservation
-  elite_size: 4               # ~10% of population
+  crossover_method: 'uniform'
+  elite_size: 4
   tournament_size: 3
   selection_method: 'tournament'
   convergence_patience: 8
   adaptive_mutation: true
-  allow_self_crossover: false # Better diversity
-  random_immigrants: 4-5
+  allow_self_crossover: false
+  random_immigrants: 4
 ```
 
 **Key Parameters:**
-- `population_size`: Directly affects search space coverage. Below 30 produces poor diversity.
-- `elite_size`: Set to ~10% of population. Too high = stagnation, too low = best strategies lost.
-- `crossover_method`: `uniform` > `single_point` > `component` for diversity.
+- `population_size`: Changes search breadth, evaluations and runtime together; compare it under a
+  fixed total budget rather than applying a universal minimum.
+- `elite_size`: Must be smaller than the population; its useful ratio is an experiment factor.
+- `crossover_method`: Different methods alter inheritance structure; no universal ordering is
+  proven on the current V2 replay contract.
 - `random_immigrants`: Injects fresh genetic material. Doubled automatically when diversity drops below threshold.
 
-**What works:** Tournament selection, uniform crossover, adaptive mutation, random immigrants.
-**What doesn't:** Roulette selection (fitness-proportional is too noisy with our fitness landscape).
+These operators are mechanically implemented. Their economic usefulness must be established by
+paired out-of-sample V2 experiments.
 
 ---
 

@@ -1,0 +1,186 @@
+# automation_island_v2 — guarded search-only baseline for unattended evolution.
+#
+# This profile intentionally enables only Generic Island plus full pair-split
+# validation. It does not trade, deploy, consume FINAL_TEST data, or authorize
+# a candidate for production. WF, holdout, SIS, LLM, surrogate, MC, DSR,
+# regime and mutable external-migration paths remain disabled.
+
+preset: safe_v2
+
+safety_profile:
+  name: automation_island_v2
+  enforce: true
+  shadow_mode: true
+  # Evolution may run unattended; strategy promotion/trading remains forbidden.
+  automation_eligible: false
+
+backtesting:
+  pairs: [BTC/USDT, SOL/USDT, ETH/USDT, BNB/USDT]
+  # Longest currently verified common gap-free interval across all four pairs.
+  timerange: "20230325-20260327"
+  timeframe: 1h
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  fee_noise_std: 0.0
+  auto_download_data: false
+  enable_cache: true
+
+genetic_algorithm:
+  random_seed: 42
+  # Graceful cap checked after every completed generation. Per-backtest
+  # timeouts still bound an individual evaluation within a generation.
+  max_runtime_minutes: 600
+  population_size: 10
+  generations: 12
+  elite_size: 2
+  tournament_size: 3
+  random_immigrants: 1
+  mode: single_objective
+
+parallel_evaluation:
+  enabled: true
+  num_workers: 4
+
+generic_island_model:
+  enabled: true
+  num_islands: 4
+  population_per_island: 10
+  generations: 12
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.35
+    pair_rotation: false
+    pair_subset_size: 2
+  migration:
+    topology: ring
+    interval: 3
+    count: 1
+    merge_rounds: false
+    merge_interval: 6
+    tournament_size: 3
+  walk_forward:
+    enabled: false
+  external_migration:
+    enabled: false
+    directory: ""
+  islands:
+    - name: momentum
+      population_size: 10
+      generations: 12
+      seed: 42
+      indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR]
+      pairs: [BTC/USDT, SOL/USDT, ETH/USDT, BNB/USDT]
+      walk_forward_enabled: false
+    - name: trend
+      population_size: 10
+      generations: 12
+      seed: 43
+      indicator_pool: [EMA, SMA, TEMA, KAMA, SUPERTREND, AROON, PSAR]
+      pairs: [BTC/USDT, SOL/USDT, ETH/USDT, BNB/USDT]
+      walk_forward_enabled: false
+    - name: volatility-volume
+      population_size: 10
+      generations: 12
+      seed: 44
+      indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP]
+      pairs: [BTC/USDT, SOL/USDT, ETH/USDT, BNB/USDT]
+      walk_forward_enabled: false
+    - name: mixed
+      population_size: 10
+      generations: 12
+      seed: 45
+      indicator_pool: [RSI, MACD, EMA, SUPERTREND, BBANDS, ATR, CMF, VWAP]
+      pairs: [BTC/USDT, SOL/USDT, ETH/USDT, BNB/USDT]
+      walk_forward_enabled: false
+
+pair_validation:
+  enabled: true
+  training_pairs: [BTC/USDT, SOL/USDT]
+  validation_pairs: [ETH/USDT, BNB/USDT]
+  weight_train: 0.6
+  weight_val: 0.4
+  min_val_fitness: 0.0
+  # Zero means every evaluated candidate receives pair validation. Deferred
+  # top-N validation is intentionally forbidden in the unattended profile.
+  validate_top_n_only: 0
+
+promotion_v2:
+  enabled: true
+  policy_version: automation-island-v2.0-shadow
+  required_scenarios:
+    - scenario_id: train-btc
+      pair: BTC/USDT
+      timeframe: 1h
+      role: TRAIN
+      period_start: "2023-03-25"
+      period_end: "2026-03-26"
+      cost_multiplier: 1.0
+    - scenario_id: train-sol
+      pair: SOL/USDT
+      timeframe: 1h
+      role: TRAIN
+      period_start: "2023-03-25"
+      period_end: "2026-03-26"
+      cost_multiplier: 1.0
+    - scenario_id: pair-val-bnb
+      pair: BNB/USDT
+      timeframe: 1h
+      role: PAIR_VALIDATION
+      period_start: "2023-03-25"
+      period_end: "2026-03-26"
+      cost_multiplier: 1.0
+    - scenario_id: pair-val-eth
+      pair: ETH/USDT
+      timeframe: 1h
+      role: PAIR_VALIDATION
+      period_start: "2023-03-25"
+      period_end: "2026-03-26"
+      cost_multiplier: 1.0
+  min_expectancy_lcb: 0.0
+  min_median_annual_return_lcb: 0.0
+  min_worst_scenario_return: -0.05
+  max_drawdown_ucb: 0.25
+  max_daily_es5_ucb: 0.05
+  min_effective_sample_size: 30
+  min_active_months: 12
+  min_trades_per_active_month: 5.0
+  min_profitable_scenario_ratio: 0.75
+  max_consecutive_losses: 12
+  max_drawdown_duration_days: 120
+  require_final_test: false
+
+walk_forward:
+  enabled: false
+holdout_validation:
+  enabled: false
+holdout_monitoring:
+  enabled: false
+monte_carlo:
+  enabled: false
+deflated_sharpe:
+  enabled: false
+surrogate:
+  enabled: false
+regime_aware:
+  enabled: false
+island_model:
+  enabled: false
+cpcv:
+  enabled: false
+sis:
+  enabled: false
+llm:
+  enabled: false
+advanced:
+  llm:
+    enabled: false
+short_selling:
+  enabled: false
+multi_timeframe:
+  enabled: false
+
+output:
+  top_n: 5

@@ -35,7 +35,9 @@ class ExperimentTracker:
         self.config = config
         ga = config.get('genetic_algorithm', {})
         self.run_id = run_id or config.get('_config_name', config.get('experiment_name', ga.get('experiment_name', f'run_{int(time.time())}')))
-        self.run_dir = RUNS_DIR / self.run_id
+        configured_runs_dir = config.get('storage', {}).get('runs_dir')
+        runs_dir = Path(configured_runs_dir) if configured_runs_dir else RUNS_DIR
+        self.run_dir = runs_dir / self.run_id
         self._started_at = time.time()
         self._event_path = self.run_dir / "events.jsonl"
         self._initialised = False

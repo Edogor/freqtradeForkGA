@@ -25,8 +25,9 @@ Usage:
 """
 
 import logging
+import hashlib
+import json
 import math
-import random
 from typing import Dict, Any, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,8 @@ class SurrogateModel:
         self.validation_fraction = surr_config.get('validation_fraction', 0.2)
         self.model_type = surr_config.get('model', 'random_forest')
         self.mutate_skipped = surr_config.get('mutate_skipped', True)
+        self.min_validation_r2 = float(surr_config.get('min_validation_r2', 0.30))
+        self.min_validation_samples = int(surr_config.get('min_validation_samples', 10))
         self._ga_config = config  # Keep ref for mutation calls
 
         # Adaptive filter: ramp percentile down as R² improves
@@ -157,14 +160,25 @@ class SurrogateModel:
         self._model = None
         self._training_X: List[List[float]] = []
         self._training_y: List[float] = []
+        self._training_generations: List[int] = []
+        self._training_fingerprints: set[str] = set()
         self._generations_since_retrain: int = 0
         self._last_validation_r2: Optional[float] = None
+        self._last_validation_samples: int = 0
+        self._last_validation_generations: List[int] = []
         self._is_trained: bool = False
 
     @property
     def ready(self) -> bool:
-        """Whether the surrogate has enough data and a trained model."""
-        return self._is_trained and self._model is not None
+        """Whether an honest generation holdout passed the predictive gate."""
+        return (
+            self._is_trained
+            and self._model is not None
+            and self._last_validation_r2 is not None
+            and math.isfinite(self._last_validation_r2)
+            and self._last_validation_r2 >= self.min_validation_r2
+            and self._last_validation_samples >= self.min_validation_samples
+        )
 
     def add_training_data(self, population) -> int:
         """Extract features from evaluated individuals and add to training buffer.
@@ -180,17 +194,39 @@ class SurrogateModel:
 
         added = 0
         for ind in population:
-            if not ind.evaluated or ind.fitness is None:
-                continue
-            # Skip surrogate-evaluated individuals (circular training)
-            if getattr(ind, 'surrogate_evaluated', False):
+            if not getattr(ind, 'has_measured_fitness', False):
                 continue
             try:
                 features = extract_features(ind.strategy_gene)
-                fitness = float(ind.fitness)
+                # Fitness sharing is population-relative and therefore not a
+                # stable property of the genome.  Train only on the measured
+                # pre-sharing score so the same phenotype has one target.
+                target = (
+                    ind.raw_fitness
+                    if ind.raw_fitness is not None
+                    else ind.fitness
+                )
+                fitness = float(target)
                 if math.isfinite(fitness):
+                    gene_payload = ind.strategy_gene.to_dict()
+                    gene_payload.pop('generation', None)
+                    gene_payload.pop('individual_id', None)
+                    fingerprint = hashlib.sha256(
+                        json.dumps(
+                            gene_payload,
+                            sort_keys=True,
+                            separators=(',', ':'),
+                            default=str,
+                        ).encode()
+                    ).hexdigest()
+                    if fingerprint in self._training_fingerprints:
+                        continue
                     self._training_X.append(features)
                     self._training_y.append(fitness)
+                    self._training_generations.append(
+                        int(getattr(ind.strategy_gene, 'generation', 0))
+                    )
+                    self._training_fingerprints.add(fingerprint)
                     added += 1
             except Exception as e:
                 logger.debug(f"[SURROGATE] Feature extraction failed: {e}")
@@ -217,7 +253,6 @@ class SurrogateModel:
         """Fit the surrogate model on accumulated training data."""
         try:
             from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-            from sklearn.model_selection import train_test_split
             from sklearn.metrics import r2_score
         except ImportError:
             logger.warning("[SURROGATE] scikit-learn not available — surrogate disabled")
@@ -227,16 +262,50 @@ class SurrogateModel:
         X = self._training_X
         y = self._training_y
 
-        # Train/validation split
-        val_size = max(5, int(len(y) * self.validation_fraction))
-        if len(y) - val_size < 10:
-            # Not enough data for a meaningful split
-            X_train, y_train = X, y
-            X_val, y_val = X[-val_size:], y[-val_size:]
-        else:
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=self.validation_fraction, random_state=42
+        # Generation-out-of-sample validation: train only on earlier GA
+        # generations and score one or more newest generations. Random sibling
+        # splits leak closely related offspring and are not an activation gate.
+        unique_generations = sorted(set(self._training_generations))
+        target_validation = max(
+            self.min_validation_samples,
+            int(math.ceil(len(y) * self.validation_fraction)),
+        )
+        validation_generations: List[int] = []
+        validation_indices: List[int] = []
+        for generation in reversed(unique_generations):
+            validation_generations.append(generation)
+            validation_indices = [
+                index
+                for index, sample_generation in enumerate(self._training_generations)
+                if sample_generation in validation_generations
+            ]
+            if len(validation_indices) >= target_validation:
+                break
+        validation_set = set(validation_indices)
+        training_indices = [
+            index for index in range(len(y)) if index not in validation_set
+        ]
+        if (
+            len(unique_generations) < 2
+            or len(validation_indices) < self.min_validation_samples
+            or len(training_indices) < 10
+        ):
+            self._last_validation_r2 = None
+            self._last_validation_samples = len(validation_indices)
+            self._last_validation_generations = sorted(validation_generations)
+            logger.info(
+                "[SURROGATE] Waiting for generation-OOS evidence: "
+                "%d train, %d validation samples across %d generations",
+                len(training_indices),
+                len(validation_indices),
+                len(unique_generations),
             )
+            return False
+
+        X_train = [X[index] for index in training_indices]
+        y_train = [y[index] for index in training_indices]
+        X_val = [X[index] for index in validation_indices]
+        y_val = [y[index] for index in validation_indices]
 
         if self.model_type == 'gradient_boosting':
             model = GradientBoostingRegressor(
@@ -252,14 +321,32 @@ class SurrogateModel:
         model.fit(X_train, y_train)
 
         # Evaluate on validation set
-        if X_val:
-            y_pred = model.predict(X_val)
-            r2 = r2_score(y_val, y_pred)
-            self._last_validation_r2 = r2
-            logger.info(f"[SURROGATE] Retrained on {len(X_train)} samples — "
-                        f"validation R²={r2:.3f} (total buffer: {len(y)})")
-        else:
-            logger.info(f"[SURROGATE] Retrained on {len(X_train)} samples")
+        y_pred = model.predict(X_val)
+        r2 = float(r2_score(y_val, y_pred))
+        self._last_validation_r2 = r2 if math.isfinite(r2) else None
+        self._last_validation_samples = len(y_val)
+        self._last_validation_generations = sorted(validation_generations)
+        r2_text = (
+            f"{self._last_validation_r2:.3f}"
+            if self._last_validation_r2 is not None
+            else "invalid"
+        )
+        logger.info(
+            "[SURROGATE] Generation-OOS validation: %d train, %d validation "
+            "samples (generations=%s), R²=%s, gate=%s",
+            len(X_train),
+            len(X_val),
+            self._last_validation_generations,
+            r2_text,
+            "PASS" if (
+                self._last_validation_r2 is not None
+                and self._last_validation_r2 >= self.min_validation_r2
+            ) else "FAIL",
+        )
+
+        # Once the score is recorded without leakage, refit the production
+        # predictor on all known measured genomes for the next generation.
+        model.fit(X, y)
 
         self._model = model
         self._is_trained = True
@@ -297,7 +384,7 @@ class SurrogateModel:
         try:
             features = extract_features(strategy_gene)
             prediction = float(self._model.predict([features])[0])
-            return prediction
+            return prediction if math.isfinite(prediction) else None
         except Exception:
             return None
 
@@ -337,28 +424,49 @@ class SurrogateModel:
         for ind, pred_fitness in scored[cutoff:]:
             # Mutate skipped individuals to prevent population collapse
             # (without this, skipped candidates are clones → diversity loss)
+            surrogate_mutated = False
             if self.mutate_skipped:
                 try:
                     from genetic_algorithm.core.mutation import mutate
-                    mutation_rate = self._ga_config.get('mutation_rate', 0.18)
-                    ind = mutate(ind, mutation_rate, self._ga_config)
+                    mutation_rate = self._ga_config.get(
+                        'genetic_algorithm', {}
+                    ).get('mutation_rate', 0.18)
+                    mutated = mutate(ind, mutation_rate, self._ga_config)
+                    if mutated is not ind:
+                        ind.adopt_unevaluated_genome(mutated)
+                    surrogate_mutated = True
                 except Exception as e:
                     logger.debug(f"[SURROGATE] Mutation of skipped individual failed: {e}")
+
+            # Mutation changes the phenotype, therefore the prediction made
+            # before mutation no longer describes this individual.  Re-score
+            # it or fail open to a real backtest instead of assigning stale
+            # fitness to a different genome.
+            if surrogate_mutated:
+                mutated_prediction = self.predict(ind.strategy_gene)
+                if mutated_prediction is None:
+                    to_backtest.append(ind)
+                    continue
+                pred_fitness = mutated_prediction
+
             # Assign surrogate fitness (discounted to discourage gaming)
             discount = 0.85  # Surrogate predictions are slightly pessimistic
-            ind.fitness = pred_fitness * discount
-            ind.raw_fitness = pred_fitness * discount
-            ind.evaluated = True
-            ind.surrogate_evaluated = True
-            if hasattr(ind, 'metrics') and isinstance(ind.metrics, dict):
-                ind.metrics['surrogate_fitness'] = pred_fitness
-                ind.metrics['surrogate_evaluated'] = True
-                ind.metrics['surrogate_mutated'] = self.mutate_skipped
+            ind.set_surrogate_fitness(
+                pred_fitness * discount,
+                predicted_fitness=pred_fitness,
+                surrogate_mutated=surrogate_mutated,
+                validation_r2=self._last_validation_r2,
+            )
             to_skip.append(ind)
 
-        logger.info(f"[SURROGATE] Filtered {len(individuals)} candidates: "
-                    f"{len(to_backtest)} to backtest, {len(to_skip)} surrogate-scored "
-                    f"(R²={self._last_validation_r2:.3f})" if self._last_validation_r2 else "")
+        logger.info(
+            "[SURROGATE] Filtered %d candidates: %d to backtest, %d "
+            "surrogate-scored (generation-OOS R²=%.3f)",
+            len(individuals),
+            len(to_backtest),
+            len(to_skip),
+            self._last_validation_r2,
+        )
         return to_backtest, to_skip
 
     # ------------------------------------------------------------------
@@ -371,14 +479,22 @@ class SurrogateModel:
             'training_size': len(self._training_y),
             'is_trained': self._is_trained,
             'last_validation_r2': self._last_validation_r2,
+            'last_validation_samples': self._last_validation_samples,
+            'last_validation_generations': self._last_validation_generations,
             'generations_since_retrain': self._generations_since_retrain,
             # Don't serialize training data — too large. Model retrains from scratch.
         }
 
     def load_from_dict(self, data: Dict[str, Any]) -> None:
         """Restore counters from checkpoint. Model itself retrains from scratch."""
-        self._is_trained = data.get('is_trained', False)
+        # The sklearn model and training rows are intentionally not serialized;
+        # a restored checkpoint must rebuild and re-pass the quality gate.
+        self._is_trained = False
         self._last_validation_r2 = data.get('last_validation_r2')
+        self._last_validation_samples = data.get('last_validation_samples', 0)
+        self._last_validation_generations = list(
+            data.get('last_validation_generations', [])
+        )
         self._generations_since_retrain = data.get('generations_since_retrain', 0)
 
     def get_report(self) -> Dict[str, Any]:
@@ -388,5 +504,9 @@ class SurrogateModel:
             'training_samples': len(self._training_y),
             'is_trained': self._is_trained,
             'last_validation_r2': self._last_validation_r2,
+            'last_validation_samples': self._last_validation_samples,
+            'last_validation_generations': self._last_validation_generations,
+            'min_validation_r2': self.min_validation_r2,
+            'quality_gate_passed': self.ready,
             'model_type': self.model_type,
         }

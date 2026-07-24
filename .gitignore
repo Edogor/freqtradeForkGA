@@ -133,6 +133,15 @@ genetic_algorithm/data/runs/
 genetic_algorithm/data/backup_pre_restart/
 genetic_algorithm/data/*.parquet
 genetic_algorithm/data/config.yaml
+# Local automation state and experiment evidence must never be published.
+genetic_algorithm/data/v2/
+genetic_algorithm/data/sis_ablation/
+genetic_algorithm/data/sis_production/
+genetic_algorithm/data/sis_r2/
+genetic_algorithm/data/sis_validation/
+genetic_algorithm/data/checkpoints_wave*.json
+genetic_algorithm/data/wave*_seed_manifest.csv
+genetic_algorithm/data/wave*_ranked_shortlist.csv
 genetic_algorithm/benchmark_results/
 genetic_algorithm/genetic_algorithm/
 benchmark_*.txt
@@ -151,6 +160,8 @@ pip_error.txt
 launch_wave*.ps1
 restart_wave*.ps1
 show_wave*.py
+CANDIDATE_SHORTLIST.md
+CONSOLIDATION_WAVE*.md
 
 # Web frontend
 genetic_algorithm/web/frontend/node_modules/

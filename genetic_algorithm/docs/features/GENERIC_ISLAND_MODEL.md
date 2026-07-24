@@ -119,8 +119,8 @@ Each island maintains its own local Hall of Fame directory. The island model als
 
 ```yaml
 island_model:
-  num_islands: 4               # Number of islands (recommended: 4–8)
-  population_per_island: 6     # Per-island population (MUST be ≤ 6 — see AP-6)
+  num_islands: 4               # Experimental factor; minimum is one
+  population_per_island: 6     # Experimental factor; mechanical minimum is two
   migration_interval: 5        # Migrate every N generations
   migration_rate: 0.15         # Fraction of pop to migrate
   migration_topology: ring     # ring | fully_connected | random
@@ -197,14 +197,18 @@ backtesting:
 
 ---
 
-## 9. Known Anti-Patterns
+## 9. Config-Vertrag und offene Hypothesen
 
-| Code | Problem | Resolution |
-|------|---------|-----------|
-| AP-2 | `population_per_island > 6` leads to extreme overfitting (62–100% holdout degradation in E24) | Keep ≤ 6 |
-| AP-3 | `crossover_method: component` with island model causes 33–53% degradation (E18) | Use `uniform` or `single_point` |
-| AP-9 | Island model + walk-forward: WF is **silently disabled** in island mode | Do not enable WF in island configs |
-| AP-10 | Island model + Monte Carlo/CPCV: incompatible — extra overhead with no benefit | Disable MC/CPCV in island configs |
+`population_per_island` muss mechanisch mindestens 2 betragen; einen universell optimalen Wert 6,
+60 oder eine andere feste Grenze gibt es nicht. Größere und kleinere Inselpopulationen verändern
+Suchbreite, Replikationsbudget und Laufzeit gleichzeitig und müssen daher als gepaarter
+V2-Experimentalarm verglichen werden.
+
+Generic Islands können Walk-forward explizit pro Insel ausführen. Das ältere regimegebundene
+`island_model` deaktiviert Walk-forward dagegen intern; dessen zentraler Config-Vertrag blockiert
+die widersprüchliche Kombination inzwischen vor dem Start. Crossover, Migration und optionale
+Validierungsfeatures bleiben experimentelle Faktoren, bis gleiche Panels, Budgets und Seeds einen
+OOS-Vorteil belegen.
 
 ---
 

@@ -2,14 +2,20 @@
 
 import json
 import random
-import pytest
 from pathlib import Path
 
-from genetic_algorithm.engine.checkpoint import CheckpointManager
+import pytest
+
 from genetic_algorithm.engine.adaptive import AdaptiveController
+from genetic_algorithm.engine.checkpoint import CheckpointManager
+from genetic_algorithm.engine.checkpoint_contract import (
+    CheckpointCompatibilityError,
+    CheckpointIntegrityError,
+    CheckpointProvenanceV3,
+)
 from genetic_algorithm.engine.population import Population, PopulationStats
+from genetic_algorithm.genome.gene import ConditionGene, IndicatorGene, StrategyGene
 from genetic_algorithm.genome.individual import Individual
-from genetic_algorithm.genome.gene import StrategyGene, IndicatorGene, ConditionGene
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +56,17 @@ def _make_stats(gen=0):
     )
 
 
+def _provenance(**overrides):
+    values = {
+        "engine_kind": "STANDARD",
+        "config_hash": "1" * 64,
+        "code_manifest_hash": "2" * 64,
+        "data_manifest_hash": "3" * 64,
+    }
+    values.update(overrides)
+    return CheckpointProvenanceV3(**values)
+
+
 # =========================================================================
 # CheckpointManager tests
 # =========================================================================
@@ -72,11 +89,12 @@ class TestCheckpointSave:
         stats = [_make_stats(i) for i in range(3)]
         config_snap = {'genetic_algorithm': {'population_size': 5}}
 
-        path = mgr.save(pop, 2, ga_state, config_snap, stats)
+        path = mgr.save(pop, 2, ga_state, config_snap, stats, provenance=_provenance())
         assert Path(path).exists()
         data = json.loads(Path(path).read_text())
         assert data['generation'] == 2
-        assert data['version'] == 2
+        assert data['version'] == 3
+        assert data['resume_eligible'] is True
         assert 'checksum' in data
 
     def test_save_no_tmp_left(self, tmp_path):
@@ -115,8 +133,9 @@ class TestCheckpointLoad:
             }
         stats = [_make_stats(i) for i in range(gen + 1)]
         conf = {'genetic_algorithm': {'population_size': pop_size}}
-        path = mgr.save(pop, gen, ga_state, conf, stats)
-        return mgr.load(path, pop_size)
+        provenance = _provenance()
+        path = mgr.save(pop, gen, ga_state, conf, stats, provenance=provenance)
+        return mgr.load(path, pop_size, expected_provenance=provenance)
 
     def test_load_returns_tuple(self, tmp_path):
         pop, start_gen, state = self._save_and_load(tmp_path)
@@ -144,20 +163,46 @@ class TestCheckpointLoad:
         assert stats[0].generation == 0
         assert stats[0].best_fitness == 0.8
 
-    def test_checksum_warning_on_corruption(self, tmp_path, caplog):
+    def test_checksum_mismatch_blocks_resume(self, tmp_path):
         mgr = CheckpointManager(tmp_path / 'ckpt')
         pop = _make_population(size=2)
         ga_state = {'best_individual': None, 'total_generations': 5}
-        path = mgr.save(pop, 0, ga_state, {}, [])
+        provenance = _provenance()
+        path = mgr.save(pop, 0, ga_state, {}, [], provenance=provenance)
         # Corrupt the file
         data = json.loads(Path(path).read_text())
         data['generation'] = 999
         Path(path).write_text(json.dumps(data, indent=2, default=str))
-        # Load should warn
-        import logging
-        with caplog.at_level(logging.WARNING):
-            mgr.load(path, 2)
-        assert any('Checksum mismatch' in r.message for r in caplog.records)
+        with pytest.raises(CheckpointIntegrityError, match='checksum mismatch'):
+            mgr.load(path, 2, expected_provenance=provenance)
+
+    def test_provenance_mismatch_blocks_resume(self, tmp_path):
+        mgr = CheckpointManager(tmp_path / 'ckpt')
+        pop = _make_population(size=2)
+        expected = _provenance()
+        path = mgr.save(
+            pop,
+            0,
+            {'best_individual': None, 'total_generations': 5},
+            {},
+            [],
+            provenance=expected,
+        )
+        changed = _provenance(data_manifest_hash="4" * 64)
+        with pytest.raises(CheckpointCompatibilityError, match='data_manifest_hash'):
+            mgr.load(path, 2, expected_provenance=changed)
+
+    def test_diagnostic_checkpoint_cannot_resume(self, tmp_path):
+        mgr = CheckpointManager(tmp_path / 'ckpt')
+        path = mgr.save(
+            _make_population(size=2),
+            0,
+            {'best_individual': None, 'total_generations': 5},
+            {},
+            [],
+        )
+        with pytest.raises(CheckpointCompatibilityError, match='diagnostic-only'):
+            mgr.load(path, 2, expected_provenance=_provenance())
 
 
 class TestCheckpointLegacy:
@@ -227,11 +272,12 @@ class TestCheckpointRandomState:
         ga_state = {'best_individual': None, 'total_generations': 5}
         # Set known seed, save
         random.seed(42)
-        path = mgr.save(pop, 0, ga_state, {}, [])
+        provenance = _provenance()
+        path = mgr.save(pop, 0, ga_state, {}, [], provenance=provenance)
         # Generate some numbers
         vals_after_save = [random.random() for _ in range(5)]
         # Load (restores seed state as of save time)
-        mgr.load(path, 2)
+        mgr.load(path, 2, expected_provenance=provenance)
         vals_after_load = [random.random() for _ in range(5)]
         # Should match: same state → same sequence
         assert vals_after_save == vals_after_load

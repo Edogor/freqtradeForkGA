@@ -1,22 +1,18 @@
 """Tests for orchestration modules: scheduler, monitor, lifecycle."""
 
-import json
 import os
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from genetic_algorithm.orchestration.monitor import (
-    ExperimentMetrics,
-    ExperimentMonitor,
-    detect_status,
-    extract_metrics,
-    _format_duration,
-)
 from genetic_algorithm.orchestration.lifecycle import DataLifecycle, _human_bytes
+from genetic_algorithm.orchestration.monitor import (
+    ExperimentMonitor,
+    _format_duration,
+    extract_metrics,
+)
 from genetic_algorithm.orchestration.scheduler import RunScheduler
 
 
@@ -88,24 +84,23 @@ class TestExtractMetrics:
         m = extract_metrics(sample_log)
         assert m.generation == 2
         assert m.total_generations == 10
-        assert m.best_fitness == pytest.approx(0.6123)
-        assert m.avg_fitness == pytest.approx(0.4200)
-        assert m.best_profit == pytest.approx(12.5)
+        assert m.best_fitness is None
+        assert m.avg_fitness is None
+        assert m.best_profit is None
         assert m.eval_progress == "45/50"
 
     def test_completed_log(self, completed_log):
         m = extract_metrics(completed_log)
         assert m.generation == 10
         assert m.total_generations == 10
-        assert m.best_fitness == pytest.approx(0.8500)
-        assert m.status == "DONE"
+        assert m.best_fitness is None
+        assert m.status == "UNKNOWN"
 
     def test_island_log(self, island_log):
         m = extract_metrics(island_log)
         assert m.generation == 5
         assert m.total_generations == 20
-        # Best across islands
-        assert m.best_fitness == pytest.approx(0.62)
+        assert m.best_fitness is None
 
     def test_nonexistent_log(self, tmp_path):
         m = extract_metrics(tmp_path / "nonexistent.log")
@@ -120,44 +115,13 @@ class TestExtractMetrics:
 
     def test_diversity_extraction(self, sample_log):
         m = extract_metrics(sample_log)
-        assert m.diversity == pytest.approx(0.68)
+        assert m.diversity is None
 
     def test_error_count(self, tmp_path):
         log = tmp_path / "errors.log"
-        log.write_text(
-            "[ERROR] boom\n[ERROR] crash\nTraceback (most recent call)\n"
-        )
+        log.write_text("[ERROR] boom\n[ERROR] crash\nTraceback (most recent call)\n")
         m = extract_metrics(log)
         assert m.error_count == 3
-
-
-# =====================================================================
-# Monitor — detect_status
-# =====================================================================
-
-
-class TestDetectStatus:
-    def test_completed_marker(self, completed_log):
-        assert detect_status(completed_log) == "DONE"
-
-    def test_running_process(self, sample_log):
-        # Fake that our own PID is alive
-        assert detect_status(sample_log, pid=os.getpid()) == "RUNNING"
-
-    def test_dead_process(self, sample_log):
-        # Use a PID that doesn't exist
-        assert detect_status(sample_log, pid=99999999) in ("CRASHED", "STALE")
-
-    def test_stale_log(self, tmp_path):
-        log = tmp_path / "stale.log"
-        log.write_text("old data\n")
-        # Set mtime to 1 hour ago
-        old_time = time.time() - 3600
-        os.utime(log, (old_time, old_time))
-        assert detect_status(log, stale_seconds=600) == "STALE"
-
-    def test_nonexistent(self, tmp_path):
-        assert detect_status(tmp_path / "nope.log") == "UNKNOWN"
 
 
 # =====================================================================
@@ -166,29 +130,84 @@ class TestDetectStatus:
 
 
 class TestExperimentMonitor:
-    def test_get_metrics_empty(self, tmp_registry):
-        mon = ExperimentMonitor()
-        mon.registry = tmp_registry
+    def test_get_metrics_empty(self, tmp_path):
+        mon = ExperimentMonitor(state_path=tmp_path / "state.sqlite3")
         metrics = mon.get_metrics()
         assert metrics == []
 
     def test_get_metrics_running(self, tmp_registry, sample_log):
-        tmp_registry.register("exp1", config_path="test.yaml")
-        started = datetime.utcnow().isoformat()
-        tmp_registry.start("exp1", pid=os.getpid(), log_path=str(sample_log))
-
-        mon = ExperimentMonitor()
-        mon.registry = tmp_registry
+        mon = ExperimentMonitor(state_path=sample_log.parent / "state.sqlite3")
+        record = MagicMock()
+        record.compatibility_dict.return_value = {
+            "experiment_id": "exp1",
+            "status": "running",
+            "pid": os.getpid(),
+            "log_path": str(sample_log),
+            "started_at": datetime.now().astimezone().isoformat(),
+            "best_fitness": None,
+            "generation": None,
+            "generations_total": None,
+        }
+        mon.catalog = MagicMock()
+        mon.catalog.list_records.return_value = [record]
         metrics = mon.get_metrics()
 
         assert len(metrics) == 1
         assert metrics[0].experiment_id == "exp1"
         assert metrics[0].status == "RUNNING"
         assert metrics[0].generation == 2
+        mon.catalog.list_records.assert_called_once_with(
+            statuses=["running"],
+            tags=[],
+            include_legacy=False,
+        )
 
-    def test_snapshot_no_crash(self, tmp_registry, capsys):
-        mon = ExperimentMonitor()
-        mon.registry = tmp_registry
+    def test_status_and_tag_filters_are_forwarded(self, tmp_path):
+        mon = ExperimentMonitor(
+            state_path=tmp_path / "state.sqlite3",
+            statuses=["failed"],
+            tags=["wave-42"],
+        )
+        mon.catalog = MagicMock()
+        mon.catalog.list_records.return_value = []
+
+        assert mon.get_metrics() == []
+        mon.catalog.list_records.assert_called_once_with(
+            statuses=["failed"],
+            tags=["wave-42"],
+            include_legacy=False,
+        )
+
+    def test_log_cannot_spoof_economic_metrics(self, tmp_path):
+        log = tmp_path / "spoof.log"
+        log.write_text("EVOLUTION COMPLETE profit=999999% fitness=999 drawdown=0 trades=999999\n")
+        mon = ExperimentMonitor(state_path=tmp_path / "state.sqlite3")
+        record = MagicMock()
+        record.compatibility_dict.return_value = {
+            "experiment_id": "canonical-exp",
+            "source": "CANONICAL_V2",
+            "status": "completed",
+            "pid": None,
+            "log_path": str(log),
+            "started_at": datetime.now().astimezone().isoformat(),
+            "best_fitness": 0.25,
+            "best_profit": 4.0,
+            "best_net_return_basis": "WORST_SCENARIO_OF_BEST_SCORE",
+            "generation": None,
+            "generations_total": None,
+        }
+        mon.catalog = MagicMock()
+        mon.catalog.list_records.return_value = [record]
+
+        [metrics] = mon.get_metrics()
+
+        assert metrics.status == "COMPLETED"
+        assert metrics.best_fitness == pytest.approx(0.25)
+        assert metrics.best_profit == pytest.approx(4.0)
+        assert metrics.metric_basis == "WORST_SCENARIO_OF_BEST_SCORE"
+
+    def test_snapshot_no_crash(self, tmp_path, capsys):
+        mon = ExperimentMonitor(state_path=tmp_path / "state.sqlite3")
         mon.snapshot()
         captured = capsys.readouterr()
         assert "GA Monitor" in captured.out
@@ -219,82 +238,33 @@ class TestFormatDuration:
 
 
 class TestRunScheduler:
-    def test_init_defaults(self, tmp_registry):
-        with patch(
-            "genetic_algorithm.orchestration.scheduler.ExperimentRegistry",
-            return_value=tmp_registry,
-        ):
-            s = RunScheduler()
-            assert s.max_concurrent == 5
-            assert s.persistent is False
-            assert s._launched_count == 0
+    def test_init_defaults(self, tmp_path):
+        s = RunScheduler(state_path=tmp_path / "state.sqlite3")
+        assert s.max_concurrent == 5
+        assert s.persistent is False
+        assert s._launched_count == 0
 
-    def test_stats(self, tmp_registry):
-        s = RunScheduler(max_concurrent=3)
-        s.registry = tmp_registry
+    def test_stats(self, tmp_path):
+        s = RunScheduler(max_concurrent=3, state_path=tmp_path / "state.sqlite3")
         stats = s.stats
         assert stats["max_concurrent"] == 3
         assert stats["active"] == 0
         assert stats["queued"] == 0
 
-    def test_request_shutdown(self, tmp_registry):
-        s = RunScheduler()
-        s.registry = tmp_registry
+    def test_request_shutdown(self, tmp_path):
+        s = RunScheduler(state_path=tmp_path / "state.sqlite3")
         assert s._running is True
-        # Signal handler sets _running = False
         s._handle_signal(2, None)
         assert s._running is False
 
-    def test_check_memory(self, tmp_registry):
-        s = RunScheduler()
-        s.registry = tmp_registry
-        # On Linux this should return True or False based on actual memory
+    def test_check_memory(self, tmp_path):
+        s = RunScheduler(state_path=tmp_path / "state.sqlite3")
         result = s._check_memory()
         assert isinstance(result, bool)
 
-    def test_is_process_alive(self):
-        assert RunScheduler._is_process_alive(os.getpid()) is True
-        assert RunScheduler._is_process_alive(99999999) is False
-
-    def test_recover_active_no_running(self, tmp_registry):
-        s = RunScheduler()
-        s.registry = tmp_registry
-        assert s.recover_active() == 0
-
-    def test_recover_active_with_stale(self, tmp_registry):
-        tmp_registry.register("stale_exp", config_path="test.yaml")
-        tmp_registry.start("stale_exp", pid=99999999)
-
-        s = RunScheduler()
-        s.registry = tmp_registry
-        recovered = s.recover_active()
-        assert recovered == 0  # process is dead
-        assert s._failed_count == 1
-
-        # Verify it was marked as failed
-        exp = tmp_registry.get("stale_exp")
-        assert exp["status"] == "failed"
-
-    def test_recover_active_with_live(self, tmp_registry):
-        tmp_registry.register("live_exp", config_path="test.yaml")
-        tmp_registry.start("live_exp", pid=os.getpid())
-
-        s = RunScheduler()
-        s.registry = tmp_registry
-        recovered = s.recover_active()
-        assert recovered == 1
-        assert "live_exp" in s._child_pids
-
-    def test_reap_finished_no_children(self, tmp_registry):
-        s = RunScheduler()
-        s.registry = tmp_registry
-        s._reap_finished()  # should not crash with empty dict
-
-    def test_launch_next_respects_max(self, tmp_registry):
-        s = RunScheduler(max_concurrent=0)
-        s.registry = tmp_registry
-        s._launch_next()  # should not launch anything
-        assert len(s._child_pids) == 0
+    def test_zero_concurrency_is_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="greater than or equal to 1"):
+            RunScheduler(max_concurrent=0, state_path=tmp_path / "state.sqlite3")
 
 
 # =====================================================================
@@ -304,7 +274,11 @@ class TestRunScheduler:
 
 class TestDataLifecycle:
     def test_report_empty(self, tmp_path, tmp_registry):
-        lc = DataLifecycle(data_root=tmp_path, dry_run=True)
+        lc = DataLifecycle(
+            data_root=tmp_path,
+            dry_run=True,
+            state_path=tmp_path / "state.sqlite3",
+        )
         lc.registry = tmp_registry
         report = lc.report()
         assert report["total_bytes"] == 0
@@ -317,7 +291,11 @@ class TestDataLifecycle:
         (cache_dir / "entry1.pkl").write_bytes(b"x" * 1000)
         (cache_dir / "entry2.pkl").write_bytes(b"x" * 500)
 
-        lc = DataLifecycle(data_root=tmp_path, dry_run=True)
+        lc = DataLifecycle(
+            data_root=tmp_path,
+            dry_run=True,
+            state_path=tmp_path / "state.sqlite3",
+        )
         lc.registry = tmp_registry
         report = lc.report()
         assert report["categories"]["cache"] == 1500
@@ -328,7 +306,7 @@ class TestDataLifecycle:
         tmp_registry.register("old_exp", config_path="test.yaml")
         tmp_registry.complete("old_exp")
         # Override finished_at to simulate an old experiment
-        old_time = (datetime.utcnow() - timedelta(days=30)).isoformat()
+        old_time = (datetime.now().astimezone() - timedelta(days=30)).isoformat()
         tmp_registry.update("old_exp", finished_at=old_time)
 
         # Create data dir
@@ -341,6 +319,7 @@ class TestDataLifecycle:
             archive_after_days=7,
             delete_after_days=90,
             dry_run=True,
+            state_path=tmp_path / "state.sqlite3",
         )
         lc.registry = tmp_registry
         result = lc.run()
@@ -354,7 +333,11 @@ class TestDataLifecycle:
         data_dir.mkdir()
         (data_dir / "data.txt").write_text("hello")
 
-        lc = DataLifecycle(data_root=tmp_path, dry_run=False)
+        lc = DataLifecycle(
+            data_root=tmp_path,
+            dry_run=False,
+            state_path=tmp_path / "state.sqlite3",
+        )
         lc.registry = tmp_registry
         count = lc._archive("archive_me", data_dir)
         assert count == 1
@@ -367,7 +350,11 @@ class TestDataLifecycle:
         data_dir.mkdir()
         (data_dir / "result.json").write_text("{}")
 
-        lc = DataLifecycle(data_root=tmp_path, dry_run=False)
+        lc = DataLifecycle(
+            data_root=tmp_path,
+            dry_run=False,
+            state_path=tmp_path / "state.sqlite3",
+        )
         lc.registry = tmp_registry
         count = lc._delete("del_exp", data_dir)
         assert count == 1
@@ -385,7 +372,11 @@ class TestDataLifecycle:
         new_log = log_dir / "new.log"
         new_log.write_text("new data")
 
-        lc = DataLifecycle(data_root=tmp_path, dry_run=True)
+        lc = DataLifecycle(
+            data_root=tmp_path,
+            dry_run=True,
+            state_path=tmp_path / "state.sqlite3",
+        )
         lc.registry = tmp_registry
         removed = lc.cleanup_logs(max_age_days=30)
         assert removed == 1
@@ -397,13 +388,44 @@ class TestDataLifecycle:
         for i in range(5):
             (cache_dir / f"entry_{i}.pkl").write_bytes(b"x" * 500)
 
-        lc = DataLifecycle(data_root=tmp_path, dry_run=False)
+        lc = DataLifecycle(
+            data_root=tmp_path,
+            dry_run=False,
+            state_path=tmp_path / "state.sqlite3",
+        )
         lc.registry = tmp_registry
         removed = lc.cleanup_cache(max_size_mb=0.001)  # Very small limit
         assert removed > 0
+
+    def test_canonical_artifacts_are_never_deleted_by_legacy_policy(self, tmp_path):
+        data_dir = tmp_path / "canonical-exp"
+        data_dir.mkdir()
+        marker = data_dir / "result.json"
+        marker.write_text("{}")
+        record = MagicMock()
+        record.compatibility_dict.return_value = {
+            "experiment_id": "canonical-exp",
+            "source": "CANONICAL_V2",
+            "status": "completed",
+            "finished_at": (datetime.now().astimezone() - timedelta(days=365)).isoformat(),
+        }
+        lc = DataLifecycle(
+            data_root=tmp_path,
+            delete_after_days=1,
+            dry_run=False,
+            state_path=tmp_path / "state.sqlite3",
+        )
+        lc.catalog = MagicMock()
+        lc.catalog.list_records.return_value = [record]
+
+        result = lc.run()
+
+        assert result["skipped_canonical"] == 1
+        assert result["deleted"] == 0
+        assert marker.is_file()
 
     def test_human_bytes(self):
         assert _human_bytes(0) == "0.0 B"
         assert _human_bytes(1024) == "1.0 KB"
         assert _human_bytes(1024 * 1024) == "1.0 MB"
-        assert _human_bytes(1024 ** 3) == "1.0 GB"
+        assert _human_bytes(1024**3) == "1.0 GB"

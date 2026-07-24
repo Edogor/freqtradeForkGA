@@ -176,7 +176,8 @@ Walk-forward runs multiple backtests per strategy:
 
 **Mitigation:**
 1. **Caching**: Training windows are cached (50-70% hit rate for elite individuals)
-2. **Reduce population**: Use smaller population size (10-15 instead of 20)
+2. **Control compute**: compare a smaller population against the same total evaluation budget;
+   no fixed population range is known to be universally safer.
 3. **Fewer generations**: Reduce generations (3-5 instead of 10)
 4. **Larger step size**: Increase `step_days` to reduce number of windows
 

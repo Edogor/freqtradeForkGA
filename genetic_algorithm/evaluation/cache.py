@@ -19,6 +19,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+CACHE_SCHEMA_VERSION = 7
+_CACHE_SCHEMA_KEY = "_cache_schema_version"
+
+
+def _json_default(value: Any) -> Any:
+    """Convert common scientific/Pandas scalar values to stable JSON values."""
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if hasattr(value, "item"):
+        return value.item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
 
 class BacktestCache:
     """Cache for backtest results with LRU disk eviction to prevent unbounded growth."""
@@ -44,8 +58,19 @@ class BacktestCache:
 
     def _get_cache_key(self, strategy_code: str, config: Dict[str, Any]) -> str:
         """Generate a deterministic cache key from strategy code and config."""
-        cache_input = f"{strategy_code}_{json.dumps(config, sort_keys=True)}"
+        config_json = json.dumps(
+            config,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=_json_default,
+        )
+        cache_input = f"v{CACHE_SCHEMA_VERSION}_{strategy_code}_{config_json}"
         return hashlib.sha256(cache_input.encode()).hexdigest()
+
+    def _delete_disk_entry(self, cache_key: str) -> None:
+        """Remove a cache payload and its checksum together."""
+        (self.cache_dir / f"{cache_key}.json").unlink(missing_ok=True)
+        (self.cache_dir / f"{cache_key}.sha256").unlink(missing_ok=True)
 
     # -- get / put -----------------------------------------------------------
 
@@ -85,20 +110,27 @@ class BacktestCache:
                             f"Cache corruption detected for {cache_key[:8]}..., "
                             f"removing entry"
                         )
-                        cache_file.unlink(missing_ok=True)
-                        checksum_file.unlink(missing_ok=True)
+                        self._delete_disk_entry(cache_key)
                         return None
 
                 data = json.loads(raw_bytes)
+                if not isinstance(data, dict):
+                    raise ValueError("cache payload must be a JSON object")
+                schema_version = data.pop(_CACHE_SCHEMA_KEY, None)
+                if schema_version != CACHE_SCHEMA_VERSION:
+                    logger.info(
+                        "Ignoring incompatible cache entry %s... (schema %r, expected %d)",
+                        cache_key[:8], schema_version, CACHE_SCHEMA_VERSION,
+                    )
+                    self._delete_disk_entry(cache_key)
+                    return None
                 result = BacktestResult(**data)
                 self._memory_put(cache_key, result)
                 logger.debug(f"Cache hit (disk): {cache_key[:8]}...")
                 return result
             except Exception as e:
                 logger.warning(f"Failed to load cache file {cache_key[:8]}...: {e}, removing")
-                cache_file.unlink(missing_ok=True)
-                checksum_path = self.cache_dir / f"{cache_key}.sha256"
-                checksum_path.unlink(missing_ok=True)
+                self._delete_disk_entry(cache_key)
 
         return None
 
@@ -124,7 +156,15 @@ class BacktestCache:
             )
             try:
                 with os.fdopen(fd, "w") as f:
-                    json.dump(result.to_dict(), f)
+                    payload = result.to_dict()
+                    payload[_CACHE_SCHEMA_KEY] = CACHE_SCHEMA_VERSION
+                    json.dump(
+                        payload,
+                        f,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        default=_json_default,
+                    )
                 os.replace(tmp_path, str(cache_file))  # atomic on POSIX
 
                 # Write checksum for corruption detection
@@ -157,7 +197,8 @@ class BacktestCache:
             while total_size > self.max_disk_bytes and cache_files:
                 oldest = cache_files.pop(0)
                 fsize = oldest.stat().st_size
-                oldest.unlink()
+                cache_key = oldest.stem
+                self._delete_disk_entry(cache_key)
                 total_size -= fsize
                 removed += 1
             if removed:

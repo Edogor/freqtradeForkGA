@@ -105,12 +105,17 @@ class EnsembleEvolver:
         self.crossover_rate = ens_cfg.get('crossover_rate', 0.70)
         self.fitness_metric = ens_cfg.get('fitness_metric', 'combined')
         self.elite_size = ens_cfg.get('elite_size', 2)
+        self.annual_risk_free_rate = config.get('evaluation_v2', {}).get(
+            'annual_risk_free_rate',
+            0.0,
+        )
 
         # Build candidate lookup {id: Individual}
         self._candidates: Dict[str, Any] = {}
         for ind in candidate_pool:
             mp = (ind.metrics or {}).get('monthly_profits')
-            if mp and len(mp) >= 2:
+            periods = (ind.metrics or {}).get('monthly_periods')
+            if mp and len(mp) >= 2 and periods and len(periods) == len(mp):
                 self._candidates[ind.id] = ind
         self._candidate_ids = list(self._candidates.keys())
 
@@ -204,6 +209,7 @@ class EnsembleEvolver:
                 strategy_id=sid,
                 weight=w,
                 monthly_profits=list(m.get('monthly_profits', [])),
+                monthly_periods=list(m.get('monthly_periods', [])),
                 trade_profit_ratios=list(m.get('trade_profit_ratios', [])),
                 total_profit_pct=m.get('profit', 0.0),
                 total_trades=m.get('num_trades', 0),
@@ -212,9 +218,14 @@ class EnsembleEvolver:
             pg.fitness = 0.0
             return
 
-        result = PortfolioBacktester.evaluate_portfolio(slots)
+        result = PortfolioBacktester.evaluate_portfolio(
+            slots,
+            risk_free_rate=self.annual_risk_free_rate,
+        )
         pg.fitness = self._score(result)
         pg.metrics = {
+            'valid': result.valid,
+            'error_code': result.error_code,
             'total_profit_pct': result.total_profit_pct,
             'sharpe_ratio': result.sharpe_ratio,
             'sortino_ratio': result.sortino_ratio,
@@ -225,14 +236,26 @@ class EnsembleEvolver:
 
     def _score(self, result: PortfolioResult) -> float:
         """Convert portfolio result to a single fitness score."""
+        if not result.valid:
+            return float("-inf")
         if self.fitness_metric == 'sharpe':
-            return max(0.0, result.sharpe_ratio)
+            return (
+                max(0.0, result.sharpe_ratio)
+                if result.sharpe_ratio is not None
+                else float("-inf")
+            )
         elif self.fitness_metric == 'sortino':
-            return max(0.0, result.sortino_ratio)
+            return (
+                max(0.0, result.sortino_ratio)
+                if result.sortino_ratio is not None
+                else float("-inf")
+            )
         elif self.fitness_metric == 'profit':
             return result.total_profit_pct
         else:
             # Combined: weighted blend
+            if result.sharpe_ratio is None or result.max_drawdown is None:
+                return float("-inf")
             sharpe_norm = max(0.0, result.sharpe_ratio) / 5.0
             dd_score = 1.0 - min(result.max_drawdown, 1.0)
             profit_norm = max(0.0, result.total_profit_pct + 50.0) / 250.0

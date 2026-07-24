@@ -5,20 +5,49 @@ This module defines how strategies are represented genetically.
 Each strategy is encoded as a set of genes that can be mutated and crossed over.
 """
 
+import copy as _copy
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 
 # Timeframe ordering for comparison (lower index = shorter timeframe)
-TIMEFRAME_ORDER = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '3d', '1w', '1M']
+TIMEFRAME_ORDER = [
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+    "1M",
+]
 
 
 def timeframe_to_minutes(tf: str) -> int:
     """Convert a timeframe string to minutes for comparison."""
     _tf_map = {
-        '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
-        '1h': 60, '2h': 120, '4h': 240, '6h': 360, '8h': 480,
-        '12h': 720, '1d': 1440, '3d': 4320, '1w': 10080, '1M': 43200,
+        "1m": 1,
+        "3m": 3,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "2h": 120,
+        "4h": 240,
+        "6h": 360,
+        "8h": 480,
+        "12h": 720,
+        "1d": 1440,
+        "3d": 4320,
+        "1w": 10080,
+        "1M": 43200,
     }
     return _tf_map.get(tf, 0)
 
@@ -31,7 +60,7 @@ def is_higher_timeframe(candidate: str, base: str) -> bool:
 @dataclass
 class IndicatorGene:
     """Represents a single technical indicator with its parameters."""
-    
+
     type: str  # e.g., 'RSI', 'MACD', 'BBANDS'
     parameters: Dict[str, Any]  # indicator-specific parameters
     weight: float = 1.0  # importance weight
@@ -63,49 +92,50 @@ class RegimeGene:
         combination: How to combine multi-TF regime scores.
             'hierarchical' or 'weighted_voting'.
     """
+
     enabled: bool = False
-    regime_timeframes: List[str] = field(default_factory=lambda: ['4h', '1d'])
+    regime_timeframes: List[str] = field(default_factory=lambda: ["4h", "1d"])
     entry_trend_min: float = -1.0
     entry_trend_max: float = 1.0
     exit_on_regime_change: bool = False
-    combination: str = 'weighted_voting'
+    combination: str = "weighted_voting"
     micro_regime: bool = False  # Fast regime detection on base timeframe
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            'enabled': self.enabled,
-            'regime_timeframes': list(self.regime_timeframes),
-            'entry_trend_min': self.entry_trend_min,
-            'entry_trend_max': self.entry_trend_max,
-            'exit_on_regime_change': self.exit_on_regime_change,
-            'combination': self.combination,
-            'micro_regime': self.micro_regime,
+            "enabled": self.enabled,
+            "regime_timeframes": list(self.regime_timeframes),
+            "entry_trend_min": self.entry_trend_min,
+            "entry_trend_max": self.entry_trend_max,
+            "exit_on_regime_change": self.exit_on_regime_change,
+            "combination": self.combination,
+            "micro_regime": self.micro_regime,
         }
 
     @classmethod
-    def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional['RegimeGene']:
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional["RegimeGene"]:
         if data is None:
             return None
         return cls(
-            enabled=data.get('enabled', False),
-            regime_timeframes=data.get('regime_timeframes', ['4h', '1d']),
-            entry_trend_min=data.get('entry_trend_min', -1.0),
-            entry_trend_max=data.get('entry_trend_max', 1.0),
-            exit_on_regime_change=data.get('exit_on_regime_change', False),
-            combination=data.get('combination', 'weighted_voting'),
-            micro_regime=data.get('micro_regime', False),
+            enabled=data.get("enabled", False),
+            regime_timeframes=list(data.get("regime_timeframes", ["4h", "1d"])),
+            entry_trend_min=data.get("entry_trend_min", -1.0),
+            entry_trend_max=data.get("entry_trend_max", 1.0),
+            exit_on_regime_change=data.get("exit_on_regime_change", False),
+            combination=data.get("combination", "weighted_voting"),
+            micro_regime=data.get("micro_regime", False),
         )
 
 
 @dataclass
 class ConditionGene:
     """Represents an entry/exit condition."""
-    
+
     indicator: str  # Which indicator to use (can be instance_id like 'RSI_0' or type like 'RSI')
     operator: str  # Comparison operator: '<', '>', 'cross_above', 'cross_below',
-                    #   'increasing', 'decreasing', 'between', 'value_above_ago'
+    #   'increasing', 'decreasing', 'between', 'value_above_ago'
     threshold: float  # Threshold value (or lower bound for 'between')
-    logic: str = 'AND'  # Logic operator: 'AND', 'OR'
+    logic: str = "AND"  # Logic operator: 'AND', 'OR'
     threshold_upper: float = 0.0  # Upper bound for 'between' operator
     lookback: int = 3  # Lookback period for 'increasing', 'decreasing', 'value_above_ago'
 
@@ -114,42 +144,44 @@ class ConditionGene:
 class StrategyGene:
     """
     Complete genetic representation of a trading strategy.
-    
+
     This class encodes all aspects of a strategy that can be evolved:
     - Indicators used
     - Entry conditions
     - Exit conditions
     - Risk management parameters
     """
-    
+
     # Identifiers
     generation: int
     individual_id: int
-    
+
     # Strategy components
     indicators: List[IndicatorGene] = field(default_factory=list)
     entry_conditions: List[ConditionGene] = field(default_factory=list)
     exit_conditions: List[ConditionGene] = field(default_factory=list)
-    
+
     # Independent short conditions (optional; when empty, inverted long conditions are used)
     short_entry_conditions: List[ConditionGene] = field(default_factory=list)
     short_exit_conditions: List[ConditionGene] = field(default_factory=list)
-    
+
     # Risk management
-    timeframe: str = '5m'
+    timeframe: str = "5m"
     stoploss: float = -0.10
-    minimal_roi: Dict[str, float] = field(default_factory=lambda: {"0": 0.04, "30": 0.02, "60": 0.01})
+    minimal_roi: Dict[str, float] = field(
+        default_factory=lambda: {"0": 0.04, "30": 0.02, "60": 0.01}
+    )
     max_open_trades: int = 3  # Maximum number of concurrent open trades
-    
+
     # Multi-timeframe
     informative_timeframes: List[str] = field(default_factory=list)  # e.g. ['1h', '4h']
-    
+
     # Optional parameters
     trailing_stop: bool = False
     trailing_stop_positive: Optional[float] = None
     trailing_stop_positive_offset: Optional[float] = None
     can_short: bool = False  # Enable short selling (enter_short/exit_short signals)
-    
+
     # Regime specialization (Phase 1B)
     # preferred_regime: which market regime this strategy is designed for
     #   None = no preference, 'bullish', 'bearish', 'sideways', 'volatile'
@@ -158,18 +190,18 @@ class StrategyGene:
     #   'generalist': all regimes evaluated equally (default, backward compatible)
     #   'specialist': preferred regime segments get higher weight
     #   'exclusive': only evaluate on segments matching preferred regime
-    regime_mode: str = 'generalist'
-    
+    regime_mode: str = "generalist"
+
     # In-strategy runtime regime awareness (Phase 2)
     # When enabled, the generated strategy computes regime scores at runtime
     # and uses them to filter entries/exits.
     regime_gene: Optional[RegimeGene] = None
-    
+
     # Self-adaptive GA parameters (evolved per-individual)
     # When self_adaptive is enabled in config, these are used instead of global rates
-    self_mutation_rate: Optional[float] = None   # Individual's own mutation rate
-    self_crossover_pref: Optional[str] = None    # Preferred crossover operator
-    
+    self_mutation_rate: Optional[float] = None  # Individual's own mutation rate
+    self_crossover_pref: Optional[str] = None  # Preferred crossover operator
+
     def __post_init__(self):
         """Validate strategy gene after initialization."""
         if not self.indicators:
@@ -178,7 +210,7 @@ class StrategyGene:
             raise ValueError("Strategy must have at least one entry condition")
         # Enforce ROI monotonicity: values must decrease as time increases
         self._enforce_roi_monotonicity()
-    
+
     def _enforce_roi_monotonicity(self):
         """Ensure ROI values decrease over time (higher ROI at earlier timepoints)."""
         if not self.minimal_roi:
@@ -201,199 +233,221 @@ class StrategyGene:
         identical indicators/conditions/parameters produce the same
         fingerprint even if they belong to different individuals.
         """
-        import hashlib, json
+        import hashlib
+        import json
+
         d = self.to_dict()
-        d.pop('generation', None)
-        d.pop('individual_id', None)
-        d.pop('self_mutation_rate', None)
-        d.pop('self_crossover_pref', None)
+        d.pop("generation", None)
+        d.pop("individual_id", None)
+        d.pop("self_mutation_rate", None)
+        d.pop("self_crossover_pref", None)
         raw = json.dumps(d, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert strategy gene to dictionary for storage."""
         return {
-            'generation': self.generation,
-            'individual_id': self.individual_id,
-            'indicators': [
-                {'type': ind.type, 'parameters': dict(ind.parameters), 'weight': ind.weight,
-                 'instance_id': ind.instance_id, 'timeframe': ind.timeframe,
-                 'param_bounds': dict(ind.param_bounds) if ind.param_bounds else None}
+            "generation": self.generation,
+            "individual_id": self.individual_id,
+            "indicators": [
+                {
+                    "type": ind.type,
+                    "parameters": _copy.deepcopy(ind.parameters),
+                    "weight": ind.weight,
+                    "instance_id": ind.instance_id,
+                    "timeframe": ind.timeframe,
+                    "param_bounds": _copy.deepcopy(ind.param_bounds) if ind.param_bounds else None,
+                }
                 for ind in self.indicators
             ],
-            'entry_conditions': [
+            "entry_conditions": [
                 {
-                    'indicator': cond.indicator,
-                    'operator': cond.operator,
-                    'threshold': cond.threshold,
-                    'logic': cond.logic,
-                    'threshold_upper': cond.threshold_upper,
-                    'lookback': cond.lookback
+                    "indicator": cond.indicator,
+                    "operator": cond.operator,
+                    "threshold": cond.threshold,
+                    "logic": cond.logic,
+                    "threshold_upper": cond.threshold_upper,
+                    "lookback": cond.lookback,
                 }
                 for cond in self.entry_conditions
             ],
-            'exit_conditions': [
+            "exit_conditions": [
                 {
-                    'indicator': cond.indicator,
-                    'operator': cond.operator,
-                    'threshold': cond.threshold,
-                    'logic': cond.logic,
-                    'threshold_upper': cond.threshold_upper,
-                    'lookback': cond.lookback
+                    "indicator": cond.indicator,
+                    "operator": cond.operator,
+                    "threshold": cond.threshold,
+                    "logic": cond.logic,
+                    "threshold_upper": cond.threshold_upper,
+                    "lookback": cond.lookback,
                 }
                 for cond in self.exit_conditions
             ],
-            'timeframe': self.timeframe,
-            'informative_timeframes': self.informative_timeframes,
-            'stoploss': self.stoploss,
-            'minimal_roi': self.minimal_roi,
-            'max_open_trades': self.max_open_trades,
-            'trailing_stop': self.trailing_stop,
-            'trailing_stop_positive': self.trailing_stop_positive,
-            'trailing_stop_positive_offset': self.trailing_stop_positive_offset,
-            'can_short': self.can_short,
-            'short_entry_conditions': [
+            "timeframe": self.timeframe,
+            "informative_timeframes": list(self.informative_timeframes),
+            "stoploss": self.stoploss,
+            "minimal_roi": dict(self.minimal_roi),
+            "max_open_trades": self.max_open_trades,
+            "trailing_stop": self.trailing_stop,
+            "trailing_stop_positive": self.trailing_stop_positive,
+            "trailing_stop_positive_offset": self.trailing_stop_positive_offset,
+            "can_short": self.can_short,
+            "short_entry_conditions": [
                 {
-                    'indicator': cond.indicator,
-                    'operator': cond.operator,
-                    'threshold': cond.threshold,
-                    'logic': cond.logic,
-                    'threshold_upper': cond.threshold_upper,
-                    'lookback': cond.lookback
+                    "indicator": cond.indicator,
+                    "operator": cond.operator,
+                    "threshold": cond.threshold,
+                    "logic": cond.logic,
+                    "threshold_upper": cond.threshold_upper,
+                    "lookback": cond.lookback,
                 }
                 for cond in self.short_entry_conditions
             ],
-            'short_exit_conditions': [
+            "short_exit_conditions": [
                 {
-                    'indicator': cond.indicator,
-                    'operator': cond.operator,
-                    'threshold': cond.threshold,
-                    'logic': cond.logic,
-                    'threshold_upper': cond.threshold_upper,
-                    'lookback': cond.lookback
+                    "indicator": cond.indicator,
+                    "operator": cond.operator,
+                    "threshold": cond.threshold,
+                    "logic": cond.logic,
+                    "threshold_upper": cond.threshold_upper,
+                    "lookback": cond.lookback,
                 }
                 for cond in self.short_exit_conditions
             ],
-            'preferred_regime': self.preferred_regime,
-            'regime_mode': self.regime_mode,
-            'regime_gene': self.regime_gene.to_dict() if self.regime_gene else None,
-            'self_mutation_rate': self.self_mutation_rate,
-            'self_crossover_pref': self.self_crossover_pref,
+            "preferred_regime": self.preferred_regime,
+            "regime_mode": self.regime_mode,
+            "regime_gene": self.regime_gene.to_dict() if self.regime_gene else None,
+            "self_mutation_rate": self.self_mutation_rate,
+            "self_crossover_pref": self.self_crossover_pref,
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'StrategyGene':
-        """Create strategy gene from dictionary."""
+    def from_dict(cls, data: Dict[str, Any]) -> "StrategyGene":
+        """Create a strategy gene without breaking indicator references.
+
+        Serialized conditions normally point at ``instance_id`` values.  Those
+        IDs therefore have to survive long enough for ``assign_instance_ids``
+        to translate them to the current canonical IDs.  Clearing them here
+        used to orphan otherwise valid conditions after every checkpoint,
+        worker, or Hall-of-Fame round-trip.
+        """
         indicators = []
-        for ind in data['indicators']:
-            ind_type = ind['type']
+        for ind in data["indicators"]:
+            ind_type = ind["type"]
             # Sanitize corrupted CDL types with cascading _0 suffixes
             # e.g. 'CDL_MORNINGSTAR_0_0_0' -> 'CDL_MORNINGSTAR'
-            if ind_type.startswith('CDL_'):
+            if ind_type.startswith("CDL_"):
                 ind_type = cls._strip_cdl_suffixes(ind_type)
-            indicators.append(IndicatorGene(
-                type=ind_type,
-                parameters=ind['parameters'],
-                weight=ind.get('weight', 1.0),
-                instance_id=None,  # Reset — will be reassigned by assign_instance_ids
-                timeframe=ind.get('timeframe'),
-                param_bounds=ind.get('param_bounds')
-            ))
-        
-        entry_conditions = []
-        for cond in data['entry_conditions']:
-            ind_ref = cond['indicator']
-            # Sanitize corrupted CDL condition references
-            if ind_ref.startswith('CDL_'):
-                ind_ref = cls._strip_cdl_suffixes(ind_ref)
-            entry_conditions.append(ConditionGene(
-                indicator=ind_ref,
-                operator=cond['operator'],
-                threshold=cond['threshold'],
-                logic=cond.get('logic', 'AND'),
-                threshold_upper=cond.get('threshold_upper', 0.0),
-                lookback=cond.get('lookback', 3)
-            ))
-        
-        exit_conditions = []
-        for cond in data.get('exit_conditions', []):
-            ind_ref = cond['indicator']
-            # Sanitize corrupted CDL condition references
-            if ind_ref.startswith('CDL_'):
-                ind_ref = cls._strip_cdl_suffixes(ind_ref)
-            exit_conditions.append(ConditionGene(
-                indicator=ind_ref,
-                operator=cond['operator'],
-                threshold=cond['threshold'],
-                logic=cond.get('logic', 'AND'),
-                threshold_upper=cond.get('threshold_upper', 0.0),
-                lookback=cond.get('lookback', 3)
-            ))
-        
-        short_entry_conditions = []
-        for cond in data.get('short_entry_conditions', []):
-            ind_ref = cond['indicator']
-            if ind_ref.startswith('CDL_'):
-                ind_ref = cls._strip_cdl_suffixes(ind_ref)
-            short_entry_conditions.append(ConditionGene(
-                indicator=ind_ref,
-                operator=cond['operator'],
-                threshold=cond['threshold'],
-                logic=cond.get('logic', 'AND'),
-                threshold_upper=cond.get('threshold_upper', 0.0),
-                lookback=cond.get('lookback', 3)
-            ))
-        
-        short_exit_conditions = []
-        for cond in data.get('short_exit_conditions', []):
-            ind_ref = cond['indicator']
-            if ind_ref.startswith('CDL_'):
-                ind_ref = cls._strip_cdl_suffixes(ind_ref)
-            short_exit_conditions.append(ConditionGene(
-                indicator=ind_ref,
-                operator=cond['operator'],
-                threshold=cond['threshold'],
-                logic=cond.get('logic', 'AND'),
-                threshold_upper=cond.get('threshold_upper', 0.0),
-                lookback=cond.get('lookback', 3)
-            ))
-        
-        return cls(
-            generation=data['generation'],
-            individual_id=data['individual_id'],
+            indicators.append(
+                IndicatorGene(
+                    type=ind_type,
+                    parameters=_copy.deepcopy(ind["parameters"]),
+                    weight=ind.get("weight", 1.0),
+                    instance_id=ind.get("instance_id"),
+                    timeframe=ind.get("timeframe"),
+                    param_bounds=_copy.deepcopy(ind.get("param_bounds")),
+                )
+            )
+
+        def _condition_from_dict(cond: Dict[str, Any]) -> ConditionGene:
+            # Keep the reference verbatim.  assign_instance_ids() can then
+            # distinguish a valid CDL instance (CDL_HAMMER_0) from a legacy
+            # type reference or a cascaded/corrupted ID.
+            return ConditionGene(
+                indicator=cond["indicator"],
+                operator=cond["operator"],
+                threshold=cond["threshold"],
+                logic=cond.get("logic", "AND"),
+                threshold_upper=cond.get("threshold_upper", 0.0),
+                lookback=cond.get("lookback", 3),
+            )
+
+        gene = cls(
+            generation=data["generation"],
+            individual_id=data["individual_id"],
             indicators=indicators,
-            entry_conditions=entry_conditions,
-            exit_conditions=exit_conditions,
-            short_entry_conditions=short_entry_conditions,
-            short_exit_conditions=short_exit_conditions,
-            timeframe=data.get('timeframe', '5m'),
-            informative_timeframes=data.get('informative_timeframes', []),
-            stoploss=data.get('stoploss', -0.10),
-            minimal_roi=data.get('minimal_roi', {"0": 0.04, "30": 0.02, "60": 0.01}),
-            max_open_trades=data.get('max_open_trades', 3),
-            trailing_stop=data.get('trailing_stop', False),
-            trailing_stop_positive=data.get('trailing_stop_positive'),
-            trailing_stop_positive_offset=data.get('trailing_stop_positive_offset'),
-            can_short=data.get('can_short', False),
-            preferred_regime=data.get('preferred_regime'),
-            regime_mode=data.get('regime_mode', 'generalist'),
-            regime_gene=RegimeGene.from_dict(data['regime_gene']) if data.get('regime_gene') else None,
-            self_mutation_rate=data.get('self_mutation_rate'),
-            self_crossover_pref=data.get('self_crossover_pref'),
+            entry_conditions=[_condition_from_dict(c) for c in data["entry_conditions"]],
+            exit_conditions=[_condition_from_dict(c) for c in data.get("exit_conditions", [])],
+            short_entry_conditions=[
+                _condition_from_dict(c) for c in data.get("short_entry_conditions", [])
+            ],
+            short_exit_conditions=[
+                _condition_from_dict(c) for c in data.get("short_exit_conditions", [])
+            ],
+            timeframe=data.get("timeframe", "5m"),
+            informative_timeframes=list(data.get("informative_timeframes", [])),
+            stoploss=data.get("stoploss", -0.10),
+            minimal_roi=dict(data.get("minimal_roi", {"0": 0.04, "30": 0.02, "60": 0.01})),
+            max_open_trades=data.get("max_open_trades", 3),
+            trailing_stop=data.get("trailing_stop", False),
+            trailing_stop_positive=data.get("trailing_stop_positive"),
+            trailing_stop_positive_offset=data.get("trailing_stop_positive_offset"),
+            can_short=data.get("can_short", False),
+            preferred_regime=data.get("preferred_regime"),
+            regime_mode=data.get("regime_mode", "generalist"),
+            regime_gene=RegimeGene.from_dict(data["regime_gene"])
+            if data.get("regime_gene")
+            else None,
+            self_mutation_rate=data.get("self_mutation_rate"),
+            self_crossover_pref=data.get("self_crossover_pref"),
         )
-    
-    def copy(self) -> 'StrategyGene':
+        gene.assign_instance_ids()
+        return gene
+
+    @classmethod
+    def from_dict_exact(cls, data: Dict[str, Any]) -> "StrategyGene":
+        """Load a canonical payload and reject every implicit repair.
+
+        This is the persistence/IPC boundary for new V2 artifacts.  Legacy
+        callers continue to use :meth:`from_dict`, which deterministically
+        normalizes historical IDs.  Comparing the detached normalized payload
+        makes missing fields, duplicate IDs, bare type references, CDL repairs,
+        and condition deduplication fail closed here.
+        """
+        source = _copy.deepcopy(data)
+        gene = cls.from_dict(source)
+        if gene.to_dict() != source:
+            raise ValueError("StrategyGene payload is not canonical and requires migration")
+
+        indicator_ids = [indicator.instance_id for indicator in gene.indicators]
+        if any(instance_id is None for instance_id in indicator_ids):
+            raise ValueError("StrategyGene payload contains an indicator without instance_id")
+        if len(indicator_ids) != len(set(indicator_ids)):
+            raise ValueError("StrategyGene payload contains duplicate instance_id values")
+
+        known_ids = set(indicator_ids)
+        orphaned = sorted(
+            {
+                condition.indicator
+                for condition in (
+                    gene.entry_conditions
+                    + gene.exit_conditions
+                    + gene.short_entry_conditions
+                    + gene.short_exit_conditions
+                )
+                if condition.indicator not in known_ids
+            }
+        )
+        if orphaned:
+            raise ValueError(
+                "StrategyGene payload contains unresolved condition references: "
+                + ", ".join(orphaned)
+            )
+        from genetic_algorithm.genome.contract import validate_strategy_gene_semantics
+
+        validate_strategy_gene_semantics(gene)
+        return gene
+
+    def copy(self) -> "StrategyGene":
         """Create a deep copy of this strategy gene."""
-        import copy as _copy
         clone = _copy.deepcopy(self)
         clone.assign_instance_ids()
         return clone
-    
+
     def get_missing_indicators(self) -> List[str]:
         """
         Find indicator references in conditions that are not in indicators list.
         Now handles both instance_ids (e.g., 'RSI_0') and type names (e.g., 'RSI').
-        
+
         Returns:
             List of missing indicator references
         """
@@ -403,24 +457,29 @@ class StrategyGene:
             if ind.instance_id:
                 present_refs.add(ind.instance_id)
             present_refs.add(ind.type)
-        
+
         # Get all indicator references in conditions
         referenced_refs = set()
-        for cond in self.entry_conditions + self.exit_conditions:
+        for cond in (
+            self.entry_conditions
+            + self.exit_conditions
+            + self.short_entry_conditions
+            + self.short_exit_conditions
+        ):
             referenced_refs.add(cond.indicator)
-        
+
         # Find missing references
         missing_refs = referenced_refs - present_refs
-        return list(missing_refs)
-    
+        return sorted(missing_refs)
+
     def prune_orphaned_conditions(self) -> int:
         """
         Remove conditions that reference indicators not present in the gene.
-        
+
         This is the inverse of ensure_indicators_for_conditions: instead of
         adding random indicators to satisfy orphaned conditions, we remove
         the orphaned conditions to keep the indicator set clean.
-        
+
         Returns:
             Number of conditions pruned
         """
@@ -429,88 +488,121 @@ class StrategyGene:
             if ind.instance_id:
                 present_refs.add(ind.instance_id)
             present_refs.add(ind.type)
-        
+
         pruned = 0
-        for attr in ('entry_conditions', 'exit_conditions'):
+        for attr in (
+            "entry_conditions",
+            "exit_conditions",
+            "short_entry_conditions",
+            "short_exit_conditions",
+        ):
             original = getattr(self, attr)
             kept = [c for c in original if c.indicator in present_refs]
-            # Never prune to zero — always keep at least one condition to prevent
-            # invalid gene state that bypasses __post_init__ validation
-            if not kept and original:
-                kept = original[:1]
             pruned += len(original) - len(kept)
             setattr(self, attr, kept)
-        
+
         if pruned:
             import logging
-            logging.getLogger(__name__).debug(
-                f"Pruned {pruned} orphaned condition(s)")
-        
+
+            logging.getLogger(__name__).debug(f"Pruned {pruned} orphaned condition(s)")
+
         return pruned
-    
+
     def ensure_indicators_for_conditions(self, indicator_config: Dict[str, Any]) -> None:
         """
         Ensure all indicators referenced in conditions are present in indicators list.
         Adds missing indicators with default parameters.
-        
+
         Args:
             indicator_config: Configuration with indicator parameters
         """
         from genetic_algorithm.utils.indicator_factory import create_random_indicator
-        
+
         missing_types = self.get_missing_indicators()
-        
+
         for ind_ref in missing_types:
-            # Extract base type from instance_id format (e.g., 'RSI_0' -> 'RSI')
-            # For CDL_* patterns, strip ALL trailing numeric suffixes to prevent
-            # cascading name mangling (CDL_MORNINGSTAR_0_0_0 -> CDL_MORNINGSTAR)
-            if ind_ref.startswith('CDL_'):
-                base_type = self._strip_cdl_suffixes(ind_ref)
-            elif '_' in ind_ref:
-                parts = ind_ref.rsplit('_', 1)
-                if len(parts) == 2 and parts[1].isdigit():
-                    base_type = parts[0]  # e.g., 'RSI_0' -> 'RSI'
-                else:
-                    base_type = ind_ref
-            else:
-                base_type = ind_ref
-            new_indicator = create_random_indicator(base_type, indicator_config,
-                                                       timeframe=self.timeframe)
+            base_type, referenced_timeframe = self._parse_indicator_reference(ind_ref)
+            new_indicator = create_random_indicator(
+                base_type, indicator_config, timeframe=referenced_timeframe or self.timeframe
+            )
+            new_indicator.timeframe = referenced_timeframe
+            # Preserve the unresolved reference until assign_instance_ids()
+            # can translate it to the newly allocated canonical ID.
+            new_indicator.instance_id = ind_ref
             self.indicators.append(new_indicator)
-    
+            if referenced_timeframe and referenced_timeframe not in self.informative_timeframes:
+                self.informative_timeframes.append(referenced_timeframe)
+
+    @classmethod
+    def _parse_indicator_reference(cls, reference: str) -> tuple[str, Optional[str]]:
+        """Return ``(indicator_type, informative_timeframe)`` for an ID.
+
+        Handles base IDs (``RSI_0``), informative IDs (``EMA_1h_0``),
+        underscore-containing CDL types, and historical cascaded CDL suffixes.
+        """
+        stem = reference
+        if "_" in stem:
+            candidate, suffix = stem.rsplit("_", 1)
+            if suffix.isdigit():
+                stem = candidate
+
+        referenced_timeframe = None
+        for timeframe in sorted(TIMEFRAME_ORDER, key=len, reverse=True):
+            marker = f"_{timeframe}"
+            if stem.endswith(marker):
+                stem = stem[: -len(marker)]
+                referenced_timeframe = timeframe
+                break
+
+        if stem.startswith("CDL_"):
+            stem = cls._strip_cdl_suffixes(stem)
+        return stem, referenced_timeframe
+
     @staticmethod
     def _strip_cdl_suffixes(name: str) -> str:
         """Strip ALL trailing numeric suffixes from a CDL indicator name.
-        
+
         CDL_MORNINGSTAR_0_0_0 -> CDL_MORNINGSTAR
         CDL_ENGULFING_0 -> CDL_ENGULFING
         CDL_HAMMER -> CDL_HAMMER (unchanged)
         """
         result = name
-        while '_' in result:
-            parts = result.rsplit('_', 1)
+        while "_" in result:
+            parts = result.rsplit("_", 1)
             if len(parts) == 2 and parts[1].isdigit():
                 result = parts[0]
             else:
                 break
         # Safety: never strip below the CDL_ base type
-        if result.startswith('CDL_') and len(result) > 4:
+        if result.startswith("CDL_") and len(result) > 4:
             return result
         return name  # Return original if stripping went too far
-    
+
     def deduplicate_conditions(self) -> int:
         """Remove duplicate entry/exit conditions (same indicator + operator + value).
-        
+
         Returns:
             Number of duplicate conditions removed
         """
         removed = 0
-        for attr in ('entry_conditions', 'exit_conditions'):
+        for attr in (
+            "entry_conditions",
+            "exit_conditions",
+            "short_entry_conditions",
+            "short_exit_conditions",
+        ):
             conditions = getattr(self, attr)
             seen = set()
             unique = []
             for cond in conditions:
-                key = (cond.indicator, cond.operator, str(cond.threshold))
+                key = (
+                    cond.indicator,
+                    cond.operator,
+                    str(cond.threshold),
+                    cond.logic,
+                    str(cond.threshold_upper),
+                    cond.lookback,
+                )
                 if key not in seen:
                     seen.add(key)
                     unique.append(cond)
@@ -518,43 +610,58 @@ class StrategyGene:
                     removed += 1
             setattr(self, attr, unique)
         return removed
-    
+
     def assign_instance_ids(self) -> None:
         """
         Assign unique instance IDs to all indicators.
-        
+
         Creates IDs in the format: {type}_{index} for base timeframe indicators
         or {type}_{timeframe}_{index} for informative timeframe indicators.
         E.g., RSI_0, RSI_1, RSI_1h_0, EMA_4h_0, etc.
-        
+
         Also updates condition references if they currently use type names
         to use the new instance IDs.
         """
+        # Capture the old IDs before canonicalization.  Conditions may still
+        # reference them, especially after deserialization or a timeframe
+        # mutation.
+        old_instance_ids = [ind.instance_id for ind in self.indicators]
+
         # Count instances of each (type, timeframe) combination
         type_tf_counts: Dict[str, int] = {}
-        
+
         def _make_key(ind_type: str, tf: Optional[str]) -> str:
             return f"{ind_type}_{tf}" if tf else ind_type
-        
-        # Reset instance IDs and strip any cascaded numeric suffixes
-        # before re-assigning, to prevent CDL_MORNINGSTAR_0_0_0 corruption
+
+        # Strip cascaded numeric suffixes from corrupted CDL *types* before
+        # assigning fresh canonical IDs.  Condition references are handled
+        # separately below so valid IDs such as CDL_MORNINGSTAR_0 survive.
         for ind in self.indicators:
-            if ind.type.startswith('CDL_'):
+            if ind.type.startswith("CDL_"):
                 ind.type = self._strip_cdl_suffixes(ind.type)
             ind.instance_id = None
-        
+
         # Assign fresh instance IDs to indicators
         for ind in self.indicators:
             key = _make_key(ind.type, ind.timeframe)
             if key not in type_tf_counts:
                 type_tf_counts[key] = 0
-            
+
             if ind.timeframe:
                 ind.instance_id = f"{ind.type}_{ind.timeframe}_{type_tf_counts[key]}"
             else:
                 ind.instance_id = f"{ind.type}_{type_tf_counts[key]}"
             type_tf_counts[key] += 1
-        
+
+        # Translate prior instance IDs to their canonical replacements.  A
+        # handful of historical artifacts contain duplicate IDs; those were
+        # already ambiguous, so map them deterministically to the first
+        # matching indicator instead of inventing random indicators.
+        old_to_new: Dict[str, str] = {}
+        for old_id, ind in zip(old_instance_ids, self.indicators):
+            if old_id and ind.instance_id:
+                old_to_new.setdefault(old_id, ind.instance_id)
+
         # Create mapping from type to sorted instance IDs (sorted for determinism)
         type_to_instances: Dict[str, List[str]] = {}
         for ind in self.indicators:
@@ -563,14 +670,40 @@ class StrategyGene:
             type_to_instances[ind.type].append(ind.instance_id)
         for key in type_to_instances:
             type_to_instances[key].sort()
-        
+
         # Update condition references: if a condition references a type name
         # and there's only one instance of that type, update it to use the instance_id
-        _ambig_counter = 0
-        for cond in self.entry_conditions + self.exit_conditions:
-            # If condition references a type name directly
-            if cond.indicator in type_to_instances:
-                instances = type_to_instances[cond.indicator]
+        canonical_ids = {ind.instance_id for ind in self.indicators if ind.instance_id is not None}
+        ambiguous_counters: Dict[str, int] = {}
+        for cond in (
+            self.entry_conditions
+            + self.exit_conditions
+            + self.short_entry_conditions
+            + self.short_exit_conditions
+        ):
+            original_ref = cond.indicator
+
+            # Exact old-ID mappings take precedence over type-name repair.
+            if original_ref in old_to_new:
+                cond.indicator = old_to_new[original_ref]
+                continue
+
+            # Legacy records without serialized IDs can already contain the
+            # canonical reference.  Do not mistake a valid CDL ID for a type.
+            if original_ref in canonical_ids:
+                continue
+
+            type_ref = original_ref
+            if original_ref.startswith("CDL_"):
+                stripped_ref = self._strip_cdl_suffixes(original_ref)
+                if stripped_ref in type_to_instances:
+                    type_ref = stripped_ref
+
+            # If condition references a type name directly, resolve it to a
+            # concrete instance.  Multiple legacy instances are distributed
+            # deterministically per type.
+            if type_ref in type_to_instances:
+                instances = type_to_instances[type_ref]
                 # If there's only one instance, use it; otherwise keep the type reference
                 if len(instances) == 1:
                     cond.indicator = instances[0]
@@ -579,47 +712,50 @@ class StrategyGene:
                 # silently mapping all conditions to the first instance.
                 elif len(instances) > 1:
                     import logging as _logging
+
                     _logger = _logging.getLogger(__name__)
+                    counter = ambiguous_counters.get(type_ref, 0)
+                    selected = instances[counter % len(instances)]
                     _logger.debug(
-                        f"Condition references type '{cond.indicator}' with "
+                        f"Condition references type '{type_ref}' with "
                         f"{len(instances)} instances: {instances}. "
-                        f"Assigning to '{instances[_ambig_counter % len(instances)]}' "
+                        f"Assigning to '{selected}' "
                         f"(round-robin)."
                     )
-                    cond.indicator = instances[_ambig_counter % len(instances)]
-                    _ambig_counter += 1
-        
+                    cond.indicator = selected
+                    ambiguous_counters[type_ref] = counter + 1
+
         # Deduplicate conditions after ID reassignment
         self.deduplicate_conditions()
-    
+
     def calculate_complexity(self) -> int:
         """
         Calculate the complexity of this strategy.
-        
+
         Complexity is measured as the sum of:
         - Number of indicators
         - Number of entry conditions
         - Number of exit conditions
-        
+
         Returns:
             Total complexity score (higher = more complex)
         """
         return (
-            len(self.indicators) +
-            len(self.entry_conditions) +
-            len(self.exit_conditions) +
-            len(self.short_entry_conditions) +
-            len(self.short_exit_conditions)
+            len(self.indicators)
+            + len(self.entry_conditions)
+            + len(self.exit_conditions)
+            + len(self.short_entry_conditions)
+            + len(self.short_exit_conditions)
         )
-    
-    def get_base_indicators(self) -> List['IndicatorGene']:
+
+    def get_base_indicators(self) -> List["IndicatorGene"]:
         """Return indicators on the base timeframe (timeframe is None)."""
         return [ind for ind in self.indicators if ind.timeframe is None]
-    
-    def get_informative_indicators(self) -> List['IndicatorGene']:
+
+    def get_informative_indicators(self) -> List["IndicatorGene"]:
         """Return indicators on informative (higher) timeframes."""
         return [ind for ind in self.indicators if ind.timeframe is not None]
-    
-    def get_indicators_by_timeframe(self, tf: Optional[str] = None) -> List['IndicatorGene']:
+
+    def get_indicators_by_timeframe(self, tf: Optional[str] = None) -> List["IndicatorGene"]:
         """Return indicators for a specific timeframe (None = base)."""
         return [ind for ind in self.indicators if ind.timeframe == tf]

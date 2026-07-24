@@ -7,7 +7,7 @@ significant speedup on multi-core systems.
 Features:
     - Per-backtest timeout to prevent pathological strategies from blocking workers
     - Automatic orphaned worker cleanup via atexit handlers
-    - Walk-forward disabled in workers (use post-hoc WF validation on elites instead)
+    - Walk-forward uses the same per-candidate evaluator semantics in workers
 
 Usage:
     Enable in ga_config.yaml:
@@ -23,6 +23,7 @@ Benchmark results (8-core system, 50 strategies):
 """
 
 import atexit
+import copy
 import logging
 import os
 import time
@@ -39,6 +40,11 @@ _worker_config = None
 
 # Track active executors for cleanup
 _active_executors: List['ProcessPoolExecutor'] = []
+
+
+def _build_worker_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a detached worker config without changing runtime semantics."""
+    return copy.deepcopy(config)
 
 
 def _cleanup_executors():
@@ -101,9 +107,9 @@ def _init_worker(config: Dict[str, Any]):
     Called once when each worker starts. Creates a separate evaluator
     instance to avoid sharing state between processes.
     
-    Walk-forward is always disabled in workers to prevent the N×W
-    backtest explosion that causes deadlocks. Walk-forward validation
-    should be applied post-hoc on elite candidates only.
+    Walk-forward remains enabled when configured.  Each worker evaluates one
+    candidate's windows sequentially, so concurrency stays bounded by the
+    worker count while matching the sequential evaluator exactly.
     
     Args:
         config: Configuration dictionary
@@ -141,12 +147,10 @@ def _init_worker(config: Dict[str, Any]):
     # Import here to avoid circular imports and ensure each process has its own imports
     from genetic_algorithm.evaluation.fitness import FitnessEvaluator
     
-    # Disable walk-forward in worker processes to prevent N×W backtest explosion
-    # Walk-forward validation is applied post-hoc on elites instead
-    worker_config = dict(config)
-    if 'walk_forward' in worker_config:
-        worker_config['walk_forward'] = dict(worker_config['walk_forward'])
-        worker_config['walk_forward']['enabled'] = False
+    # Keep a detached config, but do not rewrite feature semantics for worker
+    # execution.  The old post-hoc top-K shortcut evaluated a different
+    # algorithm than the sequential path.
+    worker_config = _build_worker_config(config)
     
     _worker_config = worker_config
     _worker_evaluator = FitnessEvaluator(worker_config)
@@ -1180,7 +1184,7 @@ class ParallelEvaluator:
       generations, avoiding the expensive data-reload on each pool
       creation and eliminating zombie-process accumulation.
     - Per-backtest timeout prevents pathological strategies from blocking
-    - Walk-forward disabled in workers (applied post-hoc on elites instead)
+    - Walk-forward evaluated per candidate inside workers for parity
     - Automatic cleanup of worker processes on shutdown/exit
     - Context manager support (``with ParallelEvaluator(...) as pe:``)
     
@@ -1232,8 +1236,12 @@ class ParallelEvaluator:
         # Track whether WF is configured (for post-hoc validation)
         wf_config = config.get('walk_forward', {})
         self.walk_forward_configured = wf_config.get('enabled', False)
+        self.walk_forward_in_workers = self.walk_forward_configured
         if self.walk_forward_configured:
-            logger.info("[PARALLEL] Walk-forward detected — will be run post-hoc on elites, not inside workers")
+            logger.info(
+                "[PARALLEL] Walk-forward detected — using identical "
+                "per-candidate worker evaluation"
+            )
         
         # Persistent pool — created lazily on first evaluate_batch()
         self._executor: Optional[ProcessPoolExecutor] = None
@@ -1503,7 +1511,8 @@ class ParallelEvaluator:
                     task['strategy_gene_dict'],
                     task['strategy_index'],
                     task['nsga2_mode'],
-                    task['objectives_config']
+                    task['objectives_config'],
+                    nsga2_min_trades=task['nsga2_min_trades'],
                 ): task['strategy_index']
                 for task in tasks
             }

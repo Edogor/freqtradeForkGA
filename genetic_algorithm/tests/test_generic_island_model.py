@@ -13,22 +13,17 @@ Tests cover:
 - Integration with run_ga.py branching
 """
 
-import copy
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock
 
+from genetic_algorithm.core.generic_island_model import (
+    ALL_INDICATORS,
+    INDICATOR_FAMILIES,
+    GenericIslandModelEvolution,
+    GenericIslandStats,
+)
 from genetic_algorithm.core.individual import Individual
 from genetic_algorithm.core.population import Population
-from genetic_algorithm.core.strategy_gene import StrategyGene, IndicatorGene, ConditionGene
-from genetic_algorithm.core.generic_island_model import (
-    GenericIslandModelEvolution,
-    GenericIslandConfig,
-    GenericMigrationConfig,
-    GenericIslandStats,
-    GenericMigrationEvent,
-    INDICATOR_FAMILIES,
-    ALL_INDICATORS,
-)
+from genetic_algorithm.core.strategy_gene import ConditionGene, IndicatorGene, StrategyGene
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -73,10 +68,10 @@ def _make_individual(fitness=None, generation=0, individual_id=0, **gene_kw):
     gene = _make_gene(generation=generation, individual_id=individual_id, **gene_kw)
     ind = Individual(strategy_gene=gene)
     if fitness is not None:
-        ind.raw_fitness = fitness
-        ind.fitness = fitness
-        ind.evaluated = True
-        ind.metrics = {'profit': fitness * 10, 'sharpe_ratio': 1.0, 'num_trades': 20}
+        ind.set_fitness(
+            fitness,
+            {'profit': fitness * 10, 'sharpe_ratio': 1.0, 'num_trades': 20},
+        )
     return ind
 
 
@@ -91,6 +86,8 @@ def _make_population(fitnesses):
 
 def _minimal_config(num_islands=3, topology='ring', **gim_overrides):
     """Build a minimal config dict for GenericIslandModelEvolution."""
+    import tempfile
+
     cfg = {
         'genetic_algorithm': {
             'population_size': 10,
@@ -99,7 +96,7 @@ def _minimal_config(num_islands=3, topology='ring', **gim_overrides):
             'crossover_rate': 0.7,
             'elite_size': 2,
             'tournament_size': 3,
-            'seed': 42,
+            'random_seed': 42,
         },
         'backtesting': {
             'pairs': ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT'],
@@ -138,6 +135,11 @@ def _minimal_config(num_islands=3, topology='ring', **gim_overrides):
         'fitness_weights': {},
         'fitness_penalties': {},
         'strategy_constraints': {},
+        'hall_of_fame': {
+            'directory': tempfile.mkdtemp(prefix='ga-generic-island-test-hof-'),
+            'max_size': 10,
+            'min_fitness': 0.0,
+        },
     }
     return cfg
 
@@ -148,6 +150,7 @@ def _create_model_from_config(config):
     Patches the file read to use the in-memory config.
     """
     import tempfile
+
     import yaml
 
     with tempfile.NamedTemporaryFile(
@@ -247,6 +250,30 @@ class TestIslandAutoGeneration:
         assert model.island_configs[1].indicator_pool == ['RSI', 'MACD']
 
 
+class TestStrictV2IslandSeeds:
+    def test_parent_seed_is_injected_into_every_island_before_initialization(self):
+        model = _create_model_from_config(_minimal_config(num_islands=3))
+        seed = _make_individual(fitness=0.5)
+        model.set_strict_initial_seeds([seed])
+        created = []
+
+        def fake_create(island_config):
+            algorithm = MagicMock()
+            algorithm.initialize_population.return_value = Population(
+                size=island_config.population_size
+            )
+            created.append(algorithm)
+            return algorithm
+
+        model._create_island_ga = fake_create
+        model._phase1_create_islands()
+
+        assert len(created) == 3
+        for algorithm in created:
+            algorithm.set_strict_initial_seeds.assert_called_once_with([seed])
+            algorithm.initialize_population.assert_called_once_with()
+
+
 class TestIndicatorPoolSplitting:
     """Tests for indicator pool splitting logic."""
 
@@ -342,13 +369,53 @@ class TestBuildIslandConfig:
 
         assert island_cfg['genetic_algorithm']['population_size'] == 12
 
+    def test_minimum_island_population_derives_feasible_slots(self):
+        config = _minimal_config(num_islands=2)
+        config['generic_island_model']['population_per_island'] = 2
+        model = _create_model_from_config(config)
+
+        island_cfg = model._build_island_config(model.island_configs[0])
+
+        assert island_cfg['genetic_algorithm']['population_size'] == 2
+        assert island_cfg['genetic_algorithm']['elite_size'] == 1
+        assert island_cfg['genetic_algorithm']['random_immigrants'] == 1
+
     def test_sets_seed(self):
         config = _minimal_config(num_islands=2)
         model = _create_model_from_config(config)
         ic = model.island_configs[0]
         island_cfg = model._build_island_config(ic)
 
-        assert island_cfg['genetic_algorithm']['seed'] == ic.seed
+        assert island_cfg['genetic_algorithm']['random_seed'] == ic.seed
+        assert 'seed' not in island_cfg['genetic_algorithm']
+
+    def test_rotated_seeds_reach_each_island_runtime_config(self):
+        config = _minimal_config(num_islands=3)
+        model = _create_model_from_config(config)
+
+        seeds = [
+            model._build_island_config(ic)['genetic_algorithm']['random_seed']
+            for ic in model.island_configs
+        ]
+
+        assert seeds == [42, 43, 44]
+
+    def test_extra_config_cannot_reenable_nested_runtime_features(self):
+        config = _minimal_config(num_islands=2)
+        model = _create_model_from_config(config)
+        ic = model.island_configs[0]
+        ic.extra_config = {
+            'generic_island_model': {'enabled': True},
+            'island_model': {'enabled': True},
+            'parallel_evaluation': {'enabled': True, 'num_workers': 8},
+        }
+
+        island_cfg = model._build_island_config(ic)
+
+        assert island_cfg['generic_island_model']['enabled'] is False
+        assert island_cfg['island_model']['enabled'] is False
+        assert island_cfg['parallel_evaluation']['enabled'] is False
+        assert island_cfg['parallel_evaluation']['num_workers'] == 8
 
     def test_restricts_indicator_pool(self):
         config = _minimal_config(num_islands=2)
@@ -533,8 +600,9 @@ class TestMigrationTopologies:
         model = self._setup_model_with_populations('tournament', 4)
         model._migrate_tournament(generation=2)
 
-        # 4 islands shuffled → 2 pairs → 2 events
-        assert len(model.migration_history) == 2
+        # Unknown/different panels cannot produce a tournament winner. Each
+        # pair exchanges locally ranked genomes in both directions.
+        assert len(model.migration_history) == 4
 
     def test_hierarchical_migration_bidirectional(self):
         model = self._setup_model_with_populations('hierarchical', 4)
@@ -600,6 +668,11 @@ class TestResultCollection:
             pop = _make_population(fitnesses)
             model.island_populations[ic.name] = pop
 
+        model._replay_global_candidates = MagicMock(
+            side_effect=lambda candidates: sorted(
+                candidates, key=lambda item: item.raw_fitness, reverse=True
+            )
+        )
         results = model._collect_final_results()
         assert '__global__' in results
         assert len(results['__global__']) > 0
@@ -613,6 +686,11 @@ class TestResultCollection:
             pop = _make_population(fitnesses)
             model.island_populations[ic.name] = pop
 
+        model._replay_global_candidates = MagicMock(
+            side_effect=lambda candidates: sorted(
+                candidates, key=lambda item: item.raw_fitness, reverse=True
+            )
+        )
         results = model._collect_final_results()
         for ic in model.island_configs:
             assert ic.name in results
@@ -627,6 +705,11 @@ class TestResultCollection:
             pop = _make_population(fitnesses)
             model.island_populations[ic.name] = pop
 
+        model._replay_global_candidates = MagicMock(
+            side_effect=lambda candidates: sorted(
+                candidates, key=lambda item: item.raw_fitness, reverse=True
+            )
+        )
         results = model._collect_final_results()
         global_top = results['__global__']
         fitnesses = [ind.raw_fitness for ind in global_top]
@@ -641,6 +724,11 @@ class TestResultCollection:
             pop = _make_population(fitnesses)
             model.island_populations[ic.name] = pop
 
+        model._replay_global_candidates = MagicMock(
+            side_effect=lambda candidates: sorted(
+                candidates, key=lambda item: item.raw_fitness, reverse=True
+            )
+        )
         results = model._collect_final_results()
         assert len(results['__global__']) <= 20
 

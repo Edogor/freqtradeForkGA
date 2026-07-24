@@ -1,0 +1,102 @@
+# safe_v2 — conservative, reproducible V2 baseline for shadow evaluation.
+#
+# This preset intentionally disables robustness/optimization features whose
+# current implementations are not yet trusted by the 2026-07 audit.  It does
+# not make a strategy production-safe and it does not authorize auto-promotion.
+
+config_schema_version: 2
+
+safety_profile:
+  name: safe_v2
+  enforce: true
+  shadow_mode: true
+  automation_eligible: false
+
+backtesting:
+  pairs: [BTC/USDT, ETH/USDT, BNB/USDT, SOL/USDT, XRP/USDT]
+  timerange: "20210101-20241231"
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  fee_noise_std: 0.0
+  auto_download_data: false
+  enable_cache: true
+
+evaluation_v2:
+  enabled: true
+  mark_to_market: true
+  # Effective annual decimal rate; converted geometrically to 365 daily periods.
+  annual_risk_free_rate: 0.0
+  bootstrap_samples: 1000
+  bootstrap_block_days: 10
+  # Trades closing in the same fixed UTC day stay together in expectancy resampling.
+  expectancy_cluster_days: 1
+  trade_bootstrap_block: 5
+  bootstrap_confidence: 0.95
+
+# Promotion remains off until an experiment declares every required
+# pair x time x cost scenario up front. The evaluator still runs in shadow.
+promotion_v2:
+  enabled: false
+
+strategy_constraints:
+  timeframes: [1h]
+
+genetic_algorithm:
+  random_seed: 42
+  population_size: 12
+  generations: 12
+  elite_size: 2
+  tournament_size: 3
+  random_immigrants: 2
+  mode: single_objective
+
+parallel_evaluation:
+  enabled: true
+  num_workers: 4
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+deflated_sharpe:
+  enabled: false
+
+surrogate:
+  enabled: false
+
+regime_aware:
+  enabled: false
+
+pair_validation:
+  enabled: false
+
+cpcv:
+  enabled: false
+
+generic_island_model:
+  enabled: false
+
+island_model:
+  enabled: false
+
+sis:
+  enabled: false
+
+llm:
+  enabled: false
+
+advanced:
+  llm:
+    enabled: false
+
+short_selling:
+  enabled: false

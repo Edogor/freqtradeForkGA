@@ -2,13 +2,29 @@
 
 This folder contains all documentation for the FreqTrade Genetic Algorithm Strategy Optimizer.
 
+> **Current audit baseline (2026-07-20):** The older feature pages describe intended or historical
+> implementations; their "complete" labels are not production-readiness claims. Use the following
+> documents as the current source of truth before changing evaluation or orchestration:
+>
+> - [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md) — verified architecture, defects and evidence
+> - [GA_EVALUATION_SPEC.md](GA_EVALUATION_SPEC.md) — target evaluation and promotion contract
+> - [NEXT_WAVE_AUTOMATION_PLAN.md](NEXT_WAVE_AUTOMATION_PLAN.md) — guarded automation design
+> - [AUTOMATION_RUNBOOK_V2.md](AUTOMATION_RUNBOOK_V2.md) — start, restart, status and kill switch
+> - [GA_TODO.md](GA_TODO.md) — prioritized implementation backlog
+> - [GENOME_MIGRATION_GUIDE.md](GENOME_MIGRATION_GUIDE.md) — fail-closed migration of legacy seeds
+
 ## 📂 Directory Structure
 
 ```
 docs/
 ├── INDEX.md                  # This file
+├── GA_AUDIT_2026-07-20.md    # Current verified audit baseline
+├── GA_EVALUATION_SPEC.md     # Target metric and promotion semantics
+├── NEXT_WAVE_AUTOMATION_PLAN.md
+├── AUTOMATION_RUNBOOK_V2.md
+├── GENOME_MIGRATION_GUIDE.md
+├── GA_TODO.md                # Prioritized repair and feature backlog
 ├── features/                 # Feature documentation
-├── plans/                    # Roadmaps and improvement plans
 ├── plots/                    # Generated visualization plots
 └── troubleshooting/          # Bug fixes and debugging guides
 ```
@@ -61,17 +77,20 @@ docs/
 | Document | Description | Status |
 |----------|-------------|--------|
 | [GENERIC_ISLAND_MODEL.md](features/GENERIC_ISLAND_MODEL.md) | Generic Island Model — multi-population evolution with shared process pool | ✅ Complete |
-| [CONFIG_VALIDATOR_GUIDE.md](features/CONFIG_VALIDATOR_GUIDE.md) | Config validator & anti-pattern reference (AP-1 to AP-20) | ✅ Complete |
+| [CONFIG_VALIDATOR_GUIDE.md](features/CONFIG_VALIDATOR_GUIDE.md) | Versioned mechanical config contract and evidence rules for tuning hypotheses | ✅ Complete |
 
 ---
 
-## 📋 Plans & Roadmaps (`plans/`)
+## 📋 Current Audit & Roadmap
 
 | Document | Description |
 |----------|-------------|
-| [MASTER_PLAN.md](plans/MASTER_PLAN.md) | **Consolidated roadmap** with all planned improvements |
-| [TODO_ga_improvements.md](plans/TODO_ga_improvements.md) | Detailed TODO list for GA improvements |
-| [PHASE_6_PROGRESS.md](plans/PHASE_6_PROGRESS.md) | Phase 6: Regime Detection Accuracy (Complete) |
+| [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md) | Evidence-backed audit and current go/no-go decision |
+| [GA_EVALUATION_SPEC.md](GA_EVALUATION_SPEC.md) | Proposed equity-, risk- and confidence-aware evaluation model |
+| [NEXT_WAVE_AUTOMATION_PLAN.md](NEXT_WAVE_AUTOMATION_PLAN.md) | Transactional lifecycle and staged next-wave automation |
+| [AUTOMATION_RUNBOOK_V2.md](AUTOMATION_RUNBOOK_V2.md) | Operational guarded-automation runbook |
+| [GA_TODO.md](GA_TODO.md) | Prioritized issues, acceptance criteria and work order |
+| [GENOME_MIGRATION_GUIDE.md](GENOME_MIGRATION_GUIDE.md) | Reproducible legacy-genome migration and warm-start binding |
 
 ---
 
@@ -83,34 +102,41 @@ docs/
 
 ---
 
-## 📊 Implementation Status Overview
+## 📊 Historical Feature Documentation Status
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Walk-Forward Optimization | ✅ Complete | Time-based train/validation splits |
-| Multi-Timeframe Strategies | ✅ Complete | Higher timeframe indicators |
-| NSGA-II Multiobjective | ✅ Complete | Pareto-optimal strategy selection |
-| Parallel Evaluation | ✅ Complete | Multi-process backtesting |
-| Market Regime Detection | ✅ Complete | Phase 5/5 implemented |
-| **Regime Detection Accuracy** | ✅ Complete | Phase 6 - adx_di_hysteresis method |
-| Elite Fitness Caching | ✅ Complete | Prevents fitness degradation |
-| **Monte-Carlo Robustness** | ✅ Complete | Tier 3 - Trade permutation testing |
-| **Parsimony Pressure** | ✅ Complete | Tier 3 - Strategy simplification |
-| **Pareto Archive** | ✅ Complete | Tier 3 - Non-dominated solution preservation |
-| **Dynamic Bounds** | ✅ Complete | Tier 3 - Evolvable parameter ranges |
-| Island Model | ✅ Complete | Generic Island Model with shared pool (OOM-safe) |
-| **LLM Strategy Designer** | ✅ Complete | Phase 1A — multi-provider seeding & immigrants |
+The table below says whether a feature was implemented/documented historically. It does **not** mean
+that the current end-to-end behavior is correct or approved for automated decisions. The current
+runtime assessment is in [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md#robustheitsfeatures-aktueller-nutzwert).
+
+| Feature | Current audit status | Notes |
+|---------|----------------------|-------|
+| Walk-Forward Optimization | Redesign | Implemented as rolling fixed-gene validation, not re-optimization |
+| Multi-Timeframe Strategies | Experimental | Implementation exists; effectiveness not established |
+| NSGA-II Multiobjective | Disabled until fix | Offspring lifecycle currently freezes evolution after generation 0 |
+| Parallel Evaluation | Repair required | Semantics differ from sequential evaluation |
+| Market Regime Detection | Mechanically repaired, experimental | Coverage/aggregation fail closed; detector quality and OOS value remain unverified |
+| **Regime Detection Accuracy** | Unverified | Historical phase label is not an OOS effectiveness proof |
+| Elite Fitness Caching | P0 repair | Disk serialization loses fitness-relevant fields |
+| **Monte-Carlo Robustness** | Remove from fitness | Current trade-shuffle profit test is not informative |
+| **Parsimony Pressure** | Implemented, unproven | Requires controlled OOS ablation |
+| **Pareto Archive** | Blocked | Depends on repaired NSGA-II and comparable replay metrics |
+| **Dynamic Bounds** | Implemented, unproven | Requires controlled OOS ablation |
+| Island Model | Active, repair required | Cross-island raw fitness/result provenance is not comparable |
+| **LLM Strategy Designer** | Experimental | Provider integration tests are not cleanly collected by Pytest |
 
 ---
 
 ## 🔧 Configuration Files
 
-| Config | Purpose | Runtime |
-|--------|---------|---------|
-| [ga_config_fast.yaml](../config/ga_config_fast.yaml) | Quick testing (15 pop, 5 gen) | 2-5 min |
-| [ga_config_medium.yaml](../config/ga_config_medium.yaml) | Balanced search (40 pop, 15 gen) | 15-30 min |
-| [ga_config_deep.yaml](../config/ga_config_deep.yaml) | Production search (100 pop, 50 gen) | 4-8 hours |
+These are existing examples, not audited production recommendations. Always complete the relevant
+fail-closed validation work in [GA_TODO.md](GA_TODO.md) before using them for a new experiment.
+
+| Config | Historical purpose |
+|--------|--------------------|
+| [fast_evolution_demo.yaml](../config/fast_evolution_demo.yaml) | Small demonstration config |
+| [ga_config.yaml](../config/ga_config.yaml) | General example/default config |
+| [ga_config_island.yaml](../config/ga_config_island.yaml) | Island-model example |
 
 ---
 
-*Last Updated: April 2026*
+*Audit index updated: July 20, 2026. Historical feature pages were last broadly updated in April 2026.*

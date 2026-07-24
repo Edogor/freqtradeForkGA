@@ -16,12 +16,23 @@ References:
 """
 
 import logging
+import math
 from typing import List, Tuple, Dict, Any, Optional
 from functools import cmp_to_key
 
 from genetic_algorithm.core.individual import Individual
 
 logger = logging.getLogger(__name__)
+
+
+# Historical NSGA configs called the trade-count objective
+# ``trade_frequency`` although backtest metrics expose it as ``num_trades``.
+# Keep the persisted name compatible, but resolve it explicitly instead of
+# silently turning every objective value into 0.0.
+NSGA2_OBJECTIVE_METRIC_ALIASES = {
+    'trade_frequency': 'num_trades',
+    'trade_count': 'num_trades',
+}
 
 
 def dominates(a: Individual, b: Individual) -> bool:
@@ -466,8 +477,23 @@ def extract_objectives_from_metrics(
     for obj_cfg in objective_config:
         name = obj_cfg['name']
         obj_type = obj_cfg.get('type', 'maximize')
-        
-        value = metrics.get(name, 0.0)
+
+        metric_name = NSGA2_OBJECTIVE_METRIC_ALIASES.get(name, name)
+        if metric_name not in metrics:
+            raise ValueError(
+                f"Configured NSGA-II objective metric {name!r} "
+                f"(resolved as {metric_name!r}) is missing from backtest metrics"
+            )
+        value = metrics[metric_name]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            raise ValueError(
+                f"Configured NSGA-II objective metric {name!r} must be finite, "
+                f"got {value!r}"
+            )
         
         # Convert to maximization
         if obj_type == 'minimize':

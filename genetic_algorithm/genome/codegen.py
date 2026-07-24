@@ -7,7 +7,7 @@ representations to FreqTrade strategy code.
 
 import random
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Literal, Optional
 
 from genetic_algorithm.core.strategy_gene import (
     StrategyGene, IndicatorGene, ConditionGene, RegimeGene, is_higher_timeframe
@@ -179,22 +179,12 @@ class StrategyGenerator:
         
         # Generate independent short conditions when configured
         if strategy.can_short and self.short_selling_config.get('independent_conditions', False):
-            num_short_entry = random.randint(1, max(1, len(entry_conditions)))
-            num_short_exit = random.randint(1, max(1, len(exit_conditions)))
-            short_entry_conds = []
-            short_exit_conds = []
-            for _ in range(num_short_entry):
-                ind = random.choice(strategy.indicators)
-                cond = self._generate_condition_for_indicator(ind, is_entry=True)
-                if cond:
-                    short_entry_conds.append(cond)
-            for _ in range(num_short_exit):
-                ind = random.choice(strategy.indicators)
-                cond = self._generate_condition_for_indicator(ind, is_entry=False)
-                if cond:
-                    short_exit_conds.append(cond)
-            strategy.short_entry_conditions = short_entry_conds
-            strategy.short_exit_conditions = short_exit_conds
+            strategy.short_entry_conditions = self._generate_random_conditions(
+                strategy.indicators, is_entry=True, side='short'
+            )
+            strategy.short_exit_conditions = self._generate_random_conditions(
+                strategy.indicators, is_entry=False, side='short'
+            )
         
         # Assign unique instance IDs to all indicators
         strategy.assign_instance_ids()
@@ -223,7 +213,12 @@ class StrategyGenerator:
                     strategy.entry_conditions.append(cond)
                 else:
                     break  # Can't add more unique conditions
-        
+
+        # The minimum-condition top-up above creates conditions from bare type
+        # names.  Canonicalize once more so every newly generated gene already
+        # satisfies the serialization contract before its first evaluation.
+        strategy.assign_instance_ids()
+
         return strategy
     
     def _generate_informative_indicator(self, timeframe: str, 
@@ -249,8 +244,12 @@ class StrategyGenerator:
         return create_random_indicator(indicator_type, self.indicator_config,
                                        timeframe=timeframe)
     
-    def _generate_random_conditions(self, indicators: List[IndicatorGene], 
-                                   is_entry: bool) -> List[ConditionGene]:
+    def _generate_random_conditions(
+        self,
+        indicators: List[IndicatorGene],
+        is_entry: bool,
+        side: Literal['long', 'short'] = 'long',
+    ) -> List[ConditionGene]:
         """Generate random entry or exit conditions."""
         conditions = []
         
@@ -268,7 +267,7 @@ class StrategyGenerator:
             indicator = indicators[0]
             conditions.append(ConditionGene(
                 indicator=indicator.type,
-                operator='>' if is_entry else '<',
+                operator='>' if ((side == 'long') == is_entry) else '<',
                 threshold=50,
                 logic='AND'
             ))
@@ -290,7 +289,7 @@ class StrategyGenerator:
             indicator = random.choice(valid_indicators)
             
             # Generate condition based on indicator type
-            condition = self._generate_condition_for_indicator(indicator, is_entry)
+            condition = self._generate_condition_for_indicator(indicator, is_entry, side)
             if condition:
                 # Dedup: skip if same indicator + operator already present
                 key = (condition.indicator, condition.operator)
@@ -306,7 +305,7 @@ class StrategyGenerator:
         while len(conditions) < min_conds and retries < retry_limit:
             retries += 1
             indicator = random.choice(valid_indicators)
-            condition = self._generate_condition_for_indicator(indicator, is_entry)
+            condition = self._generate_condition_for_indicator(indicator, is_entry, side)
             if condition:
                 key = (condition.indicator, condition.operator)
                 if any((c.indicator, c.operator) == key for c in conditions):
@@ -316,18 +315,30 @@ class StrategyGenerator:
         
         return conditions if conditions else [ConditionGene(
             indicator=indicators[0].type,
-            operator='>' if is_entry else '<',
+            operator='>' if ((side == 'long') == is_entry) else '<',
             threshold=50,
             logic='AND'
         )]
     
-    def _generate_condition_for_indicator(self, indicator: IndicatorGene, 
-                                         is_entry: bool) -> ConditionGene:
-        """Generate a condition for a specific indicator."""
+    def _generate_condition_for_indicator(
+        self,
+        indicator: IndicatorGene,
+        is_entry: bool,
+        side: Literal['long', 'short'] = 'long',
+    ) -> Optional[ConditionGene]:
+        """Generate a side-aware condition for a specific indicator.
+
+        A bullish signal opens a long or closes a short.  A bearish signal
+        closes a long or opens a short.  Activity/volatility filters remain
+        tied to entry/exit and are deliberately not directional.
+        """
         ind_config = self.indicator_config.get(indicator.type, {})
+        bullish_signal = (side == 'long' and is_entry) or (
+            side == 'short' and not is_entry
+        )
         
         if indicator.type == 'RSI':
-            if is_entry:
+            if bullish_signal:
                 threshold_range = ind_config.get('buy_threshold', [20, 40])
                 operator = 'cross_below'
             else:
@@ -344,13 +355,13 @@ class StrategyGenerator:
         elif indicator.type == 'MACD':
             return ConditionGene(
                 indicator='MACD',
-                operator='cross_above' if is_entry else 'cross_below',
+                operator='cross_above' if bullish_signal else 'cross_below',
                 threshold=0,
                 logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
             )
         
         elif indicator.type == 'STOCH':
-            if is_entry:
+            if bullish_signal:
                 threshold_range = ind_config.get('k_threshold', [15, 35])
                 operator = '<'
             else:
@@ -365,7 +376,7 @@ class StrategyGenerator:
             )
         
         elif indicator.type == 'CCI':
-            if is_entry:
+            if bullish_signal:
                 threshold_range = ind_config.get('buy_threshold', [-200, -100])
                 operator = '<'
             else:
@@ -402,7 +413,7 @@ class StrategyGenerator:
         
         elif indicator.type == 'BBANDS':
             # Bollinger Bands entry/exit conditions
-            if is_entry:
+            if bullish_signal:
                 # Buy when price crosses below lower band
                 operator = 'cross_below'
             else:
@@ -418,7 +429,7 @@ class StrategyGenerator:
         
         elif indicator.type in ['EMA', 'SMA']:
             # Moving average crossover conditions
-            if is_entry:
+            if bullish_signal:
                 operator = 'cross_above'  # Price crosses above MA (bullish)
             else:
                 operator = 'cross_below'  # Price crosses below MA (bearish)
@@ -436,7 +447,7 @@ class StrategyGenerator:
             # SuperTrend: trend direction changes
             return ConditionGene(
                 indicator='SUPERTREND',
-                operator='cross_above' if is_entry else 'cross_below',
+                operator='cross_above' if bullish_signal else 'cross_below',
                 threshold=0,  # Trend flip indicator
                 logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
             )
@@ -445,7 +456,7 @@ class StrategyGenerator:
             # Ichimoku: Tenkan/Kijun crossover
             return ConditionGene(
                 indicator='ICHIMOKU',
-                operator='cross_above' if is_entry else 'cross_below',
+                operator='cross_above' if bullish_signal else 'cross_below',
                 threshold=0,  # TK crossover
                 logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
             )
@@ -454,7 +465,7 @@ class StrategyGenerator:
             # Donchian: breakout conditions
             return ConditionGene(
                 indicator='DONCHIAN',
-                operator='cross_above' if is_entry else 'cross_below',
+                operator='cross_above' if bullish_signal else 'cross_below',
                 threshold=0,  # Upper/lower channel breakout
                 logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
             )
@@ -463,7 +474,7 @@ class StrategyGenerator:
             # VWAP: price vs VWAP
             return ConditionGene(
                 indicator='VWAP',
-                operator='cross_above' if is_entry else 'cross_below',
+                operator='cross_above' if bullish_signal else 'cross_below',
                 threshold=0,
                 logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
             )
@@ -472,14 +483,14 @@ class StrategyGenerator:
             # Parabolic SAR: trend flip
             return ConditionGene(
                 indicator='PSAR',
-                operator='cross_above' if is_entry else 'cross_below',
+                operator='cross_above' if bullish_signal else 'cross_below',
                 threshold=0,
                 logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
             )
         
         elif indicator.type == 'CMF':
             # Chaikin Money Flow: above/below threshold
-            if is_entry:
+            if bullish_signal:
                 threshold_range = ind_config.get('buy_threshold', [0.05, 0.2])
                 operator = '>'
             else:
@@ -509,14 +520,14 @@ class StrategyGenerator:
             # Bidirectional patterns: >0 bullish, <0 bearish
             return ConditionGene(
                 indicator=indicator.type,
-                operator='>' if is_entry else '<',  # Bullish for entry, bearish for exit
+                operator='>' if bullish_signal else '<',
                 threshold=0,
                 logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
             )
         
         elif indicator.type in ['CDL_HAMMER', 'CDL_MORNINGSTAR', 'CDL_PIERCING', 'CDL_3WHITESOLDIERS']:
             # Bullish-only patterns: good for entry signals
-            if is_entry:
+            if bullish_signal:
                 return ConditionGene(
                     indicator=indicator.type,
                     operator='>',  # Pattern detected (non-zero)
@@ -528,7 +539,7 @@ class StrategyGenerator:
         
         elif indicator.type in ['CDL_EVENINGSTAR', 'CDL_SHOOTINGSTAR', 'CDL_DARKCLOUD', 'CDL_3BLACKCROWS']:
             # Bearish-only patterns: good for exit signals
-            if not is_entry:
+            if not bullish_signal:
                 return ConditionGene(
                     indicator=indicator.type,
                     operator='<',  # Pattern detected (non-zero, negative for bearish)
@@ -541,7 +552,7 @@ class StrategyGenerator:
         elif indicator.type == 'CDL_DOJI':
             # Doji indicates indecision — TA-Lib returns 0 or +100, never negative.
             # Only '>' is valid. Not suitable for exit conditions (return None).
-            if is_entry:
+            if side == 'long' and is_entry:
                 return ConditionGene(
                     indicator=indicator.type,
                     operator='>',  # Doji detected (value > 0)
@@ -554,7 +565,7 @@ class StrategyGenerator:
         # For other indicators, return a generic condition
         return ConditionGene(
             indicator=indicator.type,
-            operator='>' if is_entry else '<',
+            operator='>' if bullish_signal else '<',
             threshold=50,
             logic='AND'
         )
@@ -624,11 +635,17 @@ class StrategyGenerator:
         Returns:
             Python code as string
         """
-        # CRITICAL FIX: Ensure all indicators referenced in conditions actually exist
-        # This is a safety net in case mutation/crossover created mismatches
+        # Canonicalize existing IDs first.  In particular, this reconnects
+        # serialized condition references before the legacy repair path checks
+        # for genuinely missing indicators.
+        strategy_gene.assign_instance_ids()
+
+        # Ensure all indicators referenced in conditions actually exist.  This
+        # remains a safety net for malformed legacy mutation/crossover output.
         strategy_gene.ensure_indicators_for_conditions(self.indicator_config)
-        
-        # Re-assign instance IDs after ensuring indicators exist
+
+        # Re-assign after ensuring indicators exist so any added indicator and
+        # its formerly unresolved condition receive the same canonical ID.
         strategy_gene.assign_instance_ids()
         
         strategy_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"

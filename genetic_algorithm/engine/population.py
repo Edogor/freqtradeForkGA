@@ -337,6 +337,17 @@ class Population:
         """
         self.sort_by_fitness(reverse=True)
         return self.individuals[:n]
+
+    def get_best_measured(self, n: int = 1) -> List[Individual]:
+        """Return finalists backed by successful real backtests only."""
+        measured = [ind for ind in self.individuals if ind.has_measured_fitness]
+        return sorted(
+            measured,
+            key=lambda item: (
+                item.fitness if item.fitness is not None else float('-inf')
+            ),
+            reverse=True,
+        )[:n]
     
     def get_all(self) -> List[Individual]:
         """Return all individuals in the population (list copy, same references)."""

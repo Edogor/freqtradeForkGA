@@ -78,8 +78,25 @@ def _fix_invalid_operators(gene: StrategyGene) -> None:
         if _resolve(cond) not in CDL_NEGATIVE_ONLY_TYPES
     ]
 
+    # Short directions invert the candlestick semantics of long directions:
+    # bearish-only patterns can enter shorts, while bullish-only patterns can
+    # exit them.
+    gene.short_entry_conditions = [
+        cond for cond in gene.short_entry_conditions
+        if _resolve(cond) not in CDL_POSITIVE_ONLY_TYPES
+    ]
+    gene.short_exit_conditions = [
+        cond for cond in gene.short_exit_conditions
+        if _resolve(cond) not in CDL_NEGATIVE_ONLY_TYPES
+    ]
+
     # Fix operators on remaining conditions
-    for cond in gene.entry_conditions + gene.exit_conditions:
+    for cond in (
+        gene.entry_conditions
+        + gene.exit_conditions
+        + gene.short_entry_conditions
+        + gene.short_exit_conditions
+    ):
         ind_type = _resolve(cond)
         if not is_valid_operator(ind_type, cond.operator):
             valid_ops = get_standard_operators(ind_type)
@@ -120,20 +137,6 @@ def _enforce_max_indicators(gene: StrategyGene, config: dict) -> None:
     gene.short_entry_conditions = [c for c in gene.short_entry_conditions if c.indicator in remaining_refs]
     gene.short_exit_conditions = [c for c in gene.short_exit_conditions if c.indicator in remaining_refs]
     
-    # Ensure at least one entry condition remains
-    if not gene.entry_conditions and gene.indicators:
-        from genetic_algorithm.core.mutation import _create_random_condition
-        indicator_config = (config or {}).get('indicators', {})
-        ind = gene.indicators[0]
-        try:
-            new_cond = _create_random_condition(ind.type, True, indicator_config)
-            if new_cond:
-                new_cond.indicator = ind.instance_id or ind.type
-                gene.entry_conditions = [new_cond]
-        except Exception:
-            pass
-
-
 def _deduplicate_conditions(conditions: list) -> list:
     """Remove exact-duplicate conditions and prune subsumed pairs.
     
@@ -145,7 +148,14 @@ def _deduplicate_conditions(conditions: list) -> list:
     seen = set()
     unique = []
     for c in conditions:
-        key = (c.indicator, c.operator, round(c.threshold, 6), c.logic)
+        key = (
+            c.indicator,
+            c.operator,
+            round(c.threshold, 6),
+            c.logic,
+            round(c.threshold_upper, 6),
+            c.lookback,
+        )
         if key not in seen:
             seen.add(key)
             unique.append(c)
@@ -188,11 +198,12 @@ def _enforce_min_entry_conditions(gene: StrategyGene, config: dict) -> None:
     If the gene has fewer, generates additional random conditions from
     the available indicators.
     """
-    if not config:
-        return
-    indicator_config = config.get('indicators', {})
-    min_entry = indicator_config.get('min_entry_conditions', 2)
-    min_exit = indicator_config.get('min_exit_conditions', 1)
+    indicator_config = (config or {}).get('indicators', {})
+    # Without a config, preserve the historical no-op for already valid genes
+    # while still restoring StrategyGene's structural entry invariant if a
+    # crossover legitimately pruned the group to zero.
+    min_entry = indicator_config.get('min_entry_conditions', 2 if config else 1)
+    min_exit = indicator_config.get('min_exit_conditions', 1 if config else 0)
     
     # Enforce entry conditions
     if len(gene.entry_conditions) < min_entry:
@@ -200,25 +211,27 @@ def _enforce_min_entry_conditions(gene: StrategyGene, config: dict) -> None:
                           is_entry=True, indicator_config=indicator_config)
     
     # Last-resort fallback: if entry conditions are STILL empty after top-up,
-    # add a guaranteed volume-based condition to prevent downstream crashes
+    # reference a real retained indicator.  The previous synthetic ``volume``
+    # reference was itself an orphan and disappeared during canonicalization.
     if not gene.entry_conditions:
         from genetic_algorithm.core.strategy_gene import ConditionGene
         import logging
         logging.getLogger(__name__).warning(
-            "[ENFORCE] Entry conditions still empty after top-up — injecting volume fallback"
+            "[ENFORCE] Entry conditions still empty after top-up — "
+            "injecting retained-indicator fallback"
         )
-        fallback_ref = 'volume'
-        # Try to reference the first available non-CDL indicator instead
-        for ind in gene.indicators:
-            if not ind.type.startswith('CDL_'):
-                fallback_ref = ind.instance_id or ind.type
-                break
-        gene.entry_conditions.append(ConditionGene(
-            indicator=fallback_ref,
-            operator='>',
-            threshold=0.0,
-            logic='AND',
-        ))
+        if gene.indicators:
+            fallback = next(
+                (ind for ind in gene.indicators if not ind.type.startswith('CDL_')),
+                gene.indicators[0],
+            )
+            valid_ops = get_standard_operators(fallback.type)
+            gene.entry_conditions.append(ConditionGene(
+                indicator=fallback.instance_id or fallback.type,
+                operator=valid_ops[0] if valid_ops else '>',
+                threshold=0.0,
+                logic='AND',
+            ))
     
     # Enforce exit conditions
     if len(gene.exit_conditions) < min_exit:
@@ -260,6 +273,50 @@ def _top_up_conditions(gene: StrategyGene, needed: int, is_entry: bool,
             import logging
             logging.getLogger(__name__).warning(f"Failed to create random condition for {ind_ref}: {e}")
         attempts += 1
+
+
+def _finalize_crossover_gene(gene: StrategyGene, config: dict) -> None:
+    """Restore the canonical StrategyGene contract after recombination.
+
+    Crossover combines indicator and condition lists independently.  Every
+    operation which removes or reorders indicators must therefore happen
+    before the final orphan pruning and minimum-condition top-up.  The old
+    pipeline topped conditions up first and then removed indicators, which
+    could leave references such as ``MACD_1`` after fixed-column indicator
+    deduplication had retained only ``MACD_0``.
+    """
+    # Reconnect references inherited from both parents before structural
+    # cleanup, then perform every operation that can remove an indicator.
+    gene.assign_instance_ids()
+    _deduplicate_indicators(gene)
+    _enforce_max_indicators(gene, config)
+
+    # Indicator trimming/reordering may have changed canonical IDs.  Remap
+    # surviving references, then genuinely remove all eliminated references;
+    # prune_orphaned_conditions is intentionally allowed to reach zero here.
+    gene.assign_instance_ids()
+    gene.prune_orphaned_conditions()
+
+    _fix_invalid_operators(gene)
+    for attr in (
+        'entry_conditions',
+        'exit_conditions',
+        'short_entry_conditions',
+        'short_exit_conditions',
+    ):
+        conditions = _deduplicate_conditions(getattr(gene, attr))
+        clamp_condition_thresholds(conditions)
+        setattr(gene, attr, conditions)
+
+    # Directional CDL filtering and condition deduplication can reduce a list
+    # below its configured minimum, so top up only after those lossy steps.
+    gene.prune_orphaned_conditions()
+    _enforce_min_entry_conditions(gene, config)
+
+    # Top-up conditions start with an existing instance ID, but this final
+    # canonicalization also deduplicates a coincidental identical condition.
+    gene.assign_instance_ids()
+    gene.prune_orphaned_conditions()
 
 
 def single_point_crossover(parent1: Individual, parent2: Individual, 
@@ -342,27 +399,9 @@ def single_point_crossover(parent1: Individual, parent2: Individual,
     child2_gene.generation = generation
     child2_gene.individual_id = ind_id + 1
     
-    # Remove conditions that reference indicators not in the child's gene
-    child1_gene.prune_orphaned_conditions()
-    child2_gene.prune_orphaned_conditions()
-    
-    # Reassign instance IDs after crossover to avoid ID conflicts
-    child1_gene.assign_instance_ids()
-    child2_gene.assign_instance_ids()
-    
-    # Enforce minimum entry conditions
-    _enforce_min_entry_conditions(child1_gene, config)
-    _enforce_min_entry_conditions(child2_gene, config)
-    
-    # Post-crossover quality: dedup indicators, dedup/prune conditions, clamp thresholds
+    # Restore the complete condition/indicator contract after recombination.
     for g in (child1_gene, child2_gene):
-        _deduplicate_indicators(g)
-        _enforce_max_indicators(g, config)
-        _fix_invalid_operators(g)
-        g.entry_conditions = _deduplicate_conditions(g.entry_conditions)
-        g.exit_conditions = _deduplicate_conditions(g.exit_conditions)
-        clamp_condition_thresholds(g.entry_conditions)
-        clamp_condition_thresholds(g.exit_conditions)
+        _finalize_crossover_gene(g, config)
     
     return (Individual(strategy_gene=child1_gene, parent_ids=[parent1.id, parent2.id]),
             Individual(strategy_gene=child2_gene, parent_ids=[parent1.id, parent2.id]))
@@ -475,27 +514,9 @@ def uniform_crossover(parent1: Individual, parent2: Individual,
     child2_gene.generation = generation
     child2_gene.individual_id = ind_id + 1
     
-    # Remove conditions that reference indicators not in the child's gene
-    child1_gene.prune_orphaned_conditions()
-    child2_gene.prune_orphaned_conditions()
-    
-    # Reassign instance IDs after crossover to avoid ID conflicts
-    child1_gene.assign_instance_ids()
-    child2_gene.assign_instance_ids()
-    
-    # Enforce minimum entry conditions
-    _enforce_min_entry_conditions(child1_gene, config)
-    _enforce_min_entry_conditions(child2_gene, config)
-    
-    # Post-crossover quality: dedup indicators, dedup/prune conditions, clamp thresholds
+    # Restore the complete condition/indicator contract after recombination.
     for g in (child1_gene, child2_gene):
-        _deduplicate_indicators(g)
-        _enforce_max_indicators(g, config)
-        _fix_invalid_operators(g)
-        g.entry_conditions = _deduplicate_conditions(g.entry_conditions)
-        g.exit_conditions = _deduplicate_conditions(g.exit_conditions)
-        clamp_condition_thresholds(g.entry_conditions)
-        clamp_condition_thresholds(g.exit_conditions)
+        _finalize_crossover_gene(g, config)
     
     return (Individual(strategy_gene=child1_gene, parent_ids=[parent1.id, parent2.id]),
             Individual(strategy_gene=child2_gene, parent_ids=[parent1.id, parent2.id]))
@@ -567,27 +588,9 @@ def component_crossover(parent1: Individual, parent2: Individual,
     child2_gene.generation = generation
     child2_gene.individual_id = ind_id + 1
     
-    # Remove conditions that reference indicators not in the child's gene
-    child1_gene.prune_orphaned_conditions()
-    child2_gene.prune_orphaned_conditions()
-    
-    # Reassign instance IDs after crossover to avoid ID conflicts
-    child1_gene.assign_instance_ids()
-    child2_gene.assign_instance_ids()
-    
-    # Enforce minimum entry conditions
-    _enforce_min_entry_conditions(child1_gene, config)
-    _enforce_min_entry_conditions(child2_gene, config)
-    
-    # Post-crossover quality: dedup indicators, dedup/prune conditions, clamp thresholds
+    # Restore the complete condition/indicator contract after recombination.
     for g in (child1_gene, child2_gene):
-        _deduplicate_indicators(g)
-        _enforce_max_indicators(g, config)
-        _fix_invalid_operators(g)
-        g.entry_conditions = _deduplicate_conditions(g.entry_conditions)
-        g.exit_conditions = _deduplicate_conditions(g.exit_conditions)
-        clamp_condition_thresholds(g.entry_conditions)
-        clamp_condition_thresholds(g.exit_conditions)
+        _finalize_crossover_gene(g, config)
     
     return (Individual(strategy_gene=child1_gene, parent_ids=[parent1.id, parent2.id]),
             Individual(strategy_gene=child2_gene, parent_ids=[parent1.id, parent2.id]))

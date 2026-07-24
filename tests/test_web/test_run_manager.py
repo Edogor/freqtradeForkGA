@@ -83,6 +83,61 @@ class TestRunHandle:
         assert s.elapsed_seconds is None
 
 
+class TestCanonicalStart:
+
+    def test_start_materializes_before_spawning_exact_attempt_worker(
+        self, manager, tmp_path
+    ):
+        prepared = MagicMock(attempt_id="attempt-web-v2")
+        process = MagicMock(pid=4321)
+        relay = MagicMock()
+        relay.queue = MagicMock()
+        with (
+            patch(
+                "genetic_algorithm.orchestration.runner_v2."
+                "prepare_and_queue_standard_attempt",
+                return_value=prepared,
+            ) as prepare,
+            patch(
+                "genetic_algorithm.orchestration.runner_v2.default_state_path",
+                return_value=tmp_path / "state.sqlite3",
+            ),
+            patch(
+                "genetic_algorithm.web.run_manager.SubprocessEventRelay",
+                return_value=relay,
+            ),
+            patch(
+                "genetic_algorithm.web.run_manager.mp.Process",
+                return_value=process,
+            ) as process_factory,
+        ):
+            handle = manager.start_run(
+                {
+                    "_config_name": "web-test",
+                    "genetic_algorithm": {"population_size": 4, "generations": 1},
+                },
+                run_id="web-test",
+            )
+
+        prepare.assert_called_once()
+        assert handle.attempt_id == "attempt-web-v2"
+        assert handle.state_path == str(tmp_path / "state.sqlite3")
+        assert process_factory.call_args.kwargs["target"].__name__ == (
+            "_run_canonical_attempt_worker"
+        )
+        assert process_factory.call_args.kwargs["args"][1] == "attempt-web-v2"
+        process.start.assert_called_once()
+
+    def test_resume_is_rejected_before_materialization(self, manager):
+        with patch(
+            "genetic_algorithm.orchestration.runner_v2."
+            "prepare_and_queue_standard_attempt"
+        ) as prepare:
+            with pytest.raises(ValueError, match="do not support resume"):
+                manager.start_run({}, resume_from="checkpoint.json")
+        prepare.assert_not_called()
+
+
 # ── RunManager._on_event Tests ────────────────────────────────
 
 
@@ -178,6 +233,13 @@ class TestStopRun:
 
     def test_stop_nonexistent(self, manager):
         assert manager.stop_run("nope") is False
+
+    def test_canonical_attempt_rejects_unfenced_stop(self, manager):
+        handle = _make_handle(run_id="r1", attempt_id="attempt-v2")
+        manager._runs["r1"] = handle
+
+        assert manager.stop_run("r1") is False
+        assert handle.status == RunStatus.RUNNING
 
 
 class TestPauseRun:

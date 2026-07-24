@@ -1109,6 +1109,10 @@ class FitnessEvaluator:
             'num_trades': result.total_trades,
             'profit_factor': result.profit_factor,
             'sortino_ratio': max(-10.0, min(50.0, result.sortino_ratio)),  # Clamp to sane display range
+            # FreqTrade's ``profit_mean`` is already a decimal ratio.
+            'avg_profit': result.avg_profit,
+            'avg_duration': result.avg_duration,
+            'trades': result.trades or [],
         }
         
         # Include per-pair profits for robustness analysis
@@ -1122,13 +1126,47 @@ class FitnessEvaluator:
                 mean_pp = sum(pair_profits) / len(pair_profits)
                 metrics['pair_profit_std'] = (sum((p - mean_pp) ** 2 for p in pair_profits) / len(pair_profits)) ** 0.5
         
-        # Include tail-risk metrics
-        metrics['max_consecutive_losses'] = result.max_consecutive_losses
-        metrics['max_drawdown_duration_days'] = result.max_drawdown_duration_days
+        # Include tail-risk metrics. Missing values stay absent instead of
+        # becoming a perfect zero-risk observation.
+        if result.max_consecutive_losses is not None:
+            metrics['max_consecutive_losses'] = result.max_consecutive_losses
+        if result.max_drawdown_duration_days is not None:
+            metrics['max_drawdown_duration_days'] = result.max_drawdown_duration_days
+
+        # V2 daily-equity evidence is shadow data for now.  It is deliberately
+        # namespaced and does not replace the legacy search-score inputs until
+        # the policy has passed shadow calibration.
+        v2_fields = {
+            'v2_equity_method': result.equity_method,
+            'v2_daily_net_returns': result.daily_net_returns,
+            'v2_equity_curve': result.equity_curve,
+            'v2_annualized_net_return': result.annualized_net_return,
+            'v2_daily_sharpe_ratio': result.daily_sharpe_ratio,
+            'v2_daily_sortino_ratio': result.daily_sortino_ratio,
+            'v2_daily_expected_shortfall_5': result.daily_expected_shortfall_5,
+            'v2_calmar_ratio': result.calmar_ratio,
+            'v2_ulcer_index': result.ulcer_index,
+            'v2_time_under_water_ratio': result.time_under_water_ratio,
+            'v2_daily_max_drawdown': result.daily_max_drawdown,
+            'v2_risk_metric_contract_version': result.risk_metric_contract_version,
+            'v2_risk_periods_per_year': result.risk_periods_per_year,
+            'v2_annual_risk_free_rate': result.annual_risk_free_rate,
+            'v2_periodic_risk_free_rate': result.periodic_risk_free_rate,
+            'v2_equity_error': result.equity_error_message,
+            'v2_mark_to_market_error': result.mark_to_market_error_message,
+        }
+        metrics.update({key: value for key, value in v2_fields.items() if value is not None})
+        if result.trade_profit_ratios is not None:
+            metrics['trade_profit_ratios'] = result.trade_profit_ratios
 
         # Include monthly profits for stability analysis
         if result.monthly_profits and len(result.monthly_profits) > 1:
             metrics['monthly_profits'] = result.monthly_profits
+            if (
+                result.monthly_periods
+                and len(result.monthly_periods) == len(result.monthly_profits)
+            ):
+                metrics['monthly_periods'] = result.monthly_periods
             monthly = result.monthly_profits
             mean_monthly = sum(monthly) / len(monthly)
             metrics['monthly_return_std'] = (sum((m - mean_monthly) ** 2 for m in monthly) / len(monthly)) ** 0.5
@@ -1219,28 +1257,39 @@ class FitnessEvaluator:
         w_trades = w.get('trade_frequency', 0.07)
         w_stability = w.get('monthly_stability', 0.06)
         w_cross_pair = w.get('cross_pair', 0.06)
-        w_dd_duration = w.get('drawdown_duration', 0.02)
-        w_consec_losses = w.get('consecutive_losses', 0.02)
+        # Optional metrics receive weight only when the resolved policy declares
+        # it.  Hidden default weights diluted the configured 1.0 weight sum and
+        # rewarded unavailable tail-risk fields in legacy results.
+        w_dd_duration = w.get('drawdown_duration', 0.0)
+        w_consec_losses = w.get('consecutive_losses', 0.0)
         
         # === Tail-risk scores ===
         # Drawdown duration: 0 days = 1.0, 90+ days = 0.0 (linear)
-        dd_duration = metrics.get('max_drawdown_duration_days', 0)
-        norm_dd_duration = max(0.0, 1.0 - dd_duration / 90.0)
+        dd_duration = metrics.get('max_drawdown_duration_days')
+        norm_dd_duration = (
+            max(0.0, 1.0 - dd_duration / 90.0)
+            if dd_duration is not None else 0.0
+        )
         # Consecutive losses: 0 = 1.0, 10+ = 0.0 (linear)
-        consec_losses = metrics.get('max_consecutive_losses', 0)
-        norm_consec_losses = max(0.0, 1.0 - consec_losses / 10.0)
+        consec_losses = metrics.get('max_consecutive_losses')
+        norm_consec_losses = (
+            max(0.0, 1.0 - consec_losses / 10.0)
+            if consec_losses is not None else 0.0
+        )
 
         # === Monthly stability score ===
         # Lower monthly return std = higher stability = better
-        monthly_return_std = metrics.get('monthly_return_std', 0)
-        positive_months = metrics.get('positive_months_ratio', 0.5)
-        if monthly_return_std > 0:
+        monthly_return_std = metrics.get('monthly_return_std')
+        positive_months = metrics.get('positive_months_ratio')
+        if monthly_return_std is None or positive_months is None:
+            norm_stability = 0.0
+        elif monthly_return_std > 0:
             # Normalize: std of 0 gets 1.0, std of 20+ gets ~0
             norm_stability = max(0, 1.0 - monthly_return_std / 20.0)
             # Bonus for high positive months ratio
             norm_stability = norm_stability * 0.7 + positive_months * 0.3
         else:
-            norm_stability = positive_months  # Zero std = perfectly stable; use positive_months ratio
+            norm_stability = positive_months  # Measured zero std; retain positive-month evidence
         
         # === Cross-pair consistency score ===
         # Penalize strategies that only work on 1-2 pairs
@@ -1253,7 +1302,7 @@ class FitnessEvaluator:
             # Low std across pairs = consistent = good
             norm_cross_pair = max(0, 1.0 - pair_profit_std / 30.0) * 0.5 + pair_consistency_ratio * 0.5
         else:
-            norm_cross_pair = 0.5  # Single pair or no data
+            norm_cross_pair = 0.0  # Missing/single-pair evidence must not earn robustness credit
         
         # Normalize weights to sum to 1.0 (handles missing or extra weights in configs)
         weights_dict = {
@@ -1645,13 +1694,16 @@ class FitnessEvaluator:
             fee = self.backtest_config.get('fee', 0.001)
             slippage = self.backtest_config.get('slippage_pct', 0.0)
             round_trip_cost = (fee + slippage) * 2  # entry + exit
-            avg_profit_pct = metrics.get('avg_profit', 0.0) / 100.0  # convert to decimal
+            # ``avg_profit`` is the decimal FreqTrade ``profit_mean`` value.
+            # Dividing it by 100 again made this penalty effectively trigger on
+            # almost every positive strategy.
+            avg_profit_ratio = metrics.get('avg_profit', 0.0)
             min_edge = penalties.get('spread_aware_min_edge_multiplier', 2.0)
-            if avg_profit_pct > 0 and avg_profit_pct < round_trip_cost * min_edge:
-                edge_ratio = avg_profit_pct / (round_trip_cost * min_edge) if round_trip_cost > 0 else 1.0
+            if avg_profit_ratio > 0 and avg_profit_ratio < round_trip_cost * min_edge:
+                edge_ratio = avg_profit_ratio / (round_trip_cost * min_edge) if round_trip_cost > 0 else 1.0
                 spread_penalty = max(0.5, edge_ratio)
                 fitness *= spread_penalty
-                logger.debug(f"Applied spread-aware penalty: avg_profit={avg_profit_pct:.4f}, "
+                logger.debug(f"Applied spread-aware penalty: avg_profit={avg_profit_ratio:.4f}, "
                            f"min_edge={round_trip_cost * min_edge:.4f}, penalty x{spread_penalty:.3f}")
 
         # Combined penalty floor: prevent penalty compounding from destroying

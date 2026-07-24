@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ from genetic_algorithm.web.models.generation import GenerationDetail
 from genetic_algorithm.web.models.run import RunDetail, RunStatus, RunSummary
 from genetic_algorithm.web.models.strategy import StrategyDetail
 from genetic_algorithm.web.services.data_service import DataService, RUNS_DIR, HOF_DIR, CONFIG_DIR
+from genetic_algorithm.orchestration.result_contract import AttemptManifestV2
 
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -33,8 +35,11 @@ def mock_manager():
 
 
 @pytest.fixture
-def data_service(mock_manager):
-    return DataService(run_manager=mock_manager)
+def data_service(mock_manager, tmp_path):
+    return DataService(
+        run_manager=mock_manager,
+        state_path=tmp_path / "catalog-state.sqlite3",
+    )
 
 
 # ── list_runs ──────────────────────────────────────────────────────
@@ -75,6 +80,36 @@ class TestListRuns:
 
         # Should find the disk run (may not parse perfectly, but should not crash)
         assert isinstance(result, list)
+
+    def test_catalog_is_the_only_historical_run_source(
+        self, data_service, mock_manager, tmp_path
+    ):
+        root = tmp_path / "attempts" / "attempt-web"
+        manifest = AttemptManifestV2(
+            attempt_id="attempt-web",
+            wave_id="wave-web",
+            experiment_id="experiment-web",
+            created_at=datetime(2026, 7, 23, tzinfo=UTC),
+            config_hash="c" * 64,
+            code_version="web-test",
+            data_manifest_hash="d" * 64,
+            split_manifest_hash="s" * 64,
+            fitness_policy_version="web-policy",
+            seeds=[42],
+            worker_count=1,
+            resolved_config_path=str(root / "resolved_config.yaml"),
+            artifact_root=str(root),
+        )
+        data_service.catalog.state_store.register(manifest)
+        mock_manager.list_runs.return_value = []
+
+        summaries = data_service.list_runs()
+        detail = data_service.get_run_detail("experiment-web")
+
+        assert [item.run_id for item in summaries] == ["experiment-web"]
+        assert summaries[0].status == RunStatus.PENDING
+        assert detail is not None
+        assert detail.mode == "canonical_v2"
 
 
 # ── get_generation ─────────────────────────────────────────────────

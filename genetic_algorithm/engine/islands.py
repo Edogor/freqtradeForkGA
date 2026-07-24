@@ -30,6 +30,11 @@ from typing import Any, Optional
 
 import yaml
 
+from genetic_algorithm.engine.island_results import (
+    IslandFinalistBatch,
+    extract_island_finalists,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,14 +132,19 @@ class IslandCoordinator:
         """Dict mapping island name → population."""
         return getattr(self._backend, "island_populations", {})
 
-    def evolve(self):
+    def evolve(self) -> IslandFinalistBatch:
         """Run the full island-model evolution.
 
         Returns:
-            The backend's result — typically a list of best individuals
-            or a dict of per-island results.
+            A validated, flattened view whose finalists all come from one
+            exact common replay panel.
         """
-        return self._backend.evolve()
+        raw = self._backend.evolve()
+        return extract_island_finalists(
+            raw,
+            expected_islands=self.island_names,
+            require_finalists=True,
+        )
 
     def get_generation_stats(self) -> dict:
         """Return per-island generation stats if available."""

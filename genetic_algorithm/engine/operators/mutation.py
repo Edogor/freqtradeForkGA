@@ -5,16 +5,26 @@ Implements various mutation strategies for introducing
 variation into strategies.
 """
 
-import random
 import logging
-from typing import Dict, Any, Optional
+import random
+from typing import Any, Dict, Literal, Optional
 
 from genetic_algorithm.core.individual import Individual
-from genetic_algorithm.core.strategy_gene import StrategyGene, IndicatorGene, ConditionGene, RegimeGene, is_higher_timeframe
-from genetic_algorithm.utils.indicator_factory import create_random_indicator
-from genetic_algorithm.strategies.operator_registry import (
-    get_valid_operators, is_valid_operator, resolve_indicator_type, get_standard_operators,
+from genetic_algorithm.core.strategy_gene import (
+    ConditionGene,
+    IndicatorGene,
+    RegimeGene,
+    StrategyGene,
+    is_higher_timeframe,
 )
+from genetic_algorithm.strategies.operator_registry import (
+    get_standard_operators,
+    get_valid_operators,
+    is_valid_operator,
+    resolve_indicator_type,
+)
+from genetic_algorithm.utils.indicator_factory import create_random_indicator
+
 
 # Set up logger for mutation operations
 logger = logging.getLogger(__name__)
@@ -22,13 +32,13 @@ logger = logging.getLogger(__name__)
 # Hard threshold clamps for bounded indicators.
 # Prevents degenerate conditions like RSI < 0 or RSI > 100.
 _THRESHOLD_CLAMPS = {
-    'RSI':   (0,   100),
-    'STOCH': (0,   100),
-    'CCI':   (-300, 300),
-    'CMF':   (-1,  1),
-    'VROC':  (-500, 500),
-    'ADX':   (0,   100),
-    'ATR':   (0.001, 0.1),
+    "RSI": (0, 100),
+    "STOCH": (0, 100),
+    "CCI": (-300, 300),
+    "CMF": (-1, 1),
+    "VROC": (-500, 500),
+    "ADX": (0, 100),
+    "ATR": (0.001, 0.1),
 }
 
 
@@ -38,112 +48,168 @@ def clamp_condition_thresholds(conditions: list) -> None:
     Mutates conditions in-place. Handles instance_id formats like 'RSI_0'.
     """
     for cond in conditions:
-        base_type = cond.indicator.split('_')[0] if '_' in cond.indicator else cond.indicator
+        base_type = cond.indicator.split("_")[0] if "_" in cond.indicator else cond.indicator
         bounds = _THRESHOLD_CLAMPS.get(base_type.upper())
+        if cond.operator != "between":
+            if bounds:
+                lo, hi = bounds
+                cond.threshold = max(lo, min(hi, cond.threshold))
+            continue
+
         if bounds:
             lo, hi = bounds
             cond.threshold = max(lo, min(hi, cond.threshold))
-            if cond.operator == 'between':
-                cond.threshold_upper = max(lo, min(hi, cond.threshold_upper))
-                # Ensure lower < upper
-                if cond.threshold > cond.threshold_upper:
-                    cond.threshold, cond.threshold_upper = cond.threshold_upper, cond.threshold
+            cond.threshold_upper = max(lo, min(hi, cond.threshold_upper))
+            if cond.threshold > cond.threshold_upper:
+                cond.threshold, cond.threshold_upper = cond.threshold_upper, cond.threshold
+            if cond.threshold == cond.threshold_upper:
+                step = max((hi - lo) * 0.01, 1e-9)
+                if cond.threshold_upper < hi:
+                    cond.threshold_upper = min(hi, cond.threshold + step)
+                else:
+                    cond.threshold = max(lo, cond.threshold_upper - step)
+        else:
+            if cond.threshold > cond.threshold_upper:
+                cond.threshold, cond.threshold_upper = cond.threshold_upper, cond.threshold
+            if cond.threshold == cond.threshold_upper:
+                cond.threshold_upper = cond.threshold + max(
+                    abs(cond.threshold) * 0.1,
+                    1e-9,
+                )
 
 
 def _mutate_indicator_params(indicator, ind_config, i, mutations_applied):
     """Helper to mutate indicator parameters based on type."""
     # Period-based indicators (simple case)
-    if 'period' in indicator.parameters and indicator.type in ['RSI', 'EMA', 'SMA', 'ATR', 'ADX', 'CCI', 'DONCHIAN', 'CMF', 'VROC']:
-        period_range = ind_config.get('period', [7, 21] if indicator.type == 'RSI' else [10, 50])
-        indicator.parameters['period'] = random.randint(*period_range)
+    if "period" in indicator.parameters and indicator.type in [
+        "RSI",
+        "EMA",
+        "SMA",
+        "ATR",
+        "ADX",
+        "CCI",
+        "DONCHIAN",
+        "CMF",
+        "VROC",
+    ]:
+        period_range = ind_config.get("period", [7, 21] if indicator.type == "RSI" else [10, 50])
+        indicator.parameters["period"] = random.randint(*period_range)
         mutations_applied.append(f"{indicator.type}_period_{i}")
-    
+
     # Multi-parameter indicators
-    elif indicator.type == 'MACD':
-        for param, default in [('fast_period', [8, 21]), ('slow_period', [21, 50]), ('signal_period', [5, 14])]:
+    elif indicator.type == "MACD":
+        for param, default in [
+            ("fast_period", [8, 21]),
+            ("slow_period", [21, 50]),
+            ("signal_period", [5, 14]),
+        ]:
             if param in indicator.parameters and random.random() < 0.5:
                 indicator.parameters[param] = random.randint(*ind_config.get(param, default))
                 mutations_applied.append(f"MACD_{param.split('_')[0]}_{i}")
         # Validate: ensure slow_period > fast_period
-        if indicator.parameters.get('fast_period', 12) >= indicator.parameters.get('slow_period', 26):
-            indicator.parameters['fast_period'] = max(8, indicator.parameters.get('slow_period', 26) - 5)
-    
-    elif indicator.type == 'BBANDS':
-        if 'period' in indicator.parameters and random.random() < 0.5:
-            indicator.parameters['period'] = random.randint(*ind_config.get('period', [15, 30]))
+        if indicator.parameters.get("fast_period", 12) >= indicator.parameters.get(
+            "slow_period", 26
+        ):
+            indicator.parameters["fast_period"] = max(
+                8, indicator.parameters.get("slow_period", 26) - 5
+            )
+
+    elif indicator.type == "BBANDS":
+        if "period" in indicator.parameters and random.random() < 0.5:
+            indicator.parameters["period"] = random.randint(*ind_config.get("period", [15, 30]))
             mutations_applied.append(f"BBANDS_period_{i}")
-        if 'std_dev' in indicator.parameters and random.random() < 0.5:
-            indicator.parameters['std_dev'] = random.uniform(*ind_config.get('std_dev', [1.5, 3.0]))
+        if "std_dev" in indicator.parameters and random.random() < 0.5:
+            indicator.parameters["std_dev"] = random.uniform(*ind_config.get("std_dev", [1.5, 3.0]))
             mutations_applied.append(f"BBANDS_std_{i}")
-    
-    elif indicator.type == 'STOCH':
-        for param, default in [('k_period', [5, 21]), ('d_period', [3, 14])]:
+
+    elif indicator.type == "STOCH":
+        for param, default in [("k_period", [5, 21]), ("d_period", [3, 14])]:
             if param in indicator.parameters and random.random() < 0.5:
                 indicator.parameters[param] = random.randint(*ind_config.get(param, default))
                 mutations_applied.append(f"STOCH_{param[0]}_{i}")
-    
+
     # === NEW INDICATOR MUTATIONS ===
-    
-    elif indicator.type == 'SUPERTREND':
-        if 'period' in indicator.parameters and random.random() < 0.5:
-            indicator.parameters['period'] = random.randint(*ind_config.get('period', [7, 14]))
+
+    elif indicator.type == "SUPERTREND":
+        if "period" in indicator.parameters and random.random() < 0.5:
+            indicator.parameters["period"] = random.randint(*ind_config.get("period", [7, 14]))
             mutations_applied.append(f"SUPERTREND_period_{i}")
-        if 'multiplier' in indicator.parameters and random.random() < 0.5:
-            indicator.parameters['multiplier'] = random.uniform(*ind_config.get('multiplier', [2.0, 4.0]))
+        if "multiplier" in indicator.parameters and random.random() < 0.5:
+            indicator.parameters["multiplier"] = random.uniform(
+                *ind_config.get("multiplier", [2.0, 4.0])
+            )
             mutations_applied.append(f"SUPERTREND_mult_{i}")
-    
-    elif indicator.type == 'ICHIMOKU':
-        for param, default in [('tenkan_period', [7, 12]), ('kijun_period', [20, 30]), ('senkou_b_period', [40, 60])]:
+
+    elif indicator.type == "ICHIMOKU":
+        for param, default in [
+            ("tenkan_period", [7, 12]),
+            ("kijun_period", [20, 30]),
+            ("senkou_b_period", [40, 60]),
+        ]:
             if param in indicator.parameters and random.random() < 0.5:
                 indicator.parameters[param] = random.randint(*ind_config.get(param, default))
                 mutations_applied.append(f"ICHIMOKU_{param.split('_')[0]}_{i}")
-    
-    elif indicator.type in ['PSAR', 'SAR']:
-        if 'acceleration' in indicator.parameters and random.random() < 0.5:
-            indicator.parameters['acceleration'] = random.uniform(*ind_config.get('acceleration', [0.01, 0.05]))
+
+    elif indicator.type in ["PSAR", "SAR"]:
+        if "acceleration" in indicator.parameters and random.random() < 0.5:
+            indicator.parameters["acceleration"] = random.uniform(
+                *ind_config.get("acceleration", [0.01, 0.05])
+            )
             mutations_applied.append(f"PSAR_accel_{i}")
-        if 'maximum' in indicator.parameters and random.random() < 0.5:
-            indicator.parameters['maximum'] = random.uniform(*ind_config.get('maximum', [0.1, 0.3]))
+        if "maximum" in indicator.parameters and random.random() < 0.5:
+            indicator.parameters["maximum"] = random.uniform(*ind_config.get("maximum", [0.1, 0.3]))
             mutations_applied.append(f"PSAR_max_{i}")
-    
+
     # Mutate weight
     if random.random() < 0.3:
         indicator.weight = random.uniform(0.3, 1.0)
         mutations_applied.append(f"weight_{i}")
 
 
-def _mutate_condition_threshold(condition, ind_config, is_entry, i, mutations_applied):
+def _mutate_condition_threshold(
+    condition,
+    ind_config,
+    is_entry,
+    i,
+    mutations_applied,
+    side: Literal["long", "short"] = "long",
+):
     """Helper to mutate condition thresholds.
-    
+
     Supports all indicator types that commonly use threshold-based
     conditions.  Falls back to a small Gaussian perturbation for unknown
     types so that mutation is never silently skipped.
     """
-    threshold_key = 'buy_threshold' if is_entry else 'sell_threshold'
+    bullish_signal = (side == "long" and is_entry) or (side == "short" and not is_entry)
+    threshold_key = "buy_threshold" if bullish_signal else "sell_threshold"
     # Extract base type from possible instance_id format (e.g., 'RSI_0' -> 'RSI')
-    base_indicator = condition.indicator.split('_')[0] if '_' in condition.indicator else condition.indicator
+    base_indicator = (
+        condition.indicator.split("_")[0] if "_" in condition.indicator else condition.indicator
+    )
 
     # Indicator-specific default ranges (buy / sell)
     _DEFAULT_RANGES = {
-        'RSI':   ([20, 40], [60, 80]),
-        'CCI':   ([-200, -100], [100, 200]),
-        'STOCH': ([15, 35], [65, 85]),
-        'WILLR': ([-90, -70], [-30, -10]),
-        'MFI':   ([15, 35], [65, 85]),
-        'ADX':   ([20, 35], [20, 35]),       # same for entry/exit (trend strength)
-        'AROON': ([60, 80], [60, 80]),
-        'ROC':   ([-5, 0], [0, 5]),
-        'VROC':  ([-200, -50], [50, 200]),
-        'CMF':   ([0.05, 0.2], [-0.2, -0.05]),  # entry=positive(bullish), exit=negative(bearish)
-        'ATR':   ([0.005, 0.02], [0.005, 0.02]),  # volatility ratio of close price
-        'OBV':   ([-1e6, 0], [0, 1e6]),     # volume-based; wide range, Gaussian fallback is fine
-        'TEMA':  ([0.98, 1.0], [1.0, 1.02]), # ratio to close price
-        'KAMA':  ([0.98, 1.0], [1.0, 1.02]), # ratio to close price
+        "RSI": ([20, 40], [60, 80]),
+        "CCI": ([-200, -100], [100, 200]),
+        "STOCH": ([15, 35], [65, 85]),
+        "WILLR": ([-90, -70], [-30, -10]),
+        "MFI": ([15, 35], [65, 85]),
+        "ADX": ([20, 35], [20, 35]),  # same for entry/exit (trend strength)
+        "AROON": ([60, 80], [60, 80]),
+        "ROC": ([-5, 0], [0, 5]),
+        "VROC": ([-200, -50], [50, 200]),
+        "CMF": ([0.05, 0.2], [-0.2, -0.05]),  # entry=positive(bullish), exit=negative(bearish)
+        "ATR": ([0.005, 0.02], [0.005, 0.02]),  # volatility ratio of close price
+        "OBV": ([-1e6, 0], [0, 1e6]),  # volume-based; wide range, Gaussian fallback is fine
+        "TEMA": ([0.98, 1.0], [1.0, 1.02]),  # ratio to close price
+        "KAMA": ([0.98, 1.0], [1.0, 1.02]),  # ratio to close price
     }
 
     defaults = _DEFAULT_RANGES.get(base_indicator)
     if defaults is not None:
-        default_range = defaults[0] if is_entry else defaults[1]
+        # ATR/ADX are activity filters; their range is identical.  Directional
+        # oscillators and flows must use the opposite range for short entry.
+        default_range = defaults[0] if bullish_signal else defaults[1]
         threshold_range = ind_config.get(threshold_key, default_range)
         lo, hi = min(threshold_range), max(threshold_range)
         if isinstance(lo, int) and isinstance(hi, int):
@@ -157,68 +223,93 @@ def _mutate_condition_threshold(condition, ind_config, is_entry, i, mutations_ap
         else:
             condition.threshold = random.uniform(-1.0, 1.0)
 
-    mutations_applied.append(f"{'entry' if is_entry else 'exit'}_{condition.indicator}_threshold_{i}")
+    mutations_applied.append(
+        f"{side}_{'entry' if is_entry else 'exit'}_{condition.indicator}_threshold_{i}"
+    )
 
 
-def mutate_parameters(individual: Individual, mutation_rate: float,
-                     config: Dict[str, Any]) -> Individual:
+def mutate_parameters(
+    individual: Individual, mutation_rate: float, config: Dict[str, Any]
+) -> Individual:
     """
     Mutate numeric parameters of indicators and conditions.
-    
+
     Args:
         individual: Individual to mutate
         mutation_rate: Probability of mutating each parameter
         config: Configuration with parameter ranges
-        
+
     Returns:
         Mutated individual
     """
     mutated_gene = individual.strategy_gene.copy()
-    indicator_config = config.get('indicators', {})
-    strategy_constraints = config.get('strategy_constraints', {})
+    indicator_config = config.get("indicators", {})
+    strategy_constraints = config.get("strategy_constraints", {})
     mutations_applied = []
-    
+
     # Mutate indicator parameters
     for i, indicator in enumerate(mutated_gene.indicators):
         if random.random() < mutation_rate:
             ind_config = indicator_config.get(indicator.type, {})
             _mutate_indicator_params(indicator, ind_config, i, mutations_applied)
-    
+
     # Mutate condition thresholds
     for i, condition in enumerate(mutated_gene.entry_conditions):
         if random.random() < mutation_rate:
             # Extract base type from possible instance_id format (e.g., 'RSI_0' -> 'RSI')
-            base_indicator = condition.indicator.split('_')[0] if '_' in condition.indicator else condition.indicator
+            base_indicator = (
+                condition.indicator.split("_")[0]
+                if "_" in condition.indicator
+                else condition.indicator
+            )
             ind_config = indicator_config.get(base_indicator, {})
             _mutate_condition_threshold(condition, ind_config, True, i, mutations_applied)
-    
+
     for i, condition in enumerate(mutated_gene.exit_conditions):
         if random.random() < mutation_rate:
-            base_indicator = condition.indicator.split('_')[0] if '_' in condition.indicator else condition.indicator
+            base_indicator = (
+                condition.indicator.split("_")[0]
+                if "_" in condition.indicator
+                else condition.indicator
+            )
             ind_config = indicator_config.get(base_indicator, {})
             _mutate_condition_threshold(condition, ind_config, False, i, mutations_applied)
-    
+
     # Mutate independent short conditions (if present)
     for i, condition in enumerate(mutated_gene.short_entry_conditions):
         if random.random() < mutation_rate:
-            base_indicator = condition.indicator.split('_')[0] if '_' in condition.indicator else condition.indicator
+            base_indicator = (
+                condition.indicator.split("_")[0]
+                if "_" in condition.indicator
+                else condition.indicator
+            )
             ind_config = indicator_config.get(base_indicator, {})
-            _mutate_condition_threshold(condition, ind_config, True, i, mutations_applied)
-    
+            _mutate_condition_threshold(
+                condition, ind_config, True, i, mutations_applied, side="short"
+            )
+
     for i, condition in enumerate(mutated_gene.short_exit_conditions):
         if random.random() < mutation_rate:
-            base_indicator = condition.indicator.split('_')[0] if '_' in condition.indicator else condition.indicator
+            base_indicator = (
+                condition.indicator.split("_")[0]
+                if "_" in condition.indicator
+                else condition.indicator
+            )
             ind_config = indicator_config.get(base_indicator, {})
-            _mutate_condition_threshold(condition, ind_config, False, i, mutations_applied)
-    
+            _mutate_condition_threshold(
+                condition, ind_config, False, i, mutations_applied, side="short"
+            )
+
     # Mutate stoploss
     if random.random() < mutation_rate:
-        mutated_gene.stoploss = random.uniform(*strategy_constraints.get('stoploss_range', [-0.20, -0.05]))
+        mutated_gene.stoploss = random.uniform(
+            *strategy_constraints.get("stoploss_range", [-0.20, -0.05])
+        )
         mutations_applied.append("stoploss")
-    
+
     # Mutate ROI values
     if random.random() < mutation_rate:
-        roi_range = strategy_constraints.get('roi_range', [0.01, 0.10])
+        roi_range = strategy_constraints.get("roi_range", [0.01, 0.10])
         mutated_gene.minimal_roi = {
             "0": random.uniform(roi_range[0] * 2, roi_range[1]),
             "30": random.uniform(roi_range[0] * 1.5, roi_range[1] * 0.7),
@@ -227,50 +318,55 @@ def mutate_parameters(individual: Individual, mutation_rate: float,
         # Enforce monotonically decreasing ROI values
         mutated_gene._enforce_roi_monotonicity()
         mutations_applied.append("roi")
-    
+
     # Mutate max_open_trades
     if random.random() < mutation_rate:
-        max_open_trades_range = strategy_constraints.get('max_open_trades_range', [1, 10])
+        max_open_trades_range = strategy_constraints.get("max_open_trades_range", [1, 10])
         mutated_gene.max_open_trades = random.randint(*max_open_trades_range)
         mutations_applied.append("max_open_trades")
-    
+
+    # Independent threshold mutations can converge two conditions onto the
+    # exact same value, including conditions in the short signal groups.
+    # Canonicalize at the producer boundary instead of relying on a later
+    # serialization round-trip to deduplicate them.
+    mutated_gene.assign_instance_ids()
+
     # Create new individual with mutation record
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'parameter',
-        'rate': mutation_rate,
-        'applied': mutations_applied
-    }]
-    
+    new_individual.mutations = individual.mutations + [
+        {"type": "parameter", "rate": mutation_rate, "applied": mutations_applied}
+    ]
+
     return new_individual
 
 
-def mutate_indicators(individual: Individual, mutation_rate: float,
-                     config: Dict[str, Any]) -> Individual:
+def mutate_indicators(
+    individual: Individual, mutation_rate: float, config: Dict[str, Any]
+) -> Individual:
     """
     Mutate indicator set (add, remove, or replace indicators).
-    
+
     Uses adaptive indicator weights from feature importance tracking
     when available (stored in config['_indicator_weights']).
-    
+
     Args:
         individual: Individual to mutate
         mutation_rate: Probability of mutation
         config: Configuration with available indicators
-        
+
     Returns:
         Mutated individual
     """
     mutated_gene = individual.strategy_gene.copy()
-    indicator_config = config.get('indicators', {})
-    available_indicators = indicator_config.get('available', [])
-    max_indicators = indicator_config.get('max_per_strategy', 5)
-    min_indicators = indicator_config.get('min_per_strategy', 2)
-    
+    indicator_config = config.get("indicators", {})
+    available_indicators = indicator_config.get("available", [])
+    max_indicators = indicator_config.get("max_per_strategy", 5)
+    min_indicators = indicator_config.get("min_per_strategy", 2)
+
     # Get adaptive weights (injected by evolution.py from feature importance)
-    indicator_weights = config.get('_indicator_weights', {})
+    indicator_weights = config.get("_indicator_weights", {})
     # v3: synergy weights keyed by partner indicator type
-    synergy_weights = config.get('_synergy_weights', {})
+    synergy_weights = config.get("_synergy_weights", {})
 
     mutations_applied = []
     _gene_tf = mutated_gene.timeframe  # for TF-adaptive indicator parameter scaling
@@ -288,51 +384,63 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
             for i, c in enumerate(candidates):
                 if c in synergy_weights:
                     # Multiplicative boost from synergy graph
-                    weights[i] *= (1.0 + synergy_weights[c])
+                    weights[i] *= 1.0 + synergy_weights[c]
 
         if not any(w > 0 for w in weights):
             return random.choice(candidates)
         return random.choices(candidates, weights=weights, k=1)[0]
-    
+
     # Choose mutation operation
     operations = []
     if len(mutated_gene.indicators) < max_indicators:
-        operations.append('add')
+        operations.append("add")
     if len(mutated_gene.indicators) > min_indicators:
-        operations.append('remove')
-    operations.append('replace')
-    
+        operations.append("remove")
+    operations.append("replace")
+
     operation = random.choice(operations)
-    
-    if operation == 'add':
+
+    if operation == "add":
         # Add a new random indicator
         existing_types = {ind.type for ind in mutated_gene.indicators}
         available_new = [t for t in available_indicators if t not in existing_types]
-        
+
         if available_new:
             existing_types_for_ctx = [ind.type for ind in mutated_gene.indicators]
             new_type = _weighted_choice(available_new, context_indicators=existing_types_for_ctx)
             new_indicator = _create_random_indicator(new_type, indicator_config, timeframe=_gene_tf)
             mutated_gene.indicators.append(new_indicator)
             mutations_applied.append(f"add_{new_type}")
-    
-    elif operation == 'remove':
+
+    elif operation == "remove":
         # Remove a random indicator
         if len(mutated_gene.indicators) > min_indicators:
             removed = random.choice(mutated_gene.indicators)
             mutated_gene.indicators.remove(removed)
             mutations_applied.append(f"remove_{removed.type}")
-            
+
             # Clean up conditions that reference removed indicator (by type or instance_id)
             mutated_gene.entry_conditions = [
-                c for c in mutated_gene.entry_conditions 
+                c
+                for c in mutated_gene.entry_conditions
                 if c.indicator != removed.type and c.indicator != removed.instance_id
             ]
             mutated_gene.exit_conditions = [
-                c for c in mutated_gene.exit_conditions 
+                c
+                for c in mutated_gene.exit_conditions
                 if c.indicator != removed.type and c.indicator != removed.instance_id
             ]
-            
+            mutated_gene.short_entry_conditions = [
+                c
+                for c in mutated_gene.short_entry_conditions
+                if c.indicator != removed.type and c.indicator != removed.instance_id
+            ]
+            mutated_gene.short_exit_conditions = [
+                c
+                for c in mutated_gene.short_exit_conditions
+                if c.indicator != removed.type and c.indicator != removed.instance_id
+            ]
+
             # Ensure at least one entry condition remains
             if not mutated_gene.entry_conditions:
                 # Add a condition using one of the remaining indicators
@@ -347,34 +455,43 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
                             mutations_applied.append(f"add_entry_condition_{indicator}")
                             condition_created = True
                             break
-                    
+
                     # If still no entry condition, this mutation failed validation
                     # The try-catch in the mutate() function will catch this
                     if not condition_created:
-                        logger.warning("Failed to create entry condition - all available indicators failed to generate valid conditions")
-                        raise ValueError("Failed to create entry condition - all available indicators failed to generate valid conditions")
+                        logger.warning(
+                            "Failed to create entry condition - all available indicators failed to generate valid conditions"
+                        )
+                        raise ValueError(
+                            "Failed to create entry condition - all available indicators failed to generate valid conditions"
+                        )
 
-    
-    elif operation == 'replace':
+    elif operation == "replace":
         # Replace an indicator with a different type
         if mutated_gene.indicators:
             idx = random.randrange(len(mutated_gene.indicators))
             old_type = mutated_gene.indicators[idx].type
             old_instance_id = mutated_gene.indicators[idx].instance_id
-            
+
             # Choose a different indicator type
             available_new = [t for t in available_indicators if t != old_type]
             if available_new:
-                remaining_types = [ind.type for ind in mutated_gene.indicators if ind.type != old_type]
+                remaining_types = [
+                    ind.type for ind in mutated_gene.indicators if ind.type != old_type
+                ]
                 new_type = _weighted_choice(available_new, context_indicators=remaining_types)
-                new_indicator = _create_random_indicator(new_type, indicator_config, timeframe=_gene_tf)
+                new_indicator = _create_random_indicator(
+                    new_type, indicator_config, timeframe=_gene_tf
+                )
                 mutated_gene.indicators[idx] = new_indicator
                 mutations_applied.append(f"replace_{old_type}_with_{new_type}")
-                
+
                 # Update conditions that referenced the old indicator (by type or instance_id)
                 # AND validate/fix operators for the new indicator type.
                 for condition in mutated_gene.entry_conditions:
-                    if condition.indicator == old_type or (old_instance_id and condition.indicator == old_instance_id):
+                    if condition.indicator == old_type or (
+                        old_instance_id and condition.indicator == old_instance_id
+                    ):
                         condition.indicator = new_type
                         # Fix operator if invalid for the new indicator type
                         if not is_valid_operator(new_type, condition.operator):
@@ -382,7 +499,9 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
                             if valid_ops:
                                 condition.operator = random.choice(valid_ops)
                 for condition in list(mutated_gene.exit_conditions):
-                    if condition.indicator == old_type or (old_instance_id and condition.indicator == old_instance_id):
+                    if condition.indicator == old_type or (
+                        old_instance_id and condition.indicator == old_instance_id
+                    ):
                         # Check if new indicator is suitable for exit at all
                         replacement = _create_random_condition(new_type, False, indicator_config)
                         if replacement:
@@ -393,107 +512,147 @@ def mutate_indicators(individual: Individual, mutation_rate: float,
                             # New indicator can't generate exit conditions (e.g. CDL_DOJI)
                             # Remove this exit condition entirely
                             mutated_gene.exit_conditions.remove(condition)
-    
+
+                for conditions, is_entry in (
+                    (mutated_gene.short_entry_conditions, True),
+                    (mutated_gene.short_exit_conditions, False),
+                ):
+                    for condition in list(conditions):
+                        if condition.indicator == old_type or (
+                            old_instance_id and condition.indicator == old_instance_id
+                        ):
+                            replacement = _create_random_condition(
+                                new_type,
+                                is_entry,
+                                indicator_config,
+                                side="short",
+                            )
+                            if replacement:
+                                condition.indicator = new_type
+                                condition.operator = replacement.operator
+                                condition.threshold = replacement.threshold
+                            else:
+                                conditions.remove(condition)
+
     # Create new individual with mutation record
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'indicator',
-        'operation': operation,
-        'applied': mutations_applied
-    }]
-    
+    new_individual.mutations = individual.mutations + [
+        {"type": "indicator", "operation": operation, "applied": mutations_applied}
+    ]
+
     # Remove conditions orphaned by indicator mutation instead of adding random indicators
     new_individual.strategy_gene.prune_orphaned_conditions()
-    
+
     # Reassign instance IDs after mutation to maintain unique IDs
     new_individual.strategy_gene.assign_instance_ids()
-    
+
     return new_individual
 
 
-def _create_random_indicator(indicator_type: str, indicator_config: Dict[str, Any],
-                             timeframe: str = None) -> IndicatorGene:
+def _create_random_indicator(
+    indicator_type: str, indicator_config: Dict[str, Any], timeframe: str = None
+) -> IndicatorGene:
     """Helper function to create a random indicator of given type."""
     return create_random_indicator(indicator_type, indicator_config, timeframe=timeframe)
 
 
-def mutate_conditions(individual: Individual, mutation_rate: float,
-                     config: Dict[str, Any]) -> Individual:
+def mutate_conditions(
+    individual: Individual, mutation_rate: float, config: Dict[str, Any]
+) -> Individual:
     """
     Mutate entry/exit conditions.
-    
+
     Args:
         individual: Individual to mutate
         mutation_rate: Probability of mutation
         config: Configuration with condition constraints
-        
+
     Returns:
         Mutated individual
     """
     mutated_gene = individual.strategy_gene.copy()
-    indicator_config = config.get('indicators', {})
+    indicator_config = config.get("indicators", {})
     mutations_applied = []
-    
+    has_independent_short = mutated_gene.can_short and (
+        bool(mutated_gene.short_entry_conditions)
+        or bool(mutated_gene.short_exit_conditions)
+        or config.get("short_selling", {}).get("independent_conditions", False)
+    )
+
     # Helper to mutate a single condition list
-    def mutate_condition_list(conditions, is_entry, label):
+    def mutate_condition_list(conditions, is_entry, label, side="long"):
         if not conditions or random.random() >= mutation_rate:
             return
-        
+
         idx = random.randrange(len(conditions))
         condition = conditions[idx]
-        mutation_type = random.choice(['operator', 'logic', 'threshold'])
-        
-        if mutation_type == 'operator':
+        mutation_type = random.choice(["operator", "logic", "threshold"])
+
+        if mutation_type == "operator":
             # Use registry to pick only valid operators for this indicator type
             ind_type = resolve_indicator_type(condition.indicator)
             valid_ops = get_valid_operators(ind_type)
             if not valid_ops:
                 # Unknown indicator — use CDL operators for candlestick patterns,
                 # otherwise fall back to standard numeric operators.
-                if ind_type.startswith('CDL_'):
-                    valid_ops = ['<', '>']
+                if ind_type.startswith("CDL_"):
+                    valid_ops = ["<", ">"]
                 else:
-                    valid_ops = ['<', '>', 'cross_above', 'cross_below',
-                                 'increasing', 'decreasing', 'between', 'value_above_ago']
-            op_weights_map = config.get('_operator_weights', {}) if config else {}
+                    valid_ops = [
+                        "<",
+                        ">",
+                        "cross_above",
+                        "cross_below",
+                        "increasing",
+                        "decreasing",
+                        "between",
+                        "value_above_ago",
+                    ]
+            op_weights_map = config.get("_operator_weights", {}) if config else {}
             if op_weights_map:
                 weights = [op_weights_map.get(op, 1.0) for op in valid_ops]
                 condition.operator = random.choices(valid_ops, weights=weights, k=1)[0]
             else:
                 condition.operator = random.choice(valid_ops)
             # Set sane defaults for new operators
-            if condition.operator == 'between':
+            if condition.operator == "between":
                 # Set a reasonable upper threshold
-                condition.threshold_upper = condition.threshold + abs(condition.threshold) * 0.5
-            elif condition.operator in ('increasing', 'decreasing', 'value_above_ago'):
+                condition.threshold_upper = condition.threshold + max(
+                    abs(condition.threshold) * 0.5,
+                    1e-9,
+                )
+            elif condition.operator in ("increasing", "decreasing", "value_above_ago"):
                 condition.lookback = random.randint(2, 8)
             mutations_applied.append(f"{label}_operator_{idx}")
-        elif mutation_type == 'logic':
-            condition.logic = 'OR' if condition.logic == 'AND' else 'AND'
+        elif mutation_type == "logic":
+            condition.logic = "OR" if condition.logic == "AND" else "AND"
             mutations_applied.append(f"{label}_logic_{idx}")
-        elif mutation_type == 'threshold':
+        elif mutation_type == "threshold":
             # Extract base type from possible instance_id format (e.g., 'RSI_0' -> 'RSI')
-            base_indicator = condition.indicator.split('_')[0] if '_' in condition.indicator else condition.indicator
+            base_indicator = (
+                condition.indicator.split("_")[0]
+                if "_" in condition.indicator
+                else condition.indicator
+            )
             ind_config = indicator_config.get(base_indicator, {})
-            threshold_key = 'buy_threshold' if is_entry else 'sell_threshold'
-            
-            # Set default ranges based on indicator type
-            defaults = {
-                'RSI': ([20, 40], [60, 80]),
-                'STOCH': ([15, 35], [65, 85]),
-                'CCI': ([-200, -100], [100, 200])
-            }
-            
-            if base_indicator in defaults:
-                default_range = defaults[base_indicator][0 if is_entry else 1]
-                threshold_range = ind_config.get(threshold_key, default_range)
-                condition.threshold = random.randint(*threshold_range)
-                mutations_applied.append(f"{label}_threshold_{idx}")
-    
+            _mutate_condition_threshold(
+                condition,
+                ind_config,
+                is_entry,
+                idx,
+                mutations_applied,
+                side=side,
+            )
+
     # Mutate entry and exit conditions
-    mutate_condition_list(mutated_gene.entry_conditions, True, 'entry')
-    mutate_condition_list(mutated_gene.exit_conditions, False, 'exit')
-    
+    mutate_condition_list(mutated_gene.entry_conditions, True, "entry")
+    mutate_condition_list(mutated_gene.exit_conditions, False, "exit")
+    if has_independent_short:
+        mutate_condition_list(
+            mutated_gene.short_entry_conditions, True, "short_entry", side="short"
+        )
+        mutate_condition_list(mutated_gene.short_exit_conditions, False, "short_exit", side="short")
+
     # Possibly add new conditions
     if random.random() < mutation_rate * 0.5:
         available_indicators = [ind.type for ind in mutated_gene.indicators]
@@ -505,7 +664,7 @@ def mutate_conditions(individual: Individual, mutation_rate: float,
                 if new_condition:
                     mutated_gene.entry_conditions.append(new_condition)
                     mutations_applied.append(f"add_entry_condition_{indicator}")
-            
+
             # Add exit condition if needed
             if len(mutated_gene.exit_conditions) < 3:
                 indicator = random.choice(available_indicators)
@@ -513,186 +672,276 @@ def mutate_conditions(individual: Individual, mutation_rate: float,
                 if new_condition:
                     mutated_gene.exit_conditions.append(new_condition)
                     mutations_applied.append(f"add_exit_condition_{indicator}")
-    
+
+            if has_independent_short and len(mutated_gene.short_entry_conditions) < 3:
+                indicator = random.choice(available_indicators)
+                new_condition = _create_random_condition(
+                    indicator, True, indicator_config, side="short"
+                )
+                if new_condition:
+                    mutated_gene.short_entry_conditions.append(new_condition)
+                    mutations_applied.append(f"add_short_entry_condition_{indicator}")
+
+            if has_independent_short and len(mutated_gene.short_exit_conditions) < 3:
+                indicator = random.choice(available_indicators)
+                new_condition = _create_random_condition(
+                    indicator, False, indicator_config, side="short"
+                )
+                if new_condition:
+                    mutated_gene.short_exit_conditions.append(new_condition)
+                    mutations_applied.append(f"add_short_exit_condition_{indicator}")
+
     # Possibly remove conditions
     # Maintain at least min_entry_conditions (default 2) to prevent single-condition overfitting
-    min_entry_conditions = indicator_config.get('min_entry_conditions', 2)
-    min_exit_conditions = indicator_config.get('min_exit_conditions', 1)
+    min_entry_conditions = indicator_config.get("min_entry_conditions", 2)
+    min_exit_conditions = indicator_config.get("min_exit_conditions", 1)
     if random.random() < mutation_rate * 0.3:
         if len(mutated_gene.entry_conditions) > min_entry_conditions:
-            removed = mutated_gene.entry_conditions.pop(random.randrange(len(mutated_gene.entry_conditions)))
+            removed = mutated_gene.entry_conditions.pop(
+                random.randrange(len(mutated_gene.entry_conditions))
+            )
             mutations_applied.append(f"remove_entry_condition_{removed.indicator}")
-        
+
         # Exit conditions: enforce minimum (configurable, default 1)
         if len(mutated_gene.exit_conditions) > min_exit_conditions:
-            removed = mutated_gene.exit_conditions.pop(random.randrange(len(mutated_gene.exit_conditions)))
+            removed = mutated_gene.exit_conditions.pop(
+                random.randrange(len(mutated_gene.exit_conditions))
+            )
             mutations_applied.append(f"remove_exit_condition_{removed.indicator}")
-    
+
+        if (
+            has_independent_short
+            and len(mutated_gene.short_entry_conditions) > min_entry_conditions
+        ):
+            removed = mutated_gene.short_entry_conditions.pop(
+                random.randrange(len(mutated_gene.short_entry_conditions))
+            )
+            mutations_applied.append(f"remove_short_entry_condition_{removed.indicator}")
+        if has_independent_short and len(mutated_gene.short_exit_conditions) > min_exit_conditions:
+            removed = mutated_gene.short_exit_conditions.pop(
+                random.randrange(len(mutated_gene.short_exit_conditions))
+            )
+            mutations_applied.append(f"remove_short_exit_condition_{removed.indicator}")
+
     # Create new individual with mutation record
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'condition',
-        'applied': mutations_applied
-    }]
-    
+    new_individual.mutations = individual.mutations + [
+        {"type": "condition", "applied": mutations_applied}
+    ]
+
     # Clamp thresholds to valid ranges (prevents degenerate conditions)
     clamp_condition_thresholds(new_individual.strategy_gene.entry_conditions)
     clamp_condition_thresholds(new_individual.strategy_gene.exit_conditions)
-    
+    clamp_condition_thresholds(new_individual.strategy_gene.short_entry_conditions)
+    clamp_condition_thresholds(new_individual.strategy_gene.short_exit_conditions)
+
     # Remove conditions orphaned by condition mutation instead of adding random indicators
     new_individual.strategy_gene.prune_orphaned_conditions()
-    
+
     # Reassign instance IDs to maintain unique references
     new_individual.strategy_gene.assign_instance_ids()
-    
+
     return new_individual
 
 
-def _create_random_condition(indicator_type: str, is_entry: bool, 
-                            indicator_config: Dict[str, Any]) -> Optional[ConditionGene]:
-    """Helper function to create a random condition for an indicator."""
+def _create_random_condition(
+    indicator_type: str,
+    is_entry: bool,
+    indicator_config: Dict[str, Any],
+    side: Literal["long", "short"] = "long",
+) -> Optional[ConditionGene]:
+    """Create a side-aware random condition for an indicator."""
     ind_config = indicator_config.get(indicator_type, {})
-    
+    bullish_signal = (side == "long" and is_entry) or (side == "short" and not is_entry)
+
     # Configuration map: indicator -> (entry_op, exit_op, entry_threshold_key, exit_threshold_key, default_entry, default_exit)
     config_map = {
-        'RSI': ('cross_below', 'cross_above', 'buy_threshold', 'sell_threshold', [20, 40], [60, 80]),
-        'MACD': ('cross_above', 'cross_below', None, None, None, None),
-        'STOCH': ('<', '>', 'k_threshold', 'd_threshold', [15, 35], [65, 85]),
-        'CCI': ('<', '>', 'buy_threshold', 'sell_threshold', [-200, -100], [100, 200]),
-        'ADX': ('>', '>', 'threshold', 'threshold', [20, 40], [20, 40]),
-        'BBANDS': ('cross_below', 'cross_above', None, None, None, None),
-        'EMA': ('cross_above', 'cross_below', None, None, None, None),
-        'SMA': ('cross_above', 'cross_below', None, None, None, None),
-        'ATR': ('>', '<', None, None, None, None),
+        "RSI": (
+            "cross_below",
+            "cross_above",
+            "buy_threshold",
+            "sell_threshold",
+            [20, 40],
+            [60, 80],
+        ),
+        "MACD": ("cross_above", "cross_below", None, None, None, None),
+        "STOCH": ("<", ">", "k_threshold", "d_threshold", [15, 35], [65, 85]),
+        "CCI": ("<", ">", "buy_threshold", "sell_threshold", [-200, -100], [100, 200]),
+        "ADX": (">", ">", "threshold", "threshold", [20, 40], [20, 40]),
+        "BBANDS": ("cross_below", "cross_above", None, None, None, None),
+        "EMA": ("cross_above", "cross_below", None, None, None, None),
+        "SMA": ("cross_above", "cross_below", None, None, None, None),
+        "ATR": (">", "<", None, None, None, None),
         # Extended indicators (mirrored from generator.py condition logic)
-        'PSAR': ('cross_above', 'cross_below', None, None, None, None),
-        'SUPERTREND': ('cross_above', 'cross_below', None, None, None, None),
-        'ICHIMOKU': ('cross_above', 'cross_below', None, None, None, None),
-        'DONCHIAN': ('cross_above', 'cross_below', None, None, None, None),
-        'VWAP': ('cross_above', 'cross_below', None, None, None, None),
-        'CMF': ('>', '<', 'buy_threshold', 'sell_threshold', [0.05, 0.2], [-0.2, -0.05]),
-        'VROC': ('>', '<', 'threshold', 'threshold', [50, 200], [50, 200]),
-        'AROON': ('>', '<', 'threshold', 'threshold', [60, 80], [60, 80]),
-        'MFI': ('cross_below', 'cross_above', 'buy_threshold', 'sell_threshold', [15, 35], [65, 85]),
-        'WILLR': ('<', '>', 'buy_threshold', 'sell_threshold', [-90, -70], [-30, -10]),
-        'ROC': ('>', '<', 'threshold', 'threshold', [-5, 0], [0, 5]),
-        'TEMA': ('cross_above', 'cross_below', None, None, None, None),
-        'KAMA': ('cross_above', 'cross_below', None, None, None, None),
+        "PSAR": ("cross_above", "cross_below", None, None, None, None),
+        "SUPERTREND": ("cross_above", "cross_below", None, None, None, None),
+        "ICHIMOKU": ("cross_above", "cross_below", None, None, None, None),
+        "DONCHIAN": ("cross_above", "cross_below", None, None, None, None),
+        "VWAP": ("cross_above", "cross_below", None, None, None, None),
+        "CMF": (">", "<", "buy_threshold", "sell_threshold", [0.05, 0.2], [-0.2, -0.05]),
+        "VROC": (">", "<", "threshold", "threshold", [50, 200], [50, 200]),
+        "AROON": (">", "<", "threshold", "threshold", [60, 80], [60, 80]),
+        "MFI": (
+            "cross_below",
+            "cross_above",
+            "buy_threshold",
+            "sell_threshold",
+            [15, 35],
+            [65, 85],
+        ),
+        "WILLR": ("<", ">", "buy_threshold", "sell_threshold", [-90, -70], [-30, -10]),
+        "ROC": (">", "<", "threshold", "threshold", [-5, 0], [0, 5]),
+        "TEMA": ("cross_above", "cross_below", None, None, None, None),
+        "KAMA": ("cross_above", "cross_below", None, None, None, None),
     }
-    
+
     # Candlestick patterns: create threshold-based conditions
     # Positive-only patterns (TA-Lib returns 0 or +100, never negative)
-    CDL_POSITIVE_ONLY = ['CDL_HAMMER', 'CDL_MORNINGSTAR', 'CDL_PIERCING',
-                         'CDL_3WHITESOLDIERS', 'CDL_DOJI']
+    CDL_POSITIVE_ONLY = [
+        "CDL_HAMMER",
+        "CDL_MORNINGSTAR",
+        "CDL_PIERCING",
+        "CDL_3WHITESOLDIERS",
+        "CDL_DOJI",
+    ]
     # Negative-only patterns (TA-Lib returns 0 or -100, never positive)
-    CDL_NEGATIVE_ONLY = ['CDL_EVENINGSTAR', 'CDL_SHOOTINGSTAR', 'CDL_DARKCLOUD', 'CDL_3BLACKCROWS']
+    CDL_NEGATIVE_ONLY = ["CDL_EVENINGSTAR", "CDL_SHOOTINGSTAR", "CDL_DARKCLOUD", "CDL_3BLACKCROWS"]
     # Bidirectional patterns (TA-Lib returns -100, 0, or +100)
-    CDL_BIDIRECTIONAL = ['CDL_ENGULFING', 'CDL_HARAMI']
-    
+    CDL_BIDIRECTIONAL = ["CDL_ENGULFING", "CDL_HARAMI"]
+
     if indicator_type in CDL_POSITIVE_ONLY:
         # Only '>' makes sense (pattern detected). '<' is always false.
         # Not suitable for exit conditions (can't signal "exit" reliably).
-        if is_entry:
+        if bullish_signal and not (indicator_type == "CDL_DOJI" and side == "short"):
             return ConditionGene(
-                indicator=indicator_type, operator='>', threshold=0,
-                logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
+                indicator=indicator_type,
+                operator=">",
+                threshold=0,
+                logic=random.choices(["AND", "OR"], weights=[0.75, 0.25])[0],
             )
         else:
             return None  # Not a valid exit signal
-    
+
     if indicator_type in CDL_NEGATIVE_ONLY:
         # Only '<' makes sense (bearish pattern detected). '>' is always false.
-        if not is_entry:
+        if not bullish_signal:
             return ConditionGene(
-                indicator=indicator_type, operator='<', threshold=0,
-                logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
+                indicator=indicator_type,
+                operator="<",
+                threshold=0,
+                logic=random.choices(["AND", "OR"], weights=[0.75, 0.25])[0],
             )
         else:
             return None  # Not a valid entry signal
-    
+
     if indicator_type in CDL_BIDIRECTIONAL:
-        if is_entry:
+        if bullish_signal:
             return ConditionGene(
-                indicator=indicator_type, operator='>', threshold=0,
-                logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
+                indicator=indicator_type,
+                operator=">",
+                threshold=0,
+                logic=random.choices(["AND", "OR"], weights=[0.75, 0.25])[0],
             )
         else:
             return ConditionGene(
-                indicator=indicator_type, operator='<', threshold=0,
-                logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]
+                indicator=indicator_type,
+                operator="<",
+                threshold=0,
+                logic=random.choices(["AND", "OR"], weights=[0.75, 0.25])[0],
             )
-    
+
     if indicator_type not in config_map:
         return None
-    
+
     entry_op, exit_op, entry_key, exit_key, entry_default, exit_default = config_map[indicator_type]
-    operator = entry_op if is_entry else exit_op
-    
+    operator = entry_op if bullish_signal else exit_op
+    # ATR/VROC represent signal activity rather than market direction.
+    if indicator_type in {"ATR", "VROC"}:
+        operator = entry_op if is_entry else exit_op
+
     # MACD, BBANDS, EMA, SMA, ATR, PSAR, SUPERTREND, ICHIMOKU, DONCHIAN, VWAP,
     # TEMA, KAMA use threshold 0
-    if indicator_type in ['MACD', 'BBANDS', 'EMA', 'SMA', 'PSAR', 'SUPERTREND', 
-                          'ICHIMOKU', 'DONCHIAN', 'VWAP', 'TEMA', 'KAMA']:
+    if indicator_type in [
+        "MACD",
+        "BBANDS",
+        "EMA",
+        "SMA",
+        "PSAR",
+        "SUPERTREND",
+        "ICHIMOKU",
+        "DONCHIAN",
+        "VWAP",
+        "TEMA",
+        "KAMA",
+    ]:
         threshold = 0
-    elif indicator_type == 'ATR':
+    elif indicator_type == "ATR":
         threshold = random.uniform(0.005, 0.03)
     else:
-        threshold_key = entry_key if is_entry else exit_key
-        default_range = entry_default if is_entry else exit_default
+        use_entry_range = bullish_signal
+        if indicator_type in {"ATR", "VROC"}:
+            use_entry_range = is_entry
+        threshold_key = entry_key if use_entry_range else exit_key
+        default_range = entry_default if use_entry_range else exit_default
         threshold_range = ind_config.get(threshold_key, default_range)
         # Use uniform for float ranges (CMF), randint for integer ranges (RSI, etc.)
         if any(isinstance(v, float) for v in threshold_range):
             threshold = random.uniform(*threshold_range)
         else:
             threshold = random.randint(*threshold_range)
-    
+
     return ConditionGene(
         indicator=indicator_type,
         operator=operator,
         threshold=threshold,
-        logic=random.choices(['AND', 'OR'], weights=[0.75, 0.25])[0]  # Favor AND for selective signals
+        logic=random.choices(["AND", "OR"], weights=[0.75, 0.25])[
+            0
+        ],  # Favor AND for selective signals
     )
 
 
-def mutate_structure(individual: Individual, mutation_rate: float,
-                    config: Dict[str, Any]) -> Individual:
+def mutate_structure(
+    individual: Individual, mutation_rate: float, config: Dict[str, Any]
+) -> Individual:
     """
     Mutate structural parameters (timeframe, stoploss, roi).
-    
+
     Args:
         individual: Individual to mutate
         mutation_rate: Probability of mutation
         config: Configuration with structural constraints
-        
+
     Returns:
         Mutated individual
     """
     mutated_gene = individual.strategy_gene.copy()
-    strategy_constraints = config.get('strategy_constraints', {})
-    
+    strategy_constraints = config.get("strategy_constraints", {})
+
     mutations_applied = []
-    
+
     # Mutate timeframe
     if random.random() < mutation_rate:
-        available_timeframes = strategy_constraints.get('timeframes', ['5m', '15m', '1h'])
+        available_timeframes = strategy_constraints.get("timeframes", ["5m", "15m", "1h"])
         mutated_gene.timeframe = random.choice(available_timeframes)
         # After changing base timeframe, remove informative timeframes that
         # are no longer strictly higher than the new base.
         if mutated_gene.informative_timeframes:
             mutated_gene.informative_timeframes = [
-                tf for tf in mutated_gene.informative_timeframes
+                tf
+                for tf in mutated_gene.informative_timeframes
                 if is_higher_timeframe(tf, mutated_gene.timeframe)
             ]
         mutations_applied.append(f"timeframe_{mutated_gene.timeframe}")
-    
+
     # Mutate stoploss
     if random.random() < mutation_rate:
-        stoploss_range = strategy_constraints.get('stoploss_range', [-0.20, -0.05])
+        stoploss_range = strategy_constraints.get("stoploss_range", [-0.20, -0.05])
         mutated_gene.stoploss = random.uniform(*stoploss_range)
         mutations_applied.append("stoploss")
-    
+
     # Mutate ROI
     if random.random() < mutation_rate:
-        roi_range = strategy_constraints.get('roi_range', [0.01, 0.10])
+        roi_range = strategy_constraints.get("roi_range", [0.01, 0.10])
         mutated_gene.minimal_roi = {
             "0": random.uniform(roi_range[0] * 2, roi_range[1]),
             "30": random.uniform(roi_range[0] * 1.5, roi_range[1] * 0.7),
@@ -701,18 +950,20 @@ def mutate_structure(individual: Individual, mutation_rate: float,
         # Enforce monotonically decreasing ROI values
         mutated_gene._enforce_roi_monotonicity()
         mutations_applied.append("roi")
-    
+
     # Mutate trailing stop
     if random.random() < mutation_rate:
         mutated_gene.trailing_stop = not mutated_gene.trailing_stop
         mutations_applied.append(f"trailing_stop_{mutated_gene.trailing_stop}")
-        
+
         # If enabling trailing stop, set appropriate parameters
         if mutated_gene.trailing_stop:
             # trailing_stop_positive_offset MUST be greater than trailing_stop_positive
             # Ranges are configurable via strategy_constraints (important for scalping)
-            ts_pos_range = strategy_constraints.get('trailing_stop_positive_range', [0.01, 0.03])
-            ts_offset_add_range = strategy_constraints.get('trailing_stop_offset_addition_range', [0.01, 0.03])
+            ts_pos_range = strategy_constraints.get("trailing_stop_positive_range", [0.01, 0.03])
+            ts_offset_add_range = strategy_constraints.get(
+                "trailing_stop_offset_addition_range", [0.01, 0.03]
+            )
             trailing_positive = random.uniform(*ts_pos_range)
             # Offset must be greater than positive
             trailing_offset = trailing_positive + random.uniform(*ts_offset_add_range)
@@ -722,107 +973,106 @@ def mutate_structure(individual: Individual, mutation_rate: float,
         else:
             mutated_gene.trailing_stop_positive = None
             mutated_gene.trailing_stop_positive_offset = None
-    
+
     # Create new individual with mutation record
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'structure',
-        'applied': mutations_applied
-    }]
-    
+    new_individual.mutations = individual.mutations + [
+        {"type": "structure", "applied": mutations_applied}
+    ]
+
     return new_individual
 
 
-def mutate_gaussian(individual: Individual, mutation_rate: float,
-                   config: Dict[str, Any], sigma: float = 0.1) -> Individual:
+def mutate_gaussian(
+    individual: Individual, mutation_rate: float, config: Dict[str, Any], sigma: float = 0.1
+) -> Individual:
     """
     Gaussian mutation - adds normally distributed noise to numeric parameters.
-    
+
     This provides smooth, incremental adjustments rather than discrete jumps,
     allowing fine-tuning of promising strategies.
-    
+
     Args:
         individual: Individual to mutate
         mutation_rate: Probability of mutation
         config: Configuration with parameter ranges
         sigma: Standard deviation of Gaussian noise (relative to parameter range)
-        
+
     Returns:
         Mutated individual
     """
     mutated_gene = individual.strategy_gene.copy()
-    indicator_config = config.get('indicators', {})
-    strategy_constraints = config.get('strategy_constraints', {})
+    indicator_config = config.get("indicators", {})
+    strategy_constraints = config.get("strategy_constraints", {})
     mutations_applied = []
-    
+
     # Gaussian mutation for indicator parameters
     for i, indicator in enumerate(mutated_gene.indicators):
         if random.random() < mutation_rate:
             ind_config = indicator_config.get(indicator.type, {})
-            
+
             # Period-based indicators
-            if 'period' in indicator.parameters:
-                period_range = ind_config.get('period', [7, 50])
-                current = indicator.parameters['period']
+            if "period" in indicator.parameters:
+                period_range = ind_config.get("period", [7, 50])
+                current = indicator.parameters["period"]
                 range_size = period_range[1] - period_range[0]
                 noise = random.gauss(0, sigma * range_size)
                 new_period = int(max(period_range[0], min(period_range[1], current + noise)))
-                indicator.parameters['period'] = new_period
+                indicator.parameters["period"] = new_period
                 mutations_applied.append(f"gaussian_{indicator.type}_period_{i}")
-            
+
             # Continuous parameters (e.g., BBANDS std_dev)
-            if 'std_dev' in indicator.parameters and indicator.type == 'BBANDS':
-                std_range = ind_config.get('std_dev', [1.5, 3.0])
-                current = indicator.parameters['std_dev']
+            if "std_dev" in indicator.parameters and indicator.type == "BBANDS":
+                std_range = ind_config.get("std_dev", [1.5, 3.0])
+                current = indicator.parameters["std_dev"]
                 range_size = std_range[1] - std_range[0]
                 noise = random.gauss(0, sigma * range_size)
                 new_std = max(std_range[0], min(std_range[1], current + noise))
-                indicator.parameters['std_dev'] = new_std
+                indicator.parameters["std_dev"] = new_std
                 mutations_applied.append(f"gaussian_BBANDS_std_{i}")
-    
+
     # Gaussian mutation for stoploss
     if random.random() < mutation_rate:
-        stoploss_range = strategy_constraints.get('stoploss_range', [-0.20, -0.05])
+        stoploss_range = strategy_constraints.get("stoploss_range", [-0.20, -0.05])
         current = mutated_gene.stoploss
         range_size = stoploss_range[1] - stoploss_range[0]
         noise = random.gauss(0, sigma * range_size)
         mutated_gene.stoploss = max(stoploss_range[0], min(stoploss_range[1], current + noise))
         mutations_applied.append("gaussian_stoploss")
-    
+
     # Gaussian mutation for ROI values
     if random.random() < mutation_rate:
-        roi_range = strategy_constraints.get('roi_range', [0.01, 0.10])
+        roi_range = strategy_constraints.get("roi_range", [0.01, 0.10])
         range_size = roi_range[1] - roi_range[0]
-        
+
         # Mutate each ROI level
         new_roi = {}
         for time_key, current_val in mutated_gene.minimal_roi.items():
             noise = random.gauss(0, sigma * range_size)
             new_val = max(roi_range[0], min(roi_range[1], current_val + noise))
             new_roi[time_key] = new_val
-        
+
         # Ensure ROI decreases over time
         sorted_keys = sorted([int(k) for k in new_roi.keys()])
         for i in range(len(sorted_keys) - 1):
             if new_roi[str(sorted_keys[i])] < new_roi[str(sorted_keys[i + 1])]:
                 new_roi[str(sorted_keys[i + 1])] = new_roi[str(sorted_keys[i])] * 0.9
-        
+
         mutated_gene.minimal_roi = {str(k): new_roi[str(k)] for k in sorted_keys}
         mutations_applied.append("gaussian_roi")
-    
+
     # Create new individual with mutation record
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'gaussian',
-        'sigma': sigma,
-        'applied': mutations_applied
-    }]
-    
+    new_individual.mutations = individual.mutations + [
+        {"type": "gaussian", "sigma": sigma, "applied": mutations_applied}
+    ]
+
     return new_individual
 
 
-def mutate_condition_reassign(individual: Individual, mutation_rate: float,
-                              config: Dict[str, Any]) -> Individual:
+def mutate_condition_reassign(
+    individual: Individual, mutation_rate: float, config: Dict[str, Any]
+) -> Individual:
     """
     Condition reassignment mutation — picks a random condition and changes its
     indicator reference to a *different* existing indicator, adjusting the
@@ -842,7 +1092,7 @@ def mutate_condition_reassign(individual: Individual, mutation_rate: float,
     """
     mutated_gene = individual.strategy_gene.copy()
     mutations_applied = []
-    indicator_config = config.get('indicators', {})
+    indicator_config = config.get("indicators", {})
 
     # Build set of available indicator instance_ids (or types as fallback)
     available_indicators = []
@@ -853,16 +1103,20 @@ def mutate_condition_reassign(individual: Individual, mutation_rate: float,
     if len(available_indicators) < 2:
         # Need at least 2 indicators to reassign between
         new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-        new_individual.mutations = individual.mutations + [{
-            'type': 'condition_reassign',
-            'applied': [],
-        }]
+        new_individual.mutations = individual.mutations + [
+            {
+                "type": "condition_reassign",
+                "applied": [],
+            }
+        ]
         return new_individual
 
-    # Try to reassign one entry condition and one exit condition
-    for cond_list, is_entry, label in [
-        (mutated_gene.entry_conditions, True, 'entry'),
-        (mutated_gene.exit_conditions, False, 'exit'),
+    # Try to reassign each active signal direction without changing its side.
+    for cond_list, is_entry, label, side in [
+        (mutated_gene.entry_conditions, True, "entry", "long"),
+        (mutated_gene.exit_conditions, False, "exit", "long"),
+        (mutated_gene.short_entry_conditions, True, "short_entry", "short"),
+        (mutated_gene.short_exit_conditions, False, "short_exit", "short"),
     ]:
         if not cond_list or random.random() > mutation_rate:
             continue
@@ -880,11 +1134,11 @@ def mutate_condition_reassign(individual: Individual, mutation_rate: float,
 
         # Generate a valid condition for the new indicator type using
         # _create_random_condition and copy its operator + threshold.
-        replacement = _create_random_condition(new_type, is_entry, indicator_config)
+        replacement = _create_random_condition(new_type, is_entry, indicator_config, side=side)
         if replacement:
             cond.operator = replacement.operator
             cond.threshold = replacement.threshold
-            if replacement.operator == 'between':
+            if replacement.operator == "between":
                 cond.threshold_upper = replacement.threshold_upper
         else:
             # Fallback: pick a valid operator for the new indicator type
@@ -893,41 +1147,50 @@ def mutate_condition_reassign(individual: Individual, mutation_rate: float,
                 cond.operator = random.choice(valid_ops)
             cond.threshold = 0
 
-        mutations_applied.append(
-            f"reassign_{label}_{old_ref}_to_{new_id}"
-        )
+        mutations_applied.append(f"reassign_{label}_{old_ref}_to_{new_id}")
 
     # Clamp thresholds after reassignment
     clamp_condition_thresholds(mutated_gene.entry_conditions)
     clamp_condition_thresholds(mutated_gene.exit_conditions)
+    clamp_condition_thresholds(mutated_gene.short_entry_conditions)
+    clamp_condition_thresholds(mutated_gene.short_exit_conditions)
+
+    # Reassignment can make two conditions identical (for example when an RSI
+    # condition is moved onto an already equivalent EMA condition).  Finish at
+    # the same canonical boundary used by persistence/IPC so the producer does
+    # not rely on a later deserialize cycle to silently deduplicate its output.
+    mutated_gene.assign_instance_ids()
 
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'condition_reassign',
-        'applied': mutations_applied,
-    }]
+    new_individual.mutations = individual.mutations + [
+        {
+            "type": "condition_reassign",
+            "applied": mutations_applied,
+        }
+    ]
 
     return new_individual
 
 
-def mutate_adaptive_per_gene(individual: Individual, base_mutation_rate: float,
-                             config: Dict[str, Any]) -> Individual:
+def mutate_adaptive_per_gene(
+    individual: Individual, base_mutation_rate: float, config: Dict[str, Any]
+) -> Individual:
     """
     Adaptive per-gene mutation - adjusts mutation rate based on gene fitness history.
-    
+
     Genes that contributed to high fitness mutate less (exploitation),
     while poorly performing genes mutate more (exploration).
-    
+
     Args:
         individual: Individual to mutate
         base_mutation_rate: Base mutation rate
         config: Configuration
-        
+
     Returns:
         Mutated individual
     """
     mutations_applied = []
-    
+
     # Calculate adaptive rates for different gene components
     # If individual has high fitness, reduce mutation of good components
     # Handle None fitness (unevaluated individuals)
@@ -935,96 +1198,99 @@ def mutate_adaptive_per_gene(individual: Individual, base_mutation_rate: float,
         fitness_factor = 1.0
     else:
         fitness_factor = min(1.0, individual.fitness)
-    
+
     # Indicators: lower mutation rate for high fitness (preserve good indicators)
     indicator_rate = base_mutation_rate * (1.5 - fitness_factor)
-    
+
     # Conditions: moderate mutation rate
     condition_rate = base_mutation_rate * (1.3 - 0.5 * fitness_factor)
-    
+
     # Structure: higher mutation for low fitness (try different approaches)
     structure_rate = base_mutation_rate * (1.0 + 0.5 * (1.0 - fitness_factor))
-    
+
     # Apply mutations with adaptive rates
     if random.random() < indicator_rate:
         mutated = mutate_indicators(individual, indicator_rate, config)
         mutations_applied.append(f"adaptive_indicators_{indicator_rate:.3f}")
         individual = mutated
-    
+
     if random.random() < condition_rate:
         mutated = mutate_conditions(individual, condition_rate, config)
         mutations_applied.append(f"adaptive_conditions_{condition_rate:.3f}")
         individual = mutated
-    
+
     if random.random() < structure_rate:
         mutated = mutate_structure(individual, structure_rate, config)
         mutations_applied.append(f"adaptive_structure_{structure_rate:.3f}")
         individual = mutated
-    
+
     # Record adaptive mutation
-    individual.mutations = individual.mutations + [{
-        'type': 'adaptive_per_gene',
-        'base_rate': base_mutation_rate,
-        'fitness_factor': fitness_factor,
-        'applied': mutations_applied
-    }]
-    
+    individual.mutations = individual.mutations + [
+        {
+            "type": "adaptive_per_gene",
+            "base_rate": base_mutation_rate,
+            "fitness_factor": fitness_factor,
+            "applied": mutations_applied,
+        }
+    ]
+
     return individual
 
 
-def mutate_timeframes(individual: Individual, mutation_rate: float,
-                      config: Dict[str, Any]) -> Individual:
+def mutate_timeframes(
+    individual: Individual, mutation_rate: float, config: Dict[str, Any]
+) -> Individual:
     """
     Mutate multi-timeframe aspects of the strategy.
-    
+
     Operations:
     - Add an informative timeframe with a new indicator
     - Remove an informative timeframe and its indicators
     - Change an indicator's timeframe (base <-> informative)
-    
+
     Args:
         individual: Individual to mutate
         mutation_rate: Probability of mutation
         config: Configuration with multi-TF settings
-        
+
     Returns:
         Mutated individual
     """
-    multi_tf_config = config.get('multi_timeframe', {})
-    if not multi_tf_config.get('enabled', False):
+    multi_tf_config = config.get("multi_timeframe", {})
+    if not multi_tf_config.get("enabled", False):
         return individual
-    
+
     mutated_gene = individual.strategy_gene.copy()
-    indicator_config = config.get('indicators', {})
-    available_itfs = multi_tf_config.get('available', [])
-    max_tfs = multi_tf_config.get('max_timeframes', 2)
-    htf_pref = multi_tf_config.get('higher_timeframe_preference', [])
-    available_indicators = indicator_config.get('available', [])
+    indicator_config = config.get("indicators", {})
+    available_itfs = multi_tf_config.get("available", [])
+    max_tfs = multi_tf_config.get("max_timeframes", 2)
+    htf_pref = multi_tf_config.get("higher_timeframe_preference", [])
+    available_indicators = indicator_config.get("available", [])
     mutations_applied = []
-    
+
     # Filter to valid higher timeframes
     valid_itfs = [tf for tf in available_itfs if is_higher_timeframe(tf, mutated_gene.timeframe)]
-    
+
     if not valid_itfs:
         return individual
-    
+
     # Choose operation
     operations = []
     current_itfs = list(mutated_gene.informative_timeframes)
     if len(current_itfs) < max_tfs:
-        operations.append('add_timeframe')
+        operations.append("add_timeframe")
     if current_itfs:
-        operations.append('remove_timeframe')
+        operations.append("remove_timeframe")
     inf_indicators = mutated_gene.get_informative_indicators()
     if inf_indicators:
-        operations.append('change_indicator_tf')
-    
+        operations.append("change_indicator_tf")
+
     if not operations:
-        operations = ['add_timeframe']
-    
+        operations = ["add_timeframe"]
+
     operation = random.choice(operations)
-    
-    if operation == 'add_timeframe':
+
+    if operation == "add_timeframe":
         # Add a new informative timeframe
         unused_tfs = [tf for tf in valid_itfs if tf not in current_itfs]
         if unused_tfs:
@@ -1033,15 +1299,17 @@ def mutate_timeframes(individual: Individual, mutation_rate: float,
             # Add an indicator for this timeframe
             if htf_pref:
                 candidates = [t for t in htf_pref if t in available_indicators]
-                ind_type = random.choice(candidates) if candidates else random.choice(available_indicators)
+                ind_type = (
+                    random.choice(candidates) if candidates else random.choice(available_indicators)
+                )
             else:
                 ind_type = random.choice(available_indicators)
             new_ind = create_random_indicator(ind_type, indicator_config, timeframe=new_tf)
             new_ind.timeframe = new_tf
             mutated_gene.indicators.append(new_ind)
             mutations_applied.append(f"add_tf_{new_tf}_{ind_type}")
-    
-    elif operation == 'remove_timeframe':
+
+    elif operation == "remove_timeframe":
         # Remove an informative timeframe and its indicators
         tf_to_remove = random.choice(current_itfs)
         mutated_gene.informative_timeframes.remove(tf_to_remove)
@@ -1056,15 +1324,19 @@ def mutate_timeframes(individual: Individual, mutation_rate: float,
             else:
                 remaining.append(ind)
         mutated_gene.indicators = remaining
-        # Clean up conditions referencing removed indicators
-        mutated_gene.entry_conditions = [
-            c for c in mutated_gene.entry_conditions
-            if c.indicator not in removed_ids
-        ]
-        mutated_gene.exit_conditions = [
-            c for c in mutated_gene.exit_conditions
-            if c.indicator not in removed_ids
-        ]
+        # Clean up every signal direction referencing removed indicators.
+        for attr in (
+            "entry_conditions",
+            "exit_conditions",
+            "short_entry_conditions",
+            "short_exit_conditions",
+        ):
+            conditions = getattr(mutated_gene, attr)
+            setattr(
+                mutated_gene,
+                attr,
+                [c for c in conditions if c.indicator not in removed_ids],
+            )
         # Ensure at least one entry condition remains
         if not mutated_gene.entry_conditions and mutated_gene.indicators:
             base_inds = [ind.type for ind in mutated_gene.indicators if ind.timeframe is None]
@@ -1073,8 +1345,8 @@ def mutate_timeframes(individual: Individual, mutation_rate: float,
                 if new_cond:
                     mutated_gene.entry_conditions.append(new_cond)
         mutations_applied.append(f"remove_tf_{tf_to_remove}")
-    
-    elif operation == 'change_indicator_tf':
+
+    elif operation == "change_indicator_tf":
         # Move an informative indicator to a different valid TF
         inf_ind = random.choice(inf_indicators)
         other_tfs = [tf for tf in valid_itfs if tf != inf_ind.timeframe]
@@ -1085,7 +1357,9 @@ def mutate_timeframes(individual: Individual, mutation_rate: float,
             for ind in mutated_gene.indicators:
                 if ind.instance_id == inf_ind.instance_id:
                     ind.timeframe = new_tf
-                    ind.instance_id = None  # Will be reassigned
+                    # Keep the old ID until assign_instance_ids() can remap all
+                    # conditions that reference this indicator to its new
+                    # timeframe-specific ID.
                     break
             # Update informative_timeframes list
             if new_tf not in mutated_gene.informative_timeframes:
@@ -1095,17 +1369,16 @@ def mutate_timeframes(individual: Individual, mutation_rate: float,
             if not has_old_tf and old_tf in mutated_gene.informative_timeframes:
                 mutated_gene.informative_timeframes.remove(old_tf)
             mutations_applied.append(f"change_tf_{old_tf}_to_{new_tf}")
-    
+
     # Reassign instance IDs
     mutated_gene.assign_instance_ids()
-    
+    mutated_gene.prune_orphaned_conditions()
+
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'timeframe',
-        'operation': operation,
-        'applied': mutations_applied
-    }]
-    
+    new_individual.mutations = individual.mutations + [
+        {"type": "timeframe", "operation": operation, "applied": mutations_applied}
+    ]
+
     return new_individual
 
 
@@ -1128,11 +1401,11 @@ def mutate_dynamic_bounds(
     Returns:
         Mutated Individual
     """
-    from genetic_algorithm.utils.dynamic_bounds import mutate_bounds, initialise_bounds
+    from genetic_algorithm.utils.dynamic_bounds import initialise_bounds, mutate_bounds
 
-    dyn_config = config.get('dynamic_bounds', {})
-    strength = dyn_config.get('mutation_strength', 0.1)
-    indicator_config = config.get('indicators', {})
+    dyn_config = config.get("dynamic_bounds", {})
+    strength = dyn_config.get("mutation_strength", 0.1)
+    indicator_config = config.get("indicators", {})
 
     mutated_gene = individual.strategy_gene.copy()
     mutations_applied = []
@@ -1155,17 +1428,16 @@ def mutate_dynamic_bounds(
         return individual
 
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'dynamic_bounds',
-        'applied': mutations_applied
-    }]
+    new_individual.mutations = individual.mutations + [
+        {"type": "dynamic_bounds", "applied": mutations_applied}
+    ]
 
     return new_individual
 
 
 # Valid regime values for mutation
-_VALID_REGIMES = [None, 'bullish', 'bearish', 'sideways', 'volatile']
-_VALID_REGIME_MODES = ['generalist', 'specialist', 'exclusive']
+_VALID_REGIMES = [None, "bullish", "bearish", "sideways", "volatile"]
+_VALID_REGIME_MODES = ["generalist", "specialist", "exclusive"]
 
 
 def mutate_regime(
@@ -1191,10 +1463,10 @@ def mutate_regime(
     Returns:
         Mutated individual (or original if no mutation applied)
     """
-    regime_config = config.get('regime_aware', {})
-    spec_config = regime_config.get('regime_specialization', {})
+    regime_config = config.get("regime_aware", {})
+    spec_config = regime_config.get("regime_specialization", {})
 
-    if not regime_config.get('enabled', False) or not spec_config.get('enabled', True):
+    if not regime_config.get("enabled", False) or not spec_config.get("enabled", True):
         return individual
 
     mutated_gene = individual.strategy_gene.copy()
@@ -1206,9 +1478,7 @@ def mutate_regime(
         new_regime = random.choice(_VALID_REGIMES)
         if new_regime != old_regime:
             mutated_gene.preferred_regime = new_regime
-            mutations_applied.append(
-                f"preferred_regime_{old_regime}_to_{new_regime}"
-            )
+            mutations_applied.append(f"preferred_regime_{old_regime}_to_{new_regime}")
 
     # Mutate regime_mode
     if random.random() < 0.3:
@@ -1219,21 +1489,21 @@ def mutate_regime(
             mutations_applied.append(f"regime_mode_{old_mode}_to_{new_mode}")
 
     # Mutate in-strategy regime gene (Phase 2)
-    in_strategy_cfg = regime_config.get('in_strategy_regime', {})
-    if in_strategy_cfg.get('enabled', False):
-        mutated_gene, rgene_mutations = _mutate_regime_gene(
-            mutated_gene, in_strategy_cfg
-        )
+    in_strategy_cfg = regime_config.get("in_strategy_regime", {})
+    if in_strategy_cfg.get("enabled", False):
+        mutated_gene, rgene_mutations = _mutate_regime_gene(mutated_gene, in_strategy_cfg)
         mutations_applied.extend(rgene_mutations)
 
     if not mutations_applied:
         return individual
 
     new_individual = Individual(strategy_gene=mutated_gene, parent_ids=[individual.id])
-    new_individual.mutations = individual.mutations + [{
-        'type': 'regime',
-        'applied': mutations_applied,
-    }]
+    new_individual.mutations = individual.mutations + [
+        {
+            "type": "regime",
+            "applied": mutations_applied,
+        }
+    ]
 
     return new_individual
 
@@ -1256,14 +1526,14 @@ def _mutate_regime_gene(
         Tuple of (mutated_gene, list_of_mutation_descriptions)
     """
     mutations = []
-    available_tfs = in_strategy_cfg.get('regime_timeframes', ['4h', '1d'])
+    available_tfs = in_strategy_cfg.get("regime_timeframes", ["4h", "1d"])
 
     # Ensure regime_gene exists
     if gene.regime_gene is None:
         gene.regime_gene = RegimeGene(
             enabled=False,
             regime_timeframes=list(available_tfs),
-            micro_regime=in_strategy_cfg.get('micro_regime', False),
+            micro_regime=in_strategy_cfg.get("micro_regime", False),
         )
 
     rg = gene.regime_gene
@@ -1279,23 +1549,27 @@ def _mutate_regime_gene(
         delta = random.gauss(0, 0.15)
         if random.random() < 0.5:
             old_val = rg.entry_trend_min
-            rg.entry_trend_min = max(-1.0, min(rg.entry_trend_max - 0.05,
-                                                rg.entry_trend_min + delta))
+            rg.entry_trend_min = max(
+                -1.0, min(rg.entry_trend_max - 0.05, rg.entry_trend_min + delta)
+            )
             mutations.append(f"regime_entry_min_{old_val:.2f}_to_{rg.entry_trend_min:.2f}")
         else:
             old_val = rg.entry_trend_max
-            rg.entry_trend_max = max(rg.entry_trend_min + 0.05,
-                                     min(1.0, rg.entry_trend_max + delta))
+            rg.entry_trend_max = max(
+                rg.entry_trend_min + 0.05, min(1.0, rg.entry_trend_max + delta)
+            )
             mutations.append(f"regime_entry_max_{old_val:.2f}_to_{rg.entry_trend_max:.2f}")
 
     # Toggle exit_on_regime_change
     if random.random() < 0.20:
         rg.exit_on_regime_change = not rg.exit_on_regime_change
-        mutations.append(f"exit_on_regime_change_{not rg.exit_on_regime_change}_to_{rg.exit_on_regime_change}")
+        mutations.append(
+            f"exit_on_regime_change_{not rg.exit_on_regime_change}_to_{rg.exit_on_regime_change}"
+        )
 
     # Mutate regime timeframes
     if random.random() < 0.15:
-        all_tfs = ['30m', '1h', '4h', '1d']
+        all_tfs = ["30m", "1h", "4h", "1d"]
         if len(rg.regime_timeframes) > 1 and random.random() < 0.5:
             # Remove a random TF
             removed = random.choice(rg.regime_timeframes)
@@ -1308,118 +1582,124 @@ def _mutate_regime_gene(
                 added = random.choice(missing)
                 rg.regime_timeframes.append(added)
                 rg.regime_timeframes.sort(
-                    key=lambda x: {'30m': 0, '1h': 1, '4h': 2, '1d': 3}.get(x, 4)
+                    key=lambda x: {"30m": 0, "1h": 1, "4h": 2, "1d": 3}.get(x, 4)
                 )
                 mutations.append(f"regime_tf_add_{added}")
 
     # Toggle micro_regime (fast base-TF regime detection)
     if random.random() < 0.15:
-        old_micro = getattr(rg, 'micro_regime', False)
+        old_micro = getattr(rg, "micro_regime", False)
         rg.micro_regime = not old_micro
         mutations.append(f"micro_regime_{old_micro}_to_{rg.micro_regime}")
 
     # Swap combination method
     if random.random() < 0.15:
         old_comb = rg.combination
-        rg.combination = 'hierarchical' if old_comb == 'weighted_voting' else 'weighted_voting'
+        rg.combination = "hierarchical" if old_comb == "weighted_voting" else "weighted_voting"
         mutations.append(f"regime_combination_{old_comb}_to_{rg.combination}")
 
     return gene, mutations
 
 
-def mutate(individual: Individual, mutation_rate: float,
-          config: Dict[str, Any],
-          methods: list = None) -> Individual:
+def mutate(
+    individual: Individual, mutation_rate: float, config: Dict[str, Any], methods: list = None
+) -> Individual:
     """
     Apply multiple mutation operators.
-    
+
     Args:
         individual: Individual to mutate
         mutation_rate: Base probability of mutation
         config: Configuration with mutation parameters
         methods: List of mutation methods to apply (if None, uses default set)
-        
+
     Returns:
         Mutated individual (original if mutation fails)
     """
     if methods is None:
         # Default: include new advanced mutation operators with lower probability
-        methods = ['parameters', 'indicators', 'conditions', 'structure']
-        
+        methods = ["parameters", "indicators", "conditions", "structure"]
+
         # Add advanced operators based on random selection
         if random.random() < 0.2:  # 20% chance to use Gaussian mutation
-            methods.append('gaussian')
+            methods.append("gaussian")
         if random.random() < 0.1:  # 10% chance to use condition reassignment mutation
-            methods.append('condition_reassign')
+            methods.append("condition_reassign")
         if random.random() < 0.15:  # 15% chance to use adaptive mutation
-            methods.append('adaptive')
+            methods.append("adaptive")
         # Multi-timeframe mutation when enabled
-        multi_tf_config = config.get('multi_timeframe', {})
-        if multi_tf_config.get('enabled', False) and random.random() < 0.2:
-            methods.append('timeframes')
+        multi_tf_config = config.get("multi_timeframe", {})
+        if multi_tf_config.get("enabled", False) and random.random() < 0.2:
+            methods.append("timeframes")
         # Dynamic parameter bounds mutation when enabled
-        dyn_bounds_config = config.get('dynamic_bounds', {})
-        if dyn_bounds_config.get('enabled', False) and random.random() < 0.1:
-            methods.append('dynamic_bounds')
+        dyn_bounds_config = config.get("dynamic_bounds", {})
+        if dyn_bounds_config.get("enabled", False) and random.random() < 0.1:
+            methods.append("dynamic_bounds")
         # Regime specialization mutation when regime-aware enabled (Phase 1B)
-        regime_config = config.get('regime_aware', {})
-        spec_config = regime_config.get('regime_specialization', {})
-        if regime_config.get('enabled', False) and spec_config.get('enabled', True) and random.random() < 0.15:
-            methods.append('regime')
-    
+        regime_config = config.get("regime_aware", {})
+        spec_config = regime_config.get("regime_specialization", {})
+        if (
+            regime_config.get("enabled", False)
+            and spec_config.get("enabled", True)
+            and random.random() < 0.15
+        ):
+            methods.append("regime")
+
     mutated = individual
-    
+
     # Self-adaptive: prefer the gene's own evolved rate when available
-    sa_config = config.get('self_adaptive', {})
+    sa_config = config.get("self_adaptive", {})
     gene = individual.strategy_gene
-    if (sa_config.get('enabled', False)
-            and getattr(gene, 'self_mutation_rate', None) is not None):
+    if sa_config.get("enabled", False) and getattr(gene, "self_mutation_rate", None) is not None:
         effective_rate = gene.self_mutation_rate
     else:
         effective_rate = mutation_rate
-    
+
     for method in methods:
         if random.random() < effective_rate:
             # Snapshot pre-mutation state so we can roll back on failure
             pre_mutation = mutated
             try:
-                if method == 'parameters':
+                if method == "parameters":
                     mutated = mutate_parameters(mutated, effective_rate, config)
-                elif method == 'indicators':
+                elif method == "indicators":
                     mutated = mutate_indicators(mutated, effective_rate, config)
-                elif method == 'conditions':
+                elif method == "conditions":
                     mutated = mutate_conditions(mutated, effective_rate, config)
-                elif method == 'structure':
+                elif method == "structure":
                     mutated = mutate_structure(mutated, effective_rate, config)
-                elif method == 'gaussian':
+                elif method == "gaussian":
                     mutated = mutate_gaussian(mutated, effective_rate, config, sigma=0.1)
-                elif method == 'condition_reassign':
+                elif method == "condition_reassign":
                     mutated = mutate_condition_reassign(mutated, effective_rate, config)
-                elif method == 'adaptive':
+                elif method == "adaptive":
                     mutated = mutate_adaptive_per_gene(mutated, effective_rate, config)
-                elif method == 'timeframes':
+                elif method == "timeframes":
                     mutated = mutate_timeframes(mutated, effective_rate, config)
-                elif method == 'dynamic_bounds':
+                elif method == "dynamic_bounds":
                     mutated = mutate_dynamic_bounds(mutated, effective_rate, config)
-                elif method == 'regime':
+                elif method == "regime":
                     mutated = mutate_regime(mutated, effective_rate, config)
             except (ValueError, KeyError, AttributeError, TypeError) as e:
                 # Roll back to pre-mutation state to prevent partial corruption
                 mutated = pre_mutation
-                logger.warning(f"Mutation method '{method}' failed: {e}. Rolling back to pre-'{method}' state.")
-    
+                logger.warning(
+                    f"Mutation method '{method}' failed: {e}. Rolling back to pre-'{method}' state."
+                )
+
     # Self-adaptive meta-mutation: evolve the individual's own mutation rate
-    sa_config = config.get('self_adaptive', {})
-    if sa_config.get('enabled', False):
+    sa_config = config.get("self_adaptive", {})
+    if sa_config.get("enabled", False):
         gene = mutated.strategy_gene
-        rate_range = sa_config.get('mutation_rate_range', [0.05, 0.50])
+        rate_range = sa_config.get("mutation_rate_range", [0.05, 0.50])
         if gene.self_mutation_rate is None:
             gene.self_mutation_rate = mutation_rate  # Initialize from global
         # Gaussian perturbation (τ ≈ 1/√n, classic Schwefel rule)
         import math
+
         n_genes = len(gene.indicators) + len(gene.entry_conditions) + len(gene.exit_conditions)
         tau = 1.0 / math.sqrt(max(1, 2 * n_genes))
         gene.self_mutation_rate *= math.exp(tau * random.gauss(0, 1))
         gene.self_mutation_rate = max(rate_range[0], min(rate_range[1], gene.self_mutation_rate))
-    
+
     return mutated

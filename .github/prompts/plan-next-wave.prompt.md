@@ -1,74 +1,31 @@
 ---
-description: "Plan and launch the next wave of GA experiments. Use when: starting a new evolution wave, queuing experiments, or managing the automated pipeline. Covers config generation → queue → launch → monitoring."
+description: "Plan the next hash-bound GA V2 wave from verified parent evidence."
 mode: "agent"
-tools: ["read_file", "create_file", "grep_search", "file_search", "run_in_terminal", "runSubagent"]
+tools: ["read_file", "create_file", "grep_search", "file_search", "run_in_terminal"]
 ---
 
-# Plan Next GA Wave
+# Plan the Next GA V2 Wave
 
-Orchestrate the next batch of automated evolution experiments.
+1. Load a reconciled parent `WaveResultSnapshotV2` and its single matching immutable
+   `WaveAnalysisV2` decision. Do not rank logs, mutable registries or raw HOF metrics.
+2. Select only eligible candidates from one comparable replay panel using the non-dominated
+   Return-LCB/Expectancy-LCB/DD-UCB/ES-UCB contract.
+3. Create an unchanged control plus paired treatment arms. Change one factor per arm unless a
+   factorial design is explicitly declared.
+4. Treat population, generations, mutation, pair count and optional features as hypotheses, not
+   fixed “proven” ranges.
+5. Generate `ChildWavePlanV2`, materialize all configs/manifests/candidates/worker specs, bind the
+   approval to plan and materialization hashes, then queue atomically.
+6. Execute only through the SQLite V2 scheduler and collect the complete declared Attempt set.
 
-## Workflow
+Before approval, require:
 
-### 1. Review Current State
+- canonical schema validation;
+- identical comparison panels, paired seeds and declared budgets;
+- no reused Final-Test cell;
+- content-addressed code, data, config and candidate inputs;
+- no unsupported worker kind or `safe_v2` feature;
+- a complete immutable materialization receipt.
 
-```bash
-# Check what's running
-./ga_current.sh
-
-# Check queue status
-ls genetic_algorithm/config/queue/
-
-# Check completed experiments
-ls genetic_algorithm/config/done/ | tail -20
-
-# Disk space
-du -sh genetic_algorithm/data/ genetic_algorithm/cache/
-```
-
-### 2. Analyze Previous Wave
-
-- Read latest results from `genetic_algorithm/data/` and `CONFIG_RANKING.md`
-- Identify what worked (high fitness, passed walk-forward) and what failed
-- Check SIS corpus freshness: `ls -la genetic_algorithm/data/strategy_corpus.parquet`
-
-### 3. Generate Configs
-
-Create 3-6 experiment configs targeting different strategies:
-- 1-2 configs exploiting best-performing parameter regions
-- 1-2 configs exploring novel indicator/timeframe combinations
-- 1 SIS-enabled config leveraging intelligence feedback
-- (Optional) 1 A/B comparison config
-
-Place all configs in `genetic_algorithm/config/queue/`
-
-### 4. Validate & Launch
-
-```bash
-# Validate all queued configs
-for f in genetic_algorithm/config/queue/*.yaml; do
-  python -c "import yaml; yaml.safe_load(open('$f'))" && echo "OK: $f" || echo "FAIL: $f"
-done
-
-# Launch queue daemon (if not already running)
-./ga_auto_queue_v2.sh --wave <wave_name> --max 4 --persistent &
-
-# Or launch specific experiments
-python genetic_algorithm/run_ga.py --config genetic_algorithm/config/queue/<name>.yaml
-```
-
-### 5. Monitor
-
-```bash
-./ga_current.sh              # Live progress
-./ga_monitor_v2.sh --live    # Detailed monitoring
-```
-
-## Naming Convention
-
-`wave<N>_<variant>_<description>.yaml`
-
-Examples:
-- `wave35_sis_momentum.yaml` — SIS-enabled momentum strategy evolution
-- `wave35_island_regime.yaml` — Island model with regime detection
-- `wave35_baseline_control.yaml` — Control experiment for comparison
+Legacy `config/queue` files, `ga_auto_queue_v2.sh`, direct `run_ga.py` launches and log-derived
+rankings are not the canonical next-wave path.

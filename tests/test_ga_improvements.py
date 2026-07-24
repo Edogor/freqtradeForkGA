@@ -778,9 +778,16 @@ class TestCheckpointing:
             assert ga2.mutation_rate == 0.25
             assert len(ga2.generation_stats) == 1
 
-            # Verify individual data round-tripped
-            restored_ind = max(restored_pop.individuals, key=lambda x: x.fitness or 0)
-            assert abs(restored_ind.fitness - 0.8) < 1e-6
+            # Genome/state round-trips, but stale fitness is deliberately not
+            # reusable without the original panel/config/code/data evidence.
+            assert all(ind.fitness is None for ind in restored_pop.individuals)
+            assert all(
+                ind.fitness_evidence == "UNMEASURED"
+                for ind in restored_pop.individuals
+            )
+            restored_ind = next(
+                ind for ind in restored_pop.individuals if ind.id == ind2.id
+            )
             assert restored_ind.id == ind2.id
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
