@@ -320,6 +320,47 @@ def test_terminal_artifact_roundtrip_is_atomic_hashed_and_tamper_evident(tmp_pat
         store.read_verified_result()
 
 
+def test_raw_trade_datetime_roundtrips_through_canonical_artifacts(tmp_path: Path):
+    """Engine-native timestamps must not look like artifact corruption."""
+    root = tmp_path / "attempt-runtime-types"
+    config = {"config_schema_version": 2, "evaluation_v2": {"enabled": True}}
+    manifest = _manifest(root, config).model_copy(
+        update={
+            "attempt_id": "attempt-runtime-types",
+            "artifact_root": str(root),
+            "resolved_config_path": str(root / "resolved_config.yaml"),
+        }
+    )
+    payload = _record_for_manifest(
+        manifest, "inner-btc", "INNER_VALIDATION"
+    ).model_dump(mode="python")
+    payload["trades"][0]["open_date"] = datetime(
+        2026, 7, 1, 12, 0, tzinfo=timezone.utc
+    )
+    payload["trades"][0]["orders"] = ({"side": "buy"},)
+    record = BacktestRecordV2.model_validate(payload)
+    recorder = ShadowAttemptRecorderV2(manifest, config, _policy())
+
+    recorder.add_backtest(record)
+    recorder.add_backtest(
+        _record_for_manifest(manifest, "final-btc", "FINAL_TEST")
+    )
+    result = recorder.finalize(
+        finished_at=datetime(2026, 7, 21, 12, 2, tzinfo=timezone.utc)
+    )
+
+    assert result.status.value == "SUCCEEDED"
+    persisted = V2ArtifactStore(root).read_verified_result()
+    inner = next(
+        scenario
+        for scenario in persisted.candidate_evaluations[0].scenarios
+        if scenario.metrics.scenario_id == "inner-btc"
+    )
+    trade = inner.trades[0]
+    assert trade["open_date"] == "2026-07-01T12:00:00Z"
+    assert trade["orders"] == [{"side": "buy"}]
+
+
 def test_artifacts_are_immutable_and_partial_attempt_has_no_terminal_result(tmp_path: Path):
     root = tmp_path / "attempt-001"
     config = {"config_schema_version": 2}

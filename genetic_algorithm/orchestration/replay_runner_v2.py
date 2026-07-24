@@ -5,9 +5,10 @@ from __future__ import annotations
 import ast
 import copy
 from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
+from freqtrade.exchange import timeframe_to_seconds
 from pydantic import Field, model_validator
 
 from genetic_algorithm.evaluation.direct_backtester import BacktestResult, DirectBacktester
@@ -25,6 +26,7 @@ from genetic_algorithm.orchestration.data_manifest_v2 import (
 )
 from genetic_algorithm.orchestration.final_test_ledger_v2 import FinalTestUsageLedgerV2
 from genetic_algorithm.orchestration.promotion_policy_v2 import (
+    ScenarioRequirementV2,
     ShadowGatePolicyV2,
     shadow_gate_policy_from_config,
 )
@@ -47,6 +49,31 @@ from genetic_algorithm.orchestration.split_contract_v2 import (
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _scenario_timerange(requirement: ScenarioRequirementV2) -> str:
+    """Return a Freqtrade range covering exactly the declared candle cells.
+
+    Freqtrade treats its stop timestamp as inclusive. A date-only stop at the
+    next midnight therefore includes one candle outside our closed scenario
+    period. Use the timestamp of the final expected candle instead; this
+    matches the data-manifest coverage contract.
+    """
+
+    start = datetime.combine(requirement.period_start, time.min, tzinfo=UTC)
+    exclusive_end = datetime.combine(
+        requirement.period_end + timedelta(days=1),
+        time.min,
+        tzinfo=UTC,
+    )
+    last_candle_open = exclusive_end - timedelta(
+        seconds=timeframe_to_seconds(requirement.timeframe)
+    )
+    if last_candle_open < start:
+        raise ArtifactIntegrityError(
+            f"scenario {requirement.scenario_id} has no complete timeframe candle"
+        )
+    return f"{int(start.timestamp())}-{int(last_candle_open.timestamp())}"
 
 
 class FrozenCandidateV2(StrictV2Model):
@@ -328,10 +355,7 @@ class ShadowReplayRunnerV2:
                                 requirement.cost_multiplier
                             )
                             backtesters[requirement.cost_multiplier] = backtester
-                        # Freqtrade timerange ends are exclusive; add one day so
-                        # the declared inclusive period_end is fully evaluated.
-                        exclusive_end = requirement.period_end + timedelta(days=1)
-                        timerange = f"{requirement.period_start:%Y%m%d}-{exclusive_end:%Y%m%d}"
+                        timerange = _scenario_timerange(requirement)
                         try:
                             result = backtester.backtest_strategy(
                                 candidate.strategy_code,

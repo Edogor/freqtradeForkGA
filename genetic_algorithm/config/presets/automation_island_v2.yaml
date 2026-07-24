@@ -107,6 +107,14 @@ pair_validation:
   # top-N validation is intentionally forbidden in the unattended profile.
   validate_top_n_only: 0
 
+# Keep the cheap search objective directionally aligned with the strict replay
+# panel. Sixty trades per pair corresponds to the promotion floor of twelve
+# active months × five trades per active month. This remains a smooth penalty,
+# not a hard cliff, so sparse initial populations can evolve toward coverage.
+fitness_penalties:
+  target_trades_per_pair: 60
+  pair_trade_penalty_floor: 0.01
+
 promotion_v2:
   enabled: true
   policy_version: automation-island-v2.0-shadow

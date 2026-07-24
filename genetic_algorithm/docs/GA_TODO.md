@@ -3,6 +3,41 @@
 Stand: 24.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
 
+Fünfundzwanzigster Slice (24.07.2026): Der erste echte
+`automation_island_v2`-Produktionsversuch durchlief alle zwölf Generationen,
+vier Islands, Migration, HOF-Export und zwanzig Pair-Replays ohne
+Backtest-Enginefehler. Er deckte dabei vier reale Integrations-/Zielfehler auf:
+
+- Der immutable Artifact-Readback verglich Engine-native
+  `pandas.Timestamp`-Werte mit ihren kanonischen JSON-Strings als
+  Python-Objekte und meldete dadurch fälschlich Manipulation. Recorder und
+  Store vergleichen und halten nun die kanonische Persistenzform.
+- Der Replay-Runner behandelte Freqtrades Stopzeit fälschlich als exklusiv.
+  Dadurch wurde eine zusätzliche Candle beziehungsweise ein zusätzlicher
+  Null-Rendite-Tag gemessen und jede Scenario-Coverage invalidiert. Der Runner
+  verwendet jetzt exakt den letzten erwarteten Candle-Open aus Timeframe und
+  geschlossenem Szenariozeitraum.
+- Elite-Copies behielten alte generation-lokale IDs und kollidierten mit
+  Immigrants/Offspring. Jede neue Generation erhält nun eindeutige Slot-IDs.
+- Shared Memory lud fest `5m`, obwohl der freigegebene Pfad `1h` verwendet.
+  Es lädt nun genau einen konfigurierten Timeframe; Multi-Timeframe fällt
+  bewusst auf die korrekte Disk-Ladung zurück.
+
+Der korrigierte Replay der fünf Finalisten zeigte außerdem eine wichtige
+Zielabweichung: Aggregierte Train-/Validation-Tradezahlen verdeckten Pairs mit
+null oder nur einzelnen Trades. Solche Kandidaten bleiben im strikten
+V2-Panel korrekt `INCONCLUSIVE`, wurden von der Legacy-Suchfitness aber zu hoch
+gerankt. `BacktestResult` persistiert deshalb jetzt Tradezahlen für jedes
+deklarierte Pair einschließlich Null-Pairs. Das Automation-Preset bestraft
+kontinuierlich den schlechtesten Pair in Richtung 60 Trades, entsprechend
+zwölf aktiven Monaten mal fünf Trades. Dies erhält einen Evolutionsgradienten,
+ohne den strikten Replay-Gate vorzutäuschen. Ein real beobachteter
+Floating-Point-Überlauf der Pair-HHI über 1.0 wird an der mathematischen
+Domänengrenze stabilisiert. Cache-Schema 8 trennt die neue Messsemantik von
+alten Einträgen. 1.661 bereinigte GA-Tests laufen grün; der nächste Schritt ist
+ein frischer Root-Versuch auf dem neuen Commit und anschließend der Nachweis
+einer semantisch geplanten Folge-Wave.
+
 Vierundzwanzigster Slice (24.07.2026): `GENERIC_ISLAND_EVOLUTION` ist jetzt ein kanonischer
 immutable V2-Worker. Der äußere Vertrag erzwingt `automation_island_v2`, Shadow-only, mindestens
 zwei explizite Islands, einen gemeinsamen Workerpool und vollständige Pair-Validation jedes

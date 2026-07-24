@@ -43,6 +43,7 @@ def _complete_backtest_result():
         ],
         ohlcv_data={"must": "not be cached"},
         per_pair_profit={"BTC/USDT": 3.0, "ETH/USDT": -0.5},
+        per_pair_trades={"BTC/USDT": 2, "ETH/USDT": 1},
         monthly_profits=[1.0, -0.2, 2.4],
         monthly_periods=["2025-01", "2025-02", "2025-03"],
         starting_balance=100.0,
@@ -76,6 +77,7 @@ class TestBacktestCacheV2:
         assert "ohlcv_data" not in payload
         assert payload["trades"] == result.trades
         assert payload["per_pair_profit"] == result.per_pair_profit
+        assert payload["per_pair_trades"] == result.per_pair_trades
         assert payload["monthly_profits"] == result.monthly_profits
         assert payload["monthly_periods"] == result.monthly_periods
         assert payload["daily_net_returns"] == result.daily_net_returns
@@ -178,6 +180,38 @@ class TestFitnessMetricContractV2:
         assert metrics["avg_profit"] == 0.004
         assert metrics["avg_duration"] == "0 days 04:00:00"
         assert metrics["trades"] == _complete_backtest_result().trades
+        assert metrics["per_pair_trades"] == {"BTC/USDT": 2, "ETH/USDT": 1}
+        assert metrics["worst_pair_trades"] == 1
+        assert metrics["active_pair_ratio"] == 1.0
+
+    def test_pair_trade_coverage_penalizes_the_worst_pair_smoothly(self):
+        evaluator = self._penalty_evaluator(
+            target_trades_per_pair=60,
+            pair_trade_penalty_floor=0.01,
+        )
+        base = {
+            "num_trades": 120,
+            "max_drawdown": 0.0,
+            "win_rate": 0.5,
+        }
+
+        baseline = evaluator._apply_penalties(1.0, base)
+        balanced = evaluator._apply_penalties(
+            1.0,
+            {**base, "per_pair_trades": {"BTC/USDT": 60, "SOL/USDT": 60}},
+        )
+        sparse = evaluator._apply_penalties(
+            1.0,
+            {**base, "per_pair_trades": {"BTC/USDT": 119, "SOL/USDT": 1}},
+        )
+        absent = evaluator._apply_penalties(
+            1.0,
+            {**base, "per_pair_trades": {"BTC/USDT": 120, "SOL/USDT": 0}},
+        )
+
+        assert balanced == pytest.approx(baseline)
+        assert sparse == pytest.approx(baseline * 0.0265)
+        assert absent == pytest.approx(baseline * 0.01)
 
     def test_mapper_does_not_invent_missing_tail_risk(self):
         from genetic_algorithm.evaluation.direct_backtester import BacktestResult

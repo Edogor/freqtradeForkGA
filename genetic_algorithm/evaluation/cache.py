@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CACHE_SCHEMA_VERSION = 7
+CACHE_SCHEMA_VERSION = 8
 _CACHE_SCHEMA_KEY = "_cache_schema_version"
 
 

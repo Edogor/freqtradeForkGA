@@ -134,6 +134,7 @@ class BacktestResult:
 
     # Per-pair performance breakdown
     per_pair_profit: Optional[Dict[str, float]] = None  # pair -> profit percentage
+    per_pair_trades: Optional[Dict[str, int]] = None  # pair -> completed trade count
 
     # Monthly return breakdown for stability analysis
     monthly_profits: Optional[list] = None  # List of monthly profit percentages
@@ -201,6 +202,7 @@ class BacktestResult:
             "no_trades": self.no_trades,
             "trades": self.trades,
             "per_pair_profit": self.per_pair_profit,
+            "per_pair_trades": self.per_pair_trades,
             "monthly_profits": self.monthly_profits,
             "monthly_periods": self.monthly_periods,
             "starting_balance": self.starting_balance,
@@ -1006,12 +1008,17 @@ class DirectBacktester:
 
                     if not strategy_results:
                         logger.warning(f"Empty strategy results for {strategy_name}")
+                        expected_pairs = config_dict.get("exchange", {}).get(
+                            "pair_whitelist", []
+                        )
                         return BacktestResult(
                             success=True,
                             strategy_name=strategy_name,
                             total_trades=0,
                             no_trades=True,
                             error_message="No trades generated - check strategy conditions",
+                            per_pair_profit={pair: 0.0 for pair in expected_pairs},
+                            per_pair_trades={pair: 0 for pair in expected_pairs},
                         )
 
                     result = self._parse_stats(strategy_results, strategy_name)
@@ -1074,12 +1081,17 @@ class DirectBacktester:
                     # Extract per-pair performance breakdown
                     try:
                         trades_df = strategy_results.get("trades", None)
+                        expected_pairs = list(
+                            strategy_results.get("pairlist")
+                            or config_dict.get("exchange", {}).get("pair_whitelist", [])
+                        )
+                        per_pair = {pair: 0.0 for pair in expected_pairs}
+                        per_pair_trades = {pair: 0 for pair in expected_pairs}
                         if (
                             trades_df is not None
                             and hasattr(trades_df, "groupby")
                             and len(trades_df) > 0
                         ):
-                            per_pair = {}
                             for pair, group in trades_df.groupby("pair"):
                                 # Total return per pair over the full backtest period (sum of per-trade profit ratios)
                                 pair_profit = (
@@ -1088,10 +1100,16 @@ class DirectBacktester:
                                     else 0.0
                                 )
                                 per_pair[pair] = pair_profit
-                            result.per_pair_profit = per_pair
-                            logger.debug(f"Per-pair profits: {per_pair}")
+                                per_pair_trades[pair] = len(group)
+                        result.per_pair_profit = per_pair
+                        result.per_pair_trades = per_pair_trades
+                        logger.debug(
+                            "Per-pair profits/trades: %s / %s",
+                            per_pair,
+                            per_pair_trades,
+                        )
                     except Exception as e:
-                        logger.debug(f"Could not extract per-pair profits: {e}")
+                        logger.debug(f"Could not extract per-pair metrics: {e}")
 
                     # Extract tail-risk metrics from trade data
                     try:

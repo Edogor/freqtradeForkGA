@@ -1125,6 +1125,13 @@ class FitnessEvaluator:
             if len(pair_profits) > 1:
                 mean_pp = sum(pair_profits) / len(pair_profits)
                 metrics['pair_profit_std'] = (sum((p - mean_pp) ** 2 for p in pair_profits) / len(pair_profits)) ** 0.5
+        if result.per_pair_trades:
+            metrics['per_pair_trades'] = result.per_pair_trades
+            metrics['worst_pair_trades'] = min(result.per_pair_trades.values())
+            metrics['active_pair_ratio'] = (
+                sum(count > 0 for count in result.per_pair_trades.values())
+                / len(result.per_pair_trades)
+            )
         
         # Include tail-risk metrics. Missing values stay absent instead of
         # becoming a perfect zero-risk observation.
@@ -1513,6 +1520,27 @@ class FitnessEvaluator:
                 # Floor at 5% to avoid near-zero for strategies with very few trades
                 trade_penalty = max(0.05, trade_penalty)
                 fitness *= trade_penalty
+
+        # Search-time pair coverage must point in the same direction as the
+        # strict V2 replay panel. Aggregate counts can otherwise hide a
+        # strategy that produces dozens of trades on one pair and zero on
+        # another. Use the worst declared pair and a continuous ramp so early
+        # generations retain a useful gradient.
+        per_pair_target = penalties.get('target_trades_per_pair', 0)
+        per_pair_trades = metrics.get('per_pair_trades')
+        if per_pair_target > 0 and per_pair_trades:
+            worst_pair_trades = min(per_pair_trades.values())
+            coverage_floor = penalties.get('pair_trade_penalty_floor', 0.01)
+            coverage_floor = max(0.0, min(float(coverage_floor), 1.0))
+            coverage_ratio = max(
+                0.0,
+                min(1.0, float(worst_pair_trades) / float(per_pair_target)),
+            )
+            pair_trade_multiplier = coverage_floor + (
+                1.0 - coverage_floor
+            ) * coverage_ratio
+            fitness *= pair_trade_multiplier
+            metrics['pair_trade_coverage_multiplier'] = pair_trade_multiplier
         
         # Hard penalty for minimum trades per month
         # Unlike the S-curve above, this enforces a strict floor on trade frequency.

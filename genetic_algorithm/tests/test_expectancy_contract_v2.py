@@ -136,6 +136,29 @@ def test_temporal_clusters_keep_contemporaneous_pairs_together():
     )
 
 
+def test_single_pair_concentration_stays_inside_contract_bounds():
+    trades = [
+        _trade(
+            index,
+            committed_before_fee=123.4567,
+            net_return=0.01 if index % 3 else -0.005,
+        )
+        for index in range(73)
+    ]
+
+    result = clustered_trade_expectancy_lcb(
+        trades,
+        samples=200,
+        block_length_clusters=5,
+    )
+
+    assert result.pair_count == 1
+    assert result.pair_capital_hhi == 1.0
+    assert result.effective_pair_count == pytest.approx(1.0)
+    assert 0.0 < result.max_trade_capital_share <= 1.0
+    assert 0.0 < result.max_cluster_capital_share <= 1.0
+
+
 def test_losses_below_committed_margin_are_finite_economic_observations():
     trades = [
         _trade(

@@ -311,7 +311,17 @@ def clustered_trade_expectancy_lcb(  # noqa: C901
     for item in observations:
         pair_capital[item.pair] += item.committed_capital
     pair_n_eff = _kish_effective_sample_size(tuple(pair_capital.values()))
-    pair_hhi = sum((capital / total_capital) ** 2 for capital in pair_capital.values())
+    # Floating-point accumulation can put the mathematically bounded
+    # single-pair HHI a few ulps above 1.0 (observed as
+    # 1.0000000000000004 in a real replay). Persist the exact domain bound.
+    pair_hhi = (
+        1.0
+        if len(pair_capital) == 1
+        else min(
+            1.0,
+            sum((capital / total_capital) ** 2 for capital in pair_capital.values()),
+        )
+    )
 
     block = min(block_length_clusters, len(cluster_records))
     max_start = len(cluster_records) - block
@@ -361,8 +371,8 @@ def clustered_trade_expectancy_lcb(  # noqa: C901
         temporal_effective_sample_size=temporal_n_eff,
         effective_pair_count=pair_n_eff,
         pair_capital_hhi=pair_hhi,
-        max_trade_capital_share=max(trade_capitals) / total_capital,
-        max_cluster_capital_share=max(cluster_capitals) / total_capital,
+        max_trade_capital_share=min(1.0, max(trade_capitals) / total_capital),
+        max_cluster_capital_share=min(1.0, max(cluster_capitals) / total_capital),
     )
 
 

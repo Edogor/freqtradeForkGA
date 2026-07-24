@@ -91,8 +91,13 @@ class ShadowAttemptRecorderV2:
             raise ArtifactIntegrityError(
                 "candidate scenario was recorded twice with different content"
             )
-        self.store.write_backtest(record)
-        by_scenario[record.metrics.scenario_id] = record
+        scenario_path = self.store.write_backtest(record)
+        # Keep in-memory state in the exact JSON-normalized form persisted by
+        # the immutable artifact. Raw trade dictionaries may contain values
+        # such as pandas.Timestamp which serialize canonically to strings.
+        by_scenario[record.metrics.scenario_id] = BacktestRecordV2.model_validate_json(
+            scenario_path.read_bytes()
+        )
 
     def finalize(self, *, finished_at: datetime) -> AttemptResultV2:
         if self._finalized:

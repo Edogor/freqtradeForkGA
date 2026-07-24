@@ -55,6 +55,57 @@ class TestSharedMemoryThreadSafety:
         assert hasattr(shm_mod, '_shared_blocks'), "Missing _shared_blocks list"
         assert hasattr(shm_mod, '_worker_shm_blocks'), "Missing _worker_shm_blocks list"
 
+    def test_loads_the_single_configured_timeframe(self):
+        from genetic_algorithm.market.shared_memory import SharedDataManager
+
+        manager = SharedDataManager()
+        frame = MagicMock()
+        frame.__len__.return_value = 1
+        config = {
+            'backtesting': {
+                'pairs': ['BTC/USDT'],
+                'timerange': '20260101-20260201',
+            },
+            'strategy_constraints': {'timeframes': ['1h']},
+        }
+        with (
+            patch.object(
+                manager,
+                '_load_ohlcv_data',
+                return_value={'BTC/USDT': frame},
+            ) as load,
+            patch.object(
+                manager,
+                '_dataframe_to_shared_memory',
+                return_value=('shm-test', {'nbytes': 48}),
+            ),
+        ):
+            loaded = manager.load_and_share(config)
+
+        assert loaded == {'BTC/USDT': frame}
+        load.assert_called_once_with(
+            config,
+            ['BTC/USDT'],
+            '20260101-20260201',
+            '1h',
+        )
+        assert manager.get_metadata()['timeframe'] == '1h'
+
+    def test_multiple_timeframes_disable_shared_cache(self):
+        from genetic_algorithm.market.shared_memory import SharedDataManager
+
+        manager = SharedDataManager()
+        with patch.object(manager, '_load_ohlcv_data') as load:
+            result = manager.load_and_share(
+                {
+                    'backtesting': {'pairs': ['BTC/USDT']},
+                    'strategy_constraints': {'timeframes': ['15m', '1h']},
+                }
+            )
+
+        assert result == {}
+        load.assert_not_called()
+
 
 # ============================================================================
 # Cache Checksum Tests

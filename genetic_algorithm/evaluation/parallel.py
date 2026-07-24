@@ -168,12 +168,17 @@ def _init_worker(config: Dict[str, Any]):
                 tr_obj = TimeRange.parse_timerange(tr_str)
                 all_pairs = tuple(sorted(shared_dfs.keys()))
 
-                # Determine all timeframes the GA may produce so we pre-populate
-                # cache entries for each.  Falls back to ['5m'] if not configured.
+                # SharedDataManager only enables this path for one exact
+                # timeframe. Reusing one OHLCV frame under other timeframe
+                # cache keys would silently evaluate the wrong candles.
                 sc = worker_config.get('strategy_constraints', {})
-                timeframes = sc.get('timeframes', ['5m'])
-                if not timeframes:
-                    timeframes = ['5m']
+                configured_timeframes = list(sc.get('timeframes', ['5m']))
+                shared_timeframe = shared_meta.get('timeframe')
+                if shared_timeframe not in configured_timeframes:
+                    raise ValueError(
+                        "shared OHLCV timeframe differs from strategy constraints"
+                    )
+                timeframes = [shared_timeframe]
 
                 # Build all cache key variants that _run_backtest_direct will
                 # look up.  Key structure:

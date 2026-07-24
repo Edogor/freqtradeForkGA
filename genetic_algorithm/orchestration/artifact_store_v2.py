@@ -51,6 +51,20 @@ def _canonical_model_bytes(model: BaseModel) -> bytes:
     ).encode("utf-8")
 
 
+def _models_have_same_canonical_payload(left: BaseModel, right: BaseModel) -> bool:
+    """Compare persisted contract content instead of Python runtime types.
+
+    ``BacktestRecordV2.trades`` intentionally preserves the engine's raw JSON
+    payload. Values typed as ``Any`` can therefore contain JSON-compatible
+    Python subclasses such as ``pandas.Timestamp`` before persistence and
+    plain strings after readback. Artifact integrity is defined by the
+    immutable canonical bytes, so comparisons at that boundary must use the
+    same representation.
+    """
+
+    return _canonical_model_bytes(left) == _canonical_model_bytes(right)
+
+
 def _normalize_config_value(value: Any) -> Any:
     if isinstance(value, Enum):
         return _normalize_config_value(value.value)
@@ -285,7 +299,7 @@ class V2ArtifactStore:
                     f"candidate references missing scenario artifact: {scenario}"
                 )
             persisted = BacktestRecordV2.model_validate_json(scenario_path.read_bytes())
-            if persisted != record:
+            if not _models_have_same_canonical_payload(persisted, record):
                 raise ArtifactIntegrityError(
                     f"candidate scenario differs from artifact: {scenario}"
                 )
@@ -469,7 +483,7 @@ class V2ArtifactStore:
             persisted_candidate = CandidateEvaluationV2.model_validate_json(
                 candidate_path.read_bytes()
             )
-            if persisted_candidate != candidate:
+            if not _models_have_same_canonical_payload(persisted_candidate, candidate):
                 raise ArtifactIntegrityError(
                     f"terminal result candidate differs from artifact: {candidate_id}"
                 )
@@ -484,7 +498,7 @@ class V2ArtifactStore:
                         f"candidate references missing scenario artifact: {scenario}"
                     )
                 persisted_record = BacktestRecordV2.model_validate_json(scenario_path.read_bytes())
-                if persisted_record != record:
+                if not _models_have_same_canonical_payload(persisted_record, record):
                     raise ArtifactIntegrityError(
                         f"candidate scenario differs from artifact: {scenario}"
                     )

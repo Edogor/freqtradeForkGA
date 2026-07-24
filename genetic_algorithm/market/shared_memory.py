@@ -153,19 +153,31 @@ class SharedDataManager:
         bt_config = config.get('backtesting', {})
         pairs = bt_config.get('pairs', [])
         timerange_str = bt_config.get('timerange', '')
-        # Strategy timeframes vary per individual, but the data directory
-        # is the same. We always load 5m data since it's the base; higher
-        # timeframes are resampled by FreqTrade at runtime.
+        configured_timeframes = list(
+            config.get('strategy_constraints', {}).get('timeframes', ['5m'])
+        )
+        timeframes = list(dict.fromkeys(str(item) for item in configured_timeframes if item))
 
         if not pairs:
             logger.warning("[SHARED] No pairs configured, cannot load shared data")
             return {}
+        if len(timeframes) != 1:
+            logger.warning(
+                "[SHARED] Shared memory requires exactly one strategy timeframe; "
+                "configured=%s. Workers will load exact timeframe data from disk.",
+                timeframes,
+            )
+            return {}
+        timeframe = timeframes[0]
 
-        logger.info(f"[SHARED] Loading OHLCV data for {len(pairs)} pairs, timerange={timerange_str}")
+        logger.info(
+            f"[SHARED] Loading {timeframe} OHLCV data for {len(pairs)} pairs, "
+            f"timerange={timerange_str}"
+        )
         start = time.time()
 
         # Use FreqTrade's data loading to get the same data workers would load
-        data = self._load_ohlcv_data(config, pairs, timerange_str)
+        data = self._load_ohlcv_data(config, pairs, timerange_str, timeframe)
 
         if not data:
             logger.warning("[SHARED] No data loaded — shared memory disabled")
@@ -181,6 +193,7 @@ class SharedDataManager:
         self._metadata = {
             'pairs': pair_metadata,
             'timerange': timerange_str,
+            'timeframe': timeframe,
             'loaded_at': time.time(),
         }
         self._loaded = True
@@ -219,6 +232,7 @@ class SharedDataManager:
         config: Dict[str, Any],
         pairs: List[str],
         timerange_str: str,
+        timeframe: str,
     ) -> Dict[str, pd.DataFrame]:
         """
         Load OHLCV data using FreqTrade's data loading utilities.
@@ -244,7 +258,7 @@ class SharedDataManager:
                 try:
                     df = load_pair_history(
                         pair=pair,
-                        timeframe='5m',  # Load base resolution; higher TFs resampled at runtime
+                        timeframe=timeframe,
                         datadir=data_dir,
                         timerange=timerange,
                         data_format=dataformat,

@@ -118,6 +118,20 @@ class TestGenerationStepExecute:
         next_gen, _ = step.execute(pop, current_generation=0, mutation_rate=0.1)
         assert next_gen.generation == 1
 
+    def test_generation_local_individual_ids_are_unique(self):
+        """Elite carry-over must not collide with new candidate artifacts."""
+        step = _make_step(elite_size=2, random_immigrants=2, population_size=10)
+        pop = _make_population(size=10, gen=0)
+
+        next_gen, _ = step.execute(pop, current_generation=0, mutation_rate=0.1)
+
+        identities = [
+            (ind.strategy_gene.generation, ind.strategy_gene.individual_id)
+            for ind in next_gen.individuals
+        ]
+        assert len(identities) == len(set(identities))
+        assert sorted(item[1] for item in identities) == list(range(10))
+
     def test_returns_op_stats_dict(self):
         step = _make_step()
         pop = _make_population(size=10, gen=0)

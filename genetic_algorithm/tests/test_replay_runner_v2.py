@@ -302,7 +302,11 @@ def test_replay_executes_exact_panel_costs_and_commits_verified_result(tmp_path:
     assert result.status.value == "SUCCEEDED"
     assert result.candidate_evaluations[0].status.value == "VALID"
     assert len(calls) == 2
-    assert {call["timerange_override"] for call in calls} == {"20250101-20250701"}
+    # Freqtrade's stop is inclusive. The final 1h candle of the declared
+    # closed period is 2025-06-30 23:00 UTC.
+    assert {call["timerange_override"] for call in calls} == {
+        "1735689600-1751324400"
+    }
     assert {tuple(call["pairs_override"]) for call in calls} == {
         ("BTC/USDT",),
         ("ETH/USDT",),

@@ -227,6 +227,10 @@ class GenerationStep:
         for individual in elites:
             gene_copy = individual.strategy_gene.copy()
             gene_copy.generation = next_gen_num
+            # Identity is generation-local. Retaining the parent's previous
+            # slot collides with immigrants/offspring and can overwrite a
+            # different generated strategy artifact.
+            gene_copy.individual_id = len(next_gen)
             # Preserve self-adaptive mutation rate through elite carry-over
             if getattr(individual.strategy_gene, "self_mutation_rate", None) is not None:
                 gene_copy.self_mutation_rate = individual.strategy_gene.self_mutation_rate

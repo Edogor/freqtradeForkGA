@@ -128,6 +128,8 @@ DEFAULTS: Dict[str, Any] = {
         "complexity_weight": 0.015,
         "unused_indicator_weight": 0.02,
         "pair_loss_threshold": -8.0,
+        "target_trades_per_pair": 0,
+        "pair_trade_penalty_floor": 0.01,
     },
     # === Indicators ===
     "indicators": {
