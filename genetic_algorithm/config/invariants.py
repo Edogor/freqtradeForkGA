@@ -275,13 +275,22 @@ def _validate_backtesting(
     else:
         try:
             start_raw, end_raw = timerange.split("-", maxsplit=1)
-            start = datetime.strptime(start_raw, "%Y%m%d")
-            end = datetime.strptime(end_raw, "%Y%m%d")
+            if (
+                start_raw.isdigit()
+                and end_raw.isdigit()
+                and len(start_raw) in {9, 10}
+                and len(end_raw) in {9, 10}
+            ):
+                start = int(start_raw)
+                end = int(end_raw)
+            else:
+                start = datetime.strptime(start_raw, "%Y%m%d")
+                end = datetime.strptime(end_raw, "%Y%m%d")
             if end <= start:
                 errors.append("backtesting.timerange end must be after start")
         except ValueError:
             errors.append(
-                "backtesting.timerange must use YYYYMMDD-YYYYMMDD with valid dates"
+                "backtesting.timerange must use valid YYYYMMDD dates or epoch seconds"
             )
 
     for key in ("fee", "slippage_pct", "fee_noise_std"):

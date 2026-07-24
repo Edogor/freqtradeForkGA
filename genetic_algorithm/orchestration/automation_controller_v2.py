@@ -672,6 +672,11 @@ def bootstrap_automation_wave(
         loaded = load_evolution_worker(
             item.worker_binding.spec_path,
             expected_spec_sha256=item.worker_binding.spec_sha256,
+            # Bootstrap is idempotent and also runs after service restarts.
+            # At that point a RUNNING/terminal attempt may legitimately have
+            # immutable output artifacts below its root.  Input hashes still
+            # have to match; only the pre-execution emptiness check is skipped.
+            require_pristine_artifact_root=False,
         )
         if loaded.manifest != item.manifest:
             raise AutomationControllerError("bootstrap worker differs from receipt")

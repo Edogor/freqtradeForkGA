@@ -356,9 +356,22 @@ class TestPairSplitFitness:
         """Verify metrics dict contains all pair-split specific fields."""
         evaluator = self._make_evaluator()
 
-        result = _make_backtest_result(total_trades=50, sharpe=1.5)
+        train_result = _make_backtest_result(total_trades=50, sharpe=1.5)
+        train_result.per_pair_profit = {
+            'BTC/USDT': 4.0,
+            'BNB/USDT': 1.0,
+            'XRP/USDT': 0.0,
+        }
+        train_result.per_pair_trades = {
+            'BTC/USDT': 30,
+            'BNB/USDT': 20,
+            'XRP/USDT': 0,
+        }
+        val_result = _make_backtest_result(total_trades=50, sharpe=1.5)
+        val_result.per_pair_profit = {'ETH/USDT': 3.0, 'SOL/USDT': 2.0}
+        val_result.per_pair_trades = {'ETH/USDT': 18, 'SOL/USDT': 32}
         mock_bt = MagicMock()
-        mock_bt.backtest_strategy.return_value = result
+        mock_bt.backtest_strategy.side_effect = [train_result, val_result]
         evaluator.backtester = mock_bt
 
         mock_gen_instance = MagicMock()
@@ -371,9 +384,22 @@ class TestPairSplitFitness:
             'train_fitness', 'val_fitness', 'pair_generalization_ratio',
             'val_profit', 'val_sharpe', 'val_trades', 'val_max_drawdown',
             'val_win_rate', 'training_pairs', 'validation_pairs',
+            'train_per_pair_profit', 'train_per_pair_trades',
+            'train_worst_pair_trades', 'train_active_pair_ratio',
+            'train_pair_trade_coverage_multiplier',
+            'val_per_pair_profit', 'val_per_pair_trades',
+            'val_worst_pair_trades', 'val_active_pair_ratio',
+            'val_pair_trade_coverage_multiplier',
         ]
         for key in required_keys:
             assert key in metrics, f"Missing pair-split metric: {key}"
+        assert metrics['train_per_pair_trades']['XRP/USDT'] == 0
+        assert metrics['train_worst_pair_trades'] == 0
+        assert metrics['train_active_pair_ratio'] == pytest.approx(2 / 3)
+        assert metrics['val_per_pair_trades'] == {
+            'ETH/USDT': 18,
+            'SOL/USDT': 32,
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════

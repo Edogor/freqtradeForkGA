@@ -493,6 +493,21 @@ class FitnessEvaluator:
                     'training_only': True,
                     'training_pairs': ','.join(training_pairs),
                     'validation_pairs': ','.join(validation_pairs),
+                    'train_per_pair_profit': train_metrics.get(
+                        'per_pair_profit', {}
+                    ),
+                    'train_per_pair_trades': train_metrics.get(
+                        'per_pair_trades', {}
+                    ),
+                    'train_worst_pair_trades': train_metrics.get(
+                        'worst_pair_trades'
+                    ),
+                    'train_active_pair_ratio': train_metrics.get(
+                        'active_pair_ratio'
+                    ),
+                    'train_pair_trade_coverage_multiplier': train_metrics.get(
+                        'pair_trade_coverage_multiplier'
+                    ),
                 }
                 logger.info(f"[PAIR-SPLIT] {generated_name}: train_only={train_fitness:.4f} "
                            f"(deferred validation)")
@@ -550,6 +565,32 @@ class FitnessEvaluator:
                 'val_win_rate': val_metrics.get('win_rate', 0.0),
                 'training_pairs': ','.join(training_pairs),
                 'validation_pairs': ','.join(validation_pairs),
+                # Preserve the evidence which actually shaped both component
+                # fitness values. Aggregate trade counts hid inactive pairs in
+                # real Generic-Island checkpoints and made search diagnostics
+                # disagree with the strict V2 replay panel.
+                'train_per_pair_profit': train_metrics.get(
+                    'per_pair_profit', {}
+                ),
+                'train_per_pair_trades': train_metrics.get(
+                    'per_pair_trades', {}
+                ),
+                'train_worst_pair_trades': train_metrics.get(
+                    'worst_pair_trades'
+                ),
+                'train_active_pair_ratio': train_metrics.get(
+                    'active_pair_ratio'
+                ),
+                'train_pair_trade_coverage_multiplier': train_metrics.get(
+                    'pair_trade_coverage_multiplier'
+                ),
+                'val_per_pair_profit': val_metrics.get('per_pair_profit', {}),
+                'val_per_pair_trades': val_metrics.get('per_pair_trades', {}),
+                'val_worst_pair_trades': val_metrics.get('worst_pair_trades'),
+                'val_active_pair_ratio': val_metrics.get('active_pair_ratio'),
+                'val_pair_trade_coverage_multiplier': val_metrics.get(
+                    'pair_trade_coverage_multiplier'
+                ),
                 # Map pair-split validation to holdout-compatible fields so
                 # overfit_analysis.classify_overfitting() can classify as
                 # SAFE/WARNING/OVERFIT instead of UNKNOWN.

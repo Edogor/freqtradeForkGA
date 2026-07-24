@@ -15,11 +15,12 @@ import math
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+from freqtrade.exchange import timeframe_to_seconds
 from pydantic import Field, model_validator
 
 from genetic_algorithm.config.schema import validate_resolved_config_v2_or_raise
@@ -517,8 +518,14 @@ def _load_bound_spec(
     return spec, root
 
 
-def _verify_worker_inputs(root: Path, spec: EvolutionWorkerSpecV2) -> None:
-    _reject_unexpected_preexecution_files(root, spec)
+def _verify_worker_inputs(
+    root: Path,
+    spec: EvolutionWorkerSpecV2,
+    *,
+    require_pristine_artifact_root: bool,
+) -> None:
+    if require_pristine_artifact_root:
+        _reject_unexpected_preexecution_files(root, spec)
     for relative, expected in spec.input_hashes.items():
         input_path = (root / _safe_relative_path(relative)).resolve()
         if root not in input_path.parents or not input_path.is_file():
@@ -604,9 +611,14 @@ def load_evolution_worker(
     spec_path: str | Path,
     *,
     expected_spec_sha256: str,
+    require_pristine_artifact_root: bool = True,
 ) -> LoadedEvolutionWorkerV2:
     spec, root = _load_bound_spec(spec_path, expected_spec_sha256)
-    _verify_worker_inputs(root, spec)
+    _verify_worker_inputs(
+        root,
+        spec,
+        require_pristine_artifact_root=require_pristine_artifact_root,
+    )
     (
         manifest,
         config,
@@ -642,6 +654,29 @@ def derive_engine_config(
     parallel = config.setdefault("parallel_evaluation", {})
     parallel["enabled"] = loaded.manifest.worker_count > 1
     parallel["num_workers"] = loaded.manifest.worker_count
+    backtesting = config.setdefault("backtesting", {})
+    timeframe = str(backtesting["timeframe"])
+    start = datetime.combine(
+        loaded.split_manifest.evolution_period_start,
+        time.min,
+        tzinfo=UTC,
+    )
+    exclusive_end = datetime.combine(
+        loaded.split_manifest.evolution_period_end_exclusive,
+        time.min,
+        tzinfo=UTC,
+    )
+    last_candle_open = exclusive_end - timedelta(
+        seconds=timeframe_to_seconds(timeframe)
+    )
+    if last_candle_open < start:
+        raise EvolutionWorkerError("evolution split has no complete timeframe candle")
+    # Freqtrade treats the stop timestamp as inclusive. Date-only config
+    # ranges therefore admit the first candle of the exclusive end day.
+    # Bind search to the same exact candle cells as the split and V2 replay.
+    backtesting["timerange"] = (
+        f"{int(start.timestamp())}-{int(last_candle_open.timestamp())}"
+    )
     loaded.spec.output_layout.apply_to_engine_config(config)
     config.setdefault("terminal_monitor", {})["enabled"] = False
     config.setdefault("warm_start", {})["enabled"] = False

@@ -3,6 +3,33 @@
 Stand: 24.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
 
+Sechsundzwanzigster Slice (24.07.2026): Der zweite echte Root-Versuch auf dem
+korrigierten Fitnessvertrag endete mit einem hashverifizierten `SUCCEEDED`-
+Attempt. Startpopulation und erzeugte Gen-0-Strategien waren bytegenau
+reproduzierbar. Alle Checkpoints hatten eindeutige generation-lokale IDs, alle
+Backtests liefen technisch erfolgreich und der neue Pair-Coverage-Penalty
+reduzierte die zuvor irreführend hohen Search-Scores deutlich. Fachlich war
+noch kein Finalist promotionsfähig: Die Aktivität konzentrierte sich weiterhin
+auf einen Train-Pair, während die übrigen Pair-Szenarien zu wenige Trades
+lieferten. V2 stufte diese Evidenz korrekt als `INCONCLUSIVE` statt als Erfolg
+oder technischen Fehler ein. Der kleine Baseline-Budgetlauf belegt damit
+korrekte Selektion/Gates, aber noch keine ausreichend generalisierende
+Strategieentwicklung.
+
+Der kontrollierte Stopp vor einer Folge-Wave deckte drei weitere
+Produktionslücken auf: Bootstrap-Readback nach einem fertigen Child verwechselte
+Outputs mit unerlaubten Pre-Execution-Dateien, Shared-OHLCV löste relative
+Datapfade gegen das Attempt-CWD auf, und die Suchphase nahm eine zusätzliche
+Candle des exklusiven Endtags auf. Diese Verträge sind unter `ORCH-021` bis
+`ORCH-023` repariert. Pair-Split-Checkpoints persistieren nun außerdem
+Train-/Validation-Tradezahlen, Worst-Pair-Aktivität und den tatsächlich
+angewendeten Coverage-Multiplikator. Vor dem nächsten teuren Lauf ist die
+kontrollierte Child-Planung auf dem bereinigten Commit zu prüfen; ein
+Scratch-Control ist bei null eligible Candidates korrekt, ein Exploit wäre es
+nicht. Die bereinigte GA-Suite besteht nach diesen Reparaturen mit 1.665 Tests
+und 13 bereits bekannten Warnungen; 34 externe Generation-Step-Tests sind
+ebenfalls grün.
+
 Fünfundzwanzigster Slice (24.07.2026): Der erste echte
 `automation_island_v2`-Produktionsversuch durchlief alle zwölf Generationen,
 vier Islands, Migration, HOF-Export und zwanzig Pair-Replays ohne
@@ -622,7 +649,25 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   **Erledigt für Standard-GA/single-objective unter `safe_v2`:** Legacy-Fitness ist nur
   Search-Signal, Top-Genome werden als Executable plus `evolution_seed.json` eingefroren und über
   V2 replayed. Control/Replication/Exploit/Explore werden vollständig materialisiert und atomar
-  übergeben. Island, Generic Island und NSGA-II bleiben eigene, nicht unterstützte Worker-Arten.
+  übergeben. Generic Island besitzt zusätzlich einen eng begrenzten
+  `automation_island_v2`-Worker mit Pair-Split, gemeinsamem Replay, Ressourcenlimits und
+  search-only Folge-Waves. Classic Island und NSGA-II bleiben eigene, nicht unterstützte
+  Automations-Worker-Arten.
+- [x] **ORCH-021 – Restart nach fertigem Child-Resultat reparieren.** Ein Neustart zwischen
+  Resultat-Commit und SQLite-Reconciliation darf legitime Outputartefakte nicht als unerwartete
+  Pre-Execution-Dateien ablehnen. Der idempotente Bootstrap prüft weiterhin alle immutable
+  Input-Hashes, überspringt beim reinen Wiederlesen aber die nur vor dem ersten Spawn sinnvolle
+  Root-Leerheitsprüfung. Der echte Generic-Island-Probelauf hat diese Lücke reproduziert; ein
+  Regressionstest hält die strikte Ausführungsprüfung und die restartfähige Inspektion getrennt.
+- [x] **ORCH-022 – Such- und Replay-Candlegrenzen identisch machen.** Date-only Freqtrade-
+  Timeranges nehmen den Stop-Zeitpunkt inklusive und luden in der Suchphase eine zusätzliche
+  Kerze des exklusiven Endtags. Der V2-Worker leitet deshalb aus dem Split-Manifest einen
+  sekundengenauen inklusiven Endzeitpunkt für die letzte erlaubte Candle ab. Ein Real-Daten-Probe
+  bestätigt identische erste/letzte Candle für Suche und Replay.
+- [x] **ORCH-023 – Shared-OHLCV unabhängig vom Attempt-CWD laden.** Relative Datapfade werden
+  gegen den Repository-Root statt gegen das isolierte Evolution-Ausgabeverzeichnis aufgelöst.
+  Mehrere Timeframes bleiben fail-safe ohne Shared Cache. Der reale 1h-Probezugriff findet damit
+  alle vier gebundenen Pairdateien; dies ändert Performance, nicht Backtest-Semantik.
 
 ## P0: Config-Vertrag
 

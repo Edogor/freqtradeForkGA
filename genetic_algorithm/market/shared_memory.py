@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 from multiprocessing import shared_memory
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -104,6 +105,15 @@ def cleanup_stale_shared_memory():
 # This is the raw OHLCV data that FreqTrade's data loading produces.
 SHARED_FLOAT_COLS = ['open', 'high', 'low', 'close', 'volume']
 DATE_COL = 'date'
+
+
+def _resolve_data_dir(configured: str | Path) -> Path:
+    """Resolve GA data paths independently from an attempt output cwd."""
+
+    data_dir = Path(configured)
+    if data_dir.is_absolute():
+        return data_dir
+    return Path(__file__).resolve().parents[2] / data_dir
 
 
 class SharedDataManager:
@@ -244,10 +254,11 @@ class SharedDataManager:
         try:
             from freqtrade.configuration import TimeRange
             from freqtrade.data.history import load_pair_history
-            from pathlib import Path
 
             bt_config = config.get('backtesting', {})
-            data_dir = Path(bt_config.get('datadir', 'user_data/data/binance'))
+            data_dir = _resolve_data_dir(
+                bt_config.get('datadir', 'user_data/data/binance')
+            )
             dataformat = bt_config.get('dataformat_ohlcv', 'feather')
 
             # Parse timerange

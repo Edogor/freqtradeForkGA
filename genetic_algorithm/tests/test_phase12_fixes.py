@@ -106,6 +106,18 @@ class TestSharedMemoryThreadSafety:
         assert result == {}
         load.assert_not_called()
 
+    def test_relative_data_dir_is_resolved_from_repository_root(self):
+        from genetic_algorithm.market.shared_memory import _resolve_data_dir
+
+        assert _resolve_data_dir("user_data/data/binance") == (
+            project_root / "user_data" / "data" / "binance"
+        )
+
+    def test_absolute_data_dir_is_preserved(self, tmp_path):
+        from genetic_algorithm.market.shared_memory import _resolve_data_dir
+
+        assert _resolve_data_dir(tmp_path) == tmp_path
+
 
 # ============================================================================
 # Cache Checksum Tests

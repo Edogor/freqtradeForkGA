@@ -262,6 +262,15 @@ def test_empty_timerange_is_valid_with_factual_warning():
     assert _has(warnings, "all available data")
 
 
+def test_exact_epoch_timerange_is_valid_for_derived_worker_config():
+    config = _base_config()
+    config["backtesting"]["timerange"] = "1679702400-1774566000"
+
+    errors, _ = _messages(config)
+
+    assert not _has(errors, "timerange")
+
+
 def test_fitness_weights_are_normalized_not_forced_to_sum_to_one():
     config = _base_config()
     config["fitness_weights"] = {"profit": 3.0, "drawdown": 2.0}

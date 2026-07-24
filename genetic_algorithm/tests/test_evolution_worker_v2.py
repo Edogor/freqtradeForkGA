@@ -320,6 +320,32 @@ def test_prepared_evolution_worker_roundtrips_all_bound_inputs(evolution_context
     assert not context.ledger_path.exists()
 
 
+def test_completed_evolution_worker_can_be_inspected_after_restart(
+    evolution_context_factory,
+):
+    context = evolution_context_factory()
+    output = Path(context.prepared.spec.artifact_root) / "evolution" / "engine.log"
+    output.parent.mkdir(parents=True)
+    output.write_text("completed output\n")
+
+    with pytest.raises(
+        EvolutionWorkerError,
+        match="pre-execution artifact set differs",
+    ):
+        load_evolution_worker(
+            context.prepared.spec_path,
+            expected_spec_sha256=context.prepared.spec_file_sha256,
+        )
+
+    loaded = load_evolution_worker(
+        context.prepared.spec_path,
+        expected_spec_sha256=context.prepared.spec_file_sha256,
+        require_pristine_artifact_root=False,
+    )
+
+    assert loaded.manifest.attempt_id == context.prepared.spec.attempt_id
+
+
 def test_generic_island_worker_is_bound_and_uses_pair_split(
     evolution_context_factory,
     tmp_path: Path,
@@ -764,6 +790,10 @@ def test_derived_engine_config_uses_manifest_seed_and_worker_count(
 
     assert derived["genetic_algorithm"]["random_seed"] == loaded.manifest.seeds[0]
     assert derived["parallel_evaluation"] == context.config["parallel_evaluation"]
+    assert derived["backtesting"]["timerange"] == (
+        f"{int(datetime(2024, 1, 1, tzinfo=UTC).timestamp())}-"
+        f"{int(datetime(2024, 1, 10, 23, tzinfo=UTC).timestamp())}"
+    )
     assert derived["checkpoint_provenance"] == {
         "schema_version": "3.0",
         "engine_kind": "STANDARD",
