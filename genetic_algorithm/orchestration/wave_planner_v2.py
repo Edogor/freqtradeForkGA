@@ -112,6 +112,7 @@ class WavePlannerPolicyV2(StrictV2Model):
     arm_templates: list[WaveArmTemplateV2] = Field(min_length=1)
     allow_control_fallback_when_no_candidates: bool = False
     allow_control_recovery_after_technical_failure: bool = False
+    rotate_seeds_per_parent_wave: bool = False
 
     @model_validator(mode="after")
     def _coherent_templates(self) -> WavePlannerPolicyV2:
@@ -540,6 +541,41 @@ def _materialize_experiments(
     return sorted(planned, key=lambda item: item.experiment_id)
 
 
+def _rotate_template_seeds(
+    templates: list[WaveArmTemplateV2],
+    *,
+    parent_wave_id: str,
+    policy: WavePlannerPolicyV2,
+) -> list[WaveArmTemplateV2]:
+    """Derive one deterministic paired seed panel for each child wave."""
+
+    if not policy.rotate_seeds_per_parent_wave:
+        return templates
+    base_seeds = templates[0].seeds
+    rotated = [
+        int(
+            canonical_config_hash(
+                {
+                    "contract": "CHILD_WAVE_SEED_V1",
+                    "parent_wave_id": parent_wave_id,
+                    "base_seed": seed,
+                    "ordinal": ordinal,
+                }
+            )[:8],
+            16,
+        )
+        for ordinal, seed in enumerate(base_seeds)
+    ]
+    if len(rotated) != len(set(rotated)):
+        raise WavePlanningError("derived child-wave seeds collide")
+    return [
+        WaveArmTemplateV2.model_validate(
+            {**template.model_dump(mode="python"), "seeds": rotated}
+        )
+        for template in templates
+    ]
+
+
 def plan_child_wave(
     analysis: WaveAnalysisV2,
     selection: CandidateSelectionV2,
@@ -617,6 +653,11 @@ def plan_child_wave(
         ]
         if use_control_only
         else policy.arm_templates
+    )
+    templates = _rotate_template_seeds(
+        templates,
+        parent_wave_id=analysis.wave_id,
+        policy=policy,
     )
     planned = _materialize_experiments(
         child_wave_id=child_wave_id,

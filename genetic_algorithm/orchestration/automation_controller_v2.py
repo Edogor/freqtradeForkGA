@@ -312,7 +312,7 @@ def default_automation_policy(
         max_wallclock_seconds=48 * 60 * 60,
     )
     return AutomationPolicyV2(
-        automation_policy_version="guarded-island-search-v2.0",
+        automation_policy_version="guarded-island-search-v2.1",
         root_seeds=[1001],
         max_waves=50,
         max_total_attempts=148,
@@ -345,13 +345,14 @@ def default_automation_policy(
             min_normalized_objective_distance=0,
         ),
         planner_policy=WavePlannerPolicyV2(
-            planner_policy_version="guarded-island-next-wave-v2.0",
+            planner_policy_version="guarded-island-next-wave-v2.1",
             child_result_policy_version=result_policy,
             child_search_space_version="automation-island-v2",
             plan_mode=WavePlanMode.EVOLUTION_EXPERIMENT,
             budget=wave_budget,
             allow_control_fallback_when_no_candidates=True,
             allow_control_recovery_after_technical_failure=True,
+            rotate_seeds_per_parent_wave=True,
             arm_templates=[
                 WaveArmTemplateV2(
                     arm_id="control",

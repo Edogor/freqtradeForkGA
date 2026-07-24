@@ -26,7 +26,7 @@ Train-/Validation-Tradezahlen, Worst-Pair-Aktivität und den tatsächlich
 angewendeten Coverage-Multiplikator. Vor dem nächsten teuren Lauf ist die
 kontrollierte Child-Planung auf dem bereinigten Commit zu prüfen; ein
 Scratch-Control ist bei null eligible Candidates korrekt, ein Exploit wäre es
-nicht. Die bereinigte GA-Suite besteht nach diesen Reparaturen mit 1.665 Tests
+nicht. Die bereinigte GA-Suite besteht nach diesen Reparaturen mit 1.666 Tests
 und 13 bereits bekannten Warnungen; 34 externe Generation-Step-Tests sind
 ebenfalls grün.
 
@@ -668,6 +668,14 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   gegen den Repository-Root statt gegen das isolierte Evolution-Ausgabeverzeichnis aufgelöst.
   Mehrere Timeframes bleiben fail-safe ohne Shared Cache. Der reale 1h-Probezugriff findet damit
   alle vier gebundenen Pairdateien; dies ändert Performance, nicht Backtest-Semantik.
+- [x] **ORCH-024 – Scratch-Control-Seeds pro Parent-Wave rotieren.** Der erste reale
+  Fallback-Plan vermied korrekt einen Exploit ohne eligible Candidate, hätte aber Config und Seed
+  des Parent-Controls wiederholt. Das wäre nach unverändertem Code ein deterministisches Duplikat
+  ohne neue Evidenz. Der Planner leitet nun aus Parent-Wave-ID, Basisseed und Ordinal ein
+  reproduzierbares 32-Bit-Seedpanel ab. Alle Arme derselben Child-Wave behalten identische paired
+  Seeds; verschiedene Parent-Waves erhalten verschiedene Panels. Das redundante materialisierte
+  Child des Probelaufs wurde durch den Kill-Switch nicht gestartet und bleibt als Audit-Evidenz
+  erhalten.
 
 ## P0: Config-Vertrag
 

@@ -323,6 +323,46 @@ def test_control_fallback_keeps_healthy_search_running_without_candidates():
     assert plan.experiments[0].source.source_mode == PlannerSourceMode.BASELINE_CONTROL
 
 
+def test_control_fallback_rotates_seed_panel_per_parent_wave():
+    analysis = _analysis(with_candidate=False)
+    policy = _planner_policy().model_copy(
+        update={
+            "allow_control_fallback_when_no_candidates": True,
+            "rotate_seeds_per_parent_wave": True,
+        }
+    )
+    first = plan_child_wave(
+        analysis,
+        _selection(analysis),
+        [_parent_experiment()],
+        {BASE_CONFIG_HASH: BASE_CONFIG},
+        policy,
+    )
+    repeated = plan_child_wave(
+        analysis,
+        _selection(analysis),
+        [_parent_experiment()],
+        {BASE_CONFIG_HASH: BASE_CONFIG},
+        policy,
+    )
+    next_analysis = analysis.model_copy(update={"wave_id": "wave-planner-next"})
+    next_parent = _parent_experiment().model_copy(
+        update={"wave_id": "wave-planner-next"}
+    )
+    next_wave = plan_child_wave(
+        next_analysis,
+        _selection(next_analysis),
+        [next_parent],
+        {BASE_CONFIG_HASH: BASE_CONFIG},
+        policy,
+    )
+
+    assert first == repeated
+    assert first.experiments[0].seeds != [101, 102]
+    assert first.experiments[0].seeds != next_wave.experiments[0].seeds
+    assert all(0 <= seed <= 2**32 - 1 for seed in first.experiments[0].seeds)
+
+
 def test_control_recovery_restarts_scratch_after_bounded_technical_failure():
     analysis = _analysis(
         planning_allowed=False,
