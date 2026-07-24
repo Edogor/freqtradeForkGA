@@ -3,6 +3,26 @@
 Stand: 24.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
 
+Siebenundzwanzigster Slice (24.07.2026): Die zweite Versuchslinie wurde
+vollständig und recoverable unter
+`data/v2/trial_archives/second-generic-island-20260724-root-579e04974-plan-6985528f2`
+archiviert. Dazu gehören State-DB, Root-Artefakte, der nie gestartete
+redundante Child sowie ein kompakter hashverifizierter JSON-/Markdown-Bericht.
+Der Bericht enthält Entscheidungsgründe, Attempt-Provenienz, Gatezustände und
+die wesentlichen Pair-Metriken, aber bewusst keinen Strategiecode, keine
+Einzeltrades und keine Workerlogs. Künftige Wave-Analysen schreiben denselben
+Report automatisch in `automation/reports`, einschließlich einer bequem
+lesbaren `LATEST.md`.
+
+Der Automation-Controller liest Root-Seeds und Wave-Limit nun aus dem strikt
+validierten V2-Config-Vertrag. Das produktive Diagnose-Preset verwendet einen
+frischen Root-Seed `2001` und `max_waves: 1`: Der Root darf vollständig laufen
+und analysiert werden, danach blockiert `MAX_WAVES_REACHED` jede
+Child-Materialisierung. So kann die neue Seed-Rotation separat von der
+Strategieentwicklung beurteilt werden, ohne versehentlich eine lange Kampagne
+zu starten. 146 fokussierte Vertrags-/Config-/Planner-/Controller-Tests sowie
+die bereinigte GA-Suite mit 1.667 Tests laufen grün.
+
 Sechsundzwanzigster Slice (24.07.2026): Der zweite echte Root-Versuch auf dem
 korrigierten Fitnessvertrag endete mit einem hashverifizierten `SUCCEEDED`-
 Attempt. Startpopulation und erzeugte Gen-0-Strategien waren bytegenau
@@ -676,6 +696,12 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   Seeds; verschiedene Parent-Waves erhalten verschiedene Panels. Das redundante materialisierte
   Child des Probelaufs wurde durch den Kill-Switch nicht gestartet und bleibt als Audit-Evidenz
   erhalten.
+- [x] **ORCH-025 – Diagnosekampagnen begrenzen und Analyseberichte persistieren.**
+  Root-Seeds und maximales Wave-Budget sind typisierte V2-Configwerte. Der nächste reale Lauf
+  verwendet Seed 2001 und stoppt nach der Root-Analyse, bevor ein Child entsteht. Jede
+  Controller-Analysis persistiert einen kompakten immutable JSON-/Markdown-Bericht sowie
+  `LATEST`-Kopien. Resultate werden vor der Zusammenfassung erneut hashverifiziert; Strategiecode,
+  Genome, Einzeltrades und Runtime-Logs sind explizit nicht Bestandteil des Reports.
 
 ## P0: Config-Vertrag
 

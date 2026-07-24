@@ -14,6 +14,13 @@ safety_profile:
   # Evolution may run unattended; strategy promotion/trading remains forbidden.
   automation_eligible: false
 
+# Diagnostic campaign boundary. The controller will analyze this fresh root
+# and stop before materializing a child wave. Raise this only after reviewing
+# the persisted report produced for the root.
+automation_controller:
+  root_seeds: [2001]
+  max_waves: 1
+
 backtesting:
   pairs: [BTC/USDT, SOL/USDT, ETH/USDT, BNB/USDT]
   # Longest currently verified common gap-free interval across all four pairs.

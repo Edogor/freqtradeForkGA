@@ -81,6 +81,11 @@ DEFAULTS: Dict[str, Any] = {
         "max_drawdown_duration_days": 90.0,
         "require_final_test": True,
     },
+    # === Guarded unattended controller ===
+    "automation_controller": {
+        "root_seeds": [1001],
+        "max_waves": 50,
+    },
     # === Genetic Algorithm ===
     "genetic_algorithm": {
         "random_seed": None,
@@ -719,6 +724,20 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
     ga = _nested_config(config, ("genetic_algorithm",))
     bt = _nested_config(config, ("backtesting",))
+    automation = _nested_config(config, ("automation_controller",))
+    root_seeds = automation.get("root_seeds", [])
+    if (
+        not root_seeds
+        or any(type(seed) is not int for seed in root_seeds)
+        or root_seeds != sorted(set(root_seeds))
+    ):
+        errors.append(
+            "automation_controller.root_seeds must be a non-empty, sorted list "
+            "of unique integers"
+        )
+    max_waves = automation.get("max_waves")
+    if type(max_waves) is not int or max_waves < 1:
+        errors.append("automation_controller.max_waves must be a positive integer")
     max_runtime_minutes = ga.get("max_runtime_minutes")
     if (
         max_runtime_minutes is not None

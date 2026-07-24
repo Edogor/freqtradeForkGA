@@ -50,6 +50,9 @@ from genetic_algorithm.orchestration.promotion_policy_v2 import (
     shadow_gate_policy_from_config,
 )
 from genetic_algorithm.orchestration.result_contract import StrictV2Model
+from genetic_algorithm.orchestration.automation_report_v2 import (
+    persist_automation_analysis_report,
+)
 from genetic_algorithm.orchestration.split_contract_v2 import (
     build_evaluation_split_plan,
 )
@@ -306,6 +309,7 @@ def default_automation_policy(
 
     _validate_automation_config(config)
     result_policy = shadow_gate_policy_from_config(config).policy_version
+    controller_config = config["automation_controller"]
     wave_budget = WaveBudgetV2(
         max_attempts=3,
         max_parallel=1,
@@ -313,8 +317,8 @@ def default_automation_policy(
     )
     return AutomationPolicyV2(
         automation_policy_version="guarded-island-search-v2.1",
-        root_seeds=[1001],
-        max_waves=50,
+        root_seeds=controller_config["root_seeds"],
+        max_waves=controller_config["max_waves"],
         max_total_attempts=148,
         max_consecutive_failed_waves=3,
         max_concurrent=1,
@@ -1052,6 +1056,14 @@ class AutomationControllerV2:
         }:
             analysis, plan = self._plan(wave)
             if not plan.planning_allowed:
+                persist_automation_analysis_report(
+                    self.store,
+                    analysis=analysis,
+                    root_wave_id=self.root_wave_id,
+                    automation_root=self.automation_root,
+                    controller_outcome="BLOCKED",
+                    controller_reason_codes=plan.reason_codes,
+                )
                 blocked = self.store.apply_decision(
                     plan.to_decision(
                         analysis_decision_hash=next(
@@ -1076,6 +1088,14 @@ class AutomationControllerV2:
                 else []
             )
             if guard_reasons:
+                persist_automation_analysis_report(
+                    self.store,
+                    analysis=analysis,
+                    root_wave_id=self.root_wave_id,
+                    automation_root=self.automation_root,
+                    controller_outcome="STOPPED_LIMIT",
+                    controller_reason_codes=guard_reasons,
+                )
                 blocked = self._block(
                     wave, analysis=analysis, reasons=guard_reasons
                 )
@@ -1088,6 +1108,14 @@ class AutomationControllerV2:
                     reason_codes=guard_reasons,
                     launched_attempt_ids=scheduler_tick.launched_attempt_ids,
                 )
+            persist_automation_analysis_report(
+                self.store,
+                analysis=analysis,
+                root_wave_id=self.root_wave_id,
+                automation_root=self.automation_root,
+                controller_outcome="CONTINUE_SEARCH",
+                controller_reason_codes=plan.reason_codes,
+            )
             prepared = self._materialize(analysis, plan)
             analysis_decision = next(
                 item

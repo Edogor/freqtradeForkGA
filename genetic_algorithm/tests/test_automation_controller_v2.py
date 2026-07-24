@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -63,6 +64,15 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources():
     assert report.validation_pairs == ["BNB/USDT", "ETH/USDT"]
     assert report.disk_free_bytes > report.disk_reserve_bytes
     assert report.memory_available_bytes > report.memory_reserve_bytes
+    policy = default_automation_policy(
+        load_config(
+            repo_root
+            / "genetic_algorithm/config/presets/automation_island_v2.yaml"
+        ),
+        automation_root=repo_root / "genetic_algorithm/data/v2/automation",
+    )
+    assert policy.root_seeds == [2001]
+    assert policy.max_waves == 1
 
 
 def test_systemd_unit_restarts_crashes_but_not_guarded_stop(tmp_path: Path):
@@ -146,6 +156,26 @@ def test_kill_switch_prevents_scheduler_launch_and_preserves_queue(tmp_path: Pat
     assert tick.outcome == "STOPPED_KILL_SWITCH"
     assert tick.reason_codes == ["KILL_SWITCH_PRESENT"]
     assert store.list_attempts()[0].status == AttemptLifecycleStatus.QUEUED
+
+
+def test_single_wave_diagnostic_budget_blocks_child_plan(tmp_path: Path):
+    repo_root, automation_root, policy, store, receipt = _bootstrap(tmp_path)
+    controller = AutomationControllerV2(
+        store=store,
+        root_wave_id=receipt.intent.wave_id,
+        policy=policy,
+        automation_root=automation_root,
+        repo_root=repo_root,
+        scheduler=_SchedulerMustNotRun(),
+    )
+
+    reasons = controller._guard_plan(
+        [store.get_wave(receipt.intent.wave_id)],
+        SimpleNamespace(experiments=[]),
+    )
+
+    assert reasons == ["MAX_WAVES_REACHED"]
+    assert len(store.list_waves()) == 1
 
 
 def test_runtime_limit_prevents_scheduler_launch_after_restart(tmp_path: Path):
@@ -392,6 +422,11 @@ def test_real_mini_controller_executes_root_and_queues_next_wave(tmp_path: Path)
                 "random_immigrants": 1,
             }
         )
+        # This E2E specifically proves child-wave materialization; the shipped
+        # diagnostic preset is intentionally bounded to its root wave.
+        config["automation_controller"].update(
+            {"root_seeds": [2001], "max_waves": 2}
+        )
         config["parallel_evaluation"].update({"enabled": False, "num_workers": 1})
         config["output"]["top_n"] = 1
         config["generic_island_model"].update(
@@ -537,6 +572,23 @@ def test_real_mini_controller_executes_root_and_queues_next_wave(tmp_path: Path)
             item.worker_binding.worker_kind == WorkerKind.GENERIC_ISLAND_EVOLUTION
             for item in child_attempts
         )
+        report_path = automation_root / "reports" / "LATEST.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        assert report["root_wave_id"] == receipt.intent.wave_id
+        assert report["controller_outcome"] == "CONTINUE_SEARCH"
+        assert report["attempts"][0]["candidates"]
+
+        def keys(value):
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    yield key
+                    yield from keys(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    yield from keys(nested)
+
+        assert "strategy_code" not in set(keys(report))
+        assert "trades" not in set(keys(report))
     finally:
         for path in data_paths:
             path.unlink(missing_ok=True)
