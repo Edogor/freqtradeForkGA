@@ -401,6 +401,52 @@ class TestPairSplitFitness:
             'SOL/USDT': 32,
         }
 
+    @patch('genetic_algorithm.evaluation.fitness.StrategyGenerator')
+    def test_weakest_pair_coverage_is_non_compensable_across_split(self, MockGen):
+        evaluator = self._make_evaluator()
+        evaluator.fitness_penalties.update(
+            {
+                'target_trades_per_pair': 60,
+                'pair_trade_penalty_floor': 0.01,
+            }
+        )
+        train_result = _make_backtest_result(total_trades=60, sharpe=1.5)
+        train_result.per_pair_profit = {
+            'BTC/USDT': 0.0,
+            'BNB/USDT': 6.0,
+            'XRP/USDT': 0.0,
+        }
+        train_result.per_pair_trades = {
+            'BTC/USDT': 0,
+            'BNB/USDT': 60,
+            'XRP/USDT': 0,
+        }
+        val_result = _make_backtest_result(total_trades=120, sharpe=1.5)
+        val_result.per_pair_profit = {'ETH/USDT': 6.0, 'SOL/USDT': 6.0}
+        val_result.per_pair_trades = {'ETH/USDT': 60, 'SOL/USDT': 60}
+        evaluator.backtester = MagicMock()
+        evaluator.backtester.backtest_strategy.side_effect = [
+            train_result,
+            val_result,
+        ]
+        evaluator.strategy_generator = MagicMock()
+        evaluator.strategy_generator.generate_strategy_code.return_value = (
+            "class TestStrat: pass"
+        )
+
+        composite, metrics = evaluator.evaluate_pair_split(_make_gene())
+
+        unpenalized_composite = (
+            metrics['train_fitness']
+            * evaluator.pair_validation_config['weight_train']
+            + metrics['val_fitness']
+            * evaluator.pair_validation_config['weight_val']
+        )
+        assert metrics['pair_split_trade_coverage_multiplier'] == pytest.approx(
+            0.01
+        )
+        assert composite == pytest.approx(unpenalized_composite * 0.01)
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Backward Compatibility Tests

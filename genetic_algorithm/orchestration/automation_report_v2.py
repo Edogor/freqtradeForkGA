@@ -14,6 +14,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from genetic_algorithm.orchestration.artifact_store_v2 import V2ArtifactStore
 from genetic_algorithm.orchestration.wave_analyzer_v2 import WaveAnalysisV2
 from genetic_algorithm.orchestration.wave_state_v2 import WaveStateStoreV2
@@ -119,6 +121,40 @@ def _attempt_summaries(
         }
         if state.result_path:
             result = V2ArtifactStore(Path(state.result_path).parent).read_verified_result()
+            engine_seed_evidence = None
+            engine_config_path = Path(state.artifact_root) / "evolution" / "engine_config.yaml"
+            if engine_config_path.is_file():
+                engine_config = yaml.safe_load(engine_config_path.read_text())
+                if isinstance(engine_config, dict):
+                    manifest_seed = result.manifest.seeds[0]
+                    ga_seed = engine_config.get("genetic_algorithm", {}).get(
+                        "random_seed"
+                    )
+                    island_seeds = [
+                        {
+                            "name": item.get("name"),
+                            "seed": item.get("seed"),
+                        }
+                        for item in engine_config.get(
+                            "generic_island_model", {}
+                        ).get("islands", [])
+                        if isinstance(item, dict)
+                    ]
+                    expected_island_seeds = [
+                        (manifest_seed + ordinal) % (2**32)
+                        for ordinal in range(len(island_seeds))
+                    ]
+                    engine_seed_evidence = {
+                        "manifest_seed": manifest_seed,
+                        "ga_seed": ga_seed,
+                        "island_seeds": island_seeds,
+                        "expected_island_seeds": expected_island_seeds,
+                        "contract_matches": (
+                            ga_seed == manifest_seed
+                            and [item["seed"] for item in island_seeds]
+                            == expected_island_seeds
+                        ),
+                    }
             summary.update(
                 {
                     "result_status": result.status.value,
@@ -132,6 +168,7 @@ def _attempt_summaries(
                     "config_hash": result.manifest.config_hash,
                     "data_manifest_hash": result.manifest.data_manifest_hash,
                     "seeds": result.manifest.seeds,
+                    "engine_seed_evidence": engine_seed_evidence,
                     "candidates": [
                         {
                             "candidate_id": candidate.candidate_id,

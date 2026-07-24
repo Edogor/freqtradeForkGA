@@ -196,7 +196,7 @@ def evolution_context_factory(tmp_path: Path):
                             "name": "island-a",
                             "population_size": 4,
                             "generations": generations,
-                            "seed": 101,
+                            "seed": 9001,
                             "indicator_pool": ["RSI", "EMA"],
                             "pairs": [pair, validation_pair],
                             "walk_forward_enabled": False,
@@ -205,7 +205,7 @@ def evolution_context_factory(tmp_path: Path):
                             "name": "island-b",
                             "population_size": 4,
                             "generations": generations,
-                            "seed": 102,
+                            "seed": 9002,
                             "indicator_pool": ["MACD", "BBANDS"],
                             "pairs": [pair, validation_pair],
                             "walk_forward_enabled": False,
@@ -381,6 +381,18 @@ def test_generic_island_worker_is_bound_and_uses_pair_split(
         "island-a",
         "island-b",
     ]
+    assert derived["genetic_algorithm"]["random_seed"] == loaded.manifest.seeds[0]
+    assert [
+        island["seed"]
+        for island in derived["generic_island_model"]["islands"]
+    ] == [
+        loaded.manifest.seeds[0],
+        loaded.manifest.seeds[0] + 1,
+    ]
+    assert [
+        island["seed"]
+        for island in context.config["generic_island_model"]["islands"]
+    ] == [9001, 9002]
 
 
 def test_generic_island_worker_delivers_strict_parent_seed(

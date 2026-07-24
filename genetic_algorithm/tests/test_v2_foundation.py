@@ -213,6 +213,47 @@ class TestFitnessMetricContractV2:
         assert sparse == pytest.approx(baseline * 0.0265)
         assert absent == pytest.approx(baseline * 0.01)
 
+    def test_pair_trade_coverage_is_not_weakened_by_general_penalty_floor(self):
+        evaluator = self._penalty_evaluator(
+            target_trades_per_pair=60,
+            pair_trade_penalty_floor=0.01,
+            min_penalty_floor=0.10,
+        )
+        metrics = {
+            "num_trades": 120,
+            "max_drawdown": 0.0,
+            "win_rate": 0.5,
+            "per_pair_trades": {"BTC/USDT": 0, "SOL/USDT": 120},
+        }
+
+        baseline = evaluator._apply_penalties(
+            1.0,
+            {key: value for key, value in metrics.items() if key != "per_pair_trades"},
+        )
+        fitness = evaluator._apply_penalties(1.0, metrics)
+
+        assert fitness == pytest.approx(baseline * 0.01)
+        assert metrics["pair_trade_coverage_multiplier"] == pytest.approx(0.01)
+
+    def test_pair_summary_accepts_freqtrade_json_trade_records(self):
+        from genetic_algorithm.evaluation.direct_backtester import (
+            _summarize_trades_by_pair,
+        )
+
+        profit, counts = _summarize_trades_by_pair(
+            [
+                {"pair": "SOL/USDT", "profit_ratio": 0.02},
+                {"pair": "SOL/USDT", "profit_ratio": -0.005},
+                {"pair": "ETH/USDT", "profit_ratio": 0.01},
+            ],
+            ["BTC/USDT", "SOL/USDT"],
+        )
+
+        assert counts == {"BTC/USDT": 0, "SOL/USDT": 2, "ETH/USDT": 1}
+        assert profit == pytest.approx(
+            {"BTC/USDT": 0.0, "SOL/USDT": 1.5, "ETH/USDT": 1.0}
+        )
+
     def test_mapper_does_not_invent_missing_tail_risk(self):
         from genetic_algorithm.evaluation.direct_backtester import BacktestResult
         from genetic_algorithm.evaluation.fitness import FitnessEvaluator

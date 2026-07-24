@@ -473,7 +473,11 @@ class FitnessEvaluator:
             
             train_metrics = self._backtest_result_to_metrics(train_result)
             train_metrics['complexity'] = strategy_gene.calculate_complexity()
-            train_fitness = self.calculate_fitness(train_metrics, strategy_gene)
+            train_fitness = self.calculate_fitness(
+                train_metrics,
+                strategy_gene,
+                apply_pair_coverage=skip_validation,
+            )
             
             # When skip_validation is set, return training-only fitness (discounted)
             # Used by validate_top_n_only to defer validation backtest to top-N only
@@ -526,10 +530,21 @@ class FitnessEvaluator:
             
             val_metrics = self._backtest_result_to_metrics(val_result)
             val_metrics['complexity'] = strategy_gene.calculate_complexity()
-            val_fitness = self.calculate_fitness(val_metrics, strategy_gene)
+            val_fitness = self.calculate_fitness(
+                val_metrics,
+                strategy_gene,
+                apply_pair_coverage=False,
+            )
             
             # === Composite fitness ===
-            composite_fitness = train_fitness * weight_train + val_fitness * weight_val
+            train_coverage = self._pair_trade_coverage_multiplier(train_metrics)
+            val_coverage = self._pair_trade_coverage_multiplier(val_metrics)
+            pair_split_coverage = min(train_coverage, val_coverage)
+            train_metrics["pair_trade_coverage_multiplier"] = train_coverage
+            val_metrics["pair_trade_coverage_multiplier"] = val_coverage
+            composite_fitness = (
+                train_fitness * weight_train + val_fitness * weight_val
+            ) * pair_split_coverage
             
             # Generalization ratio: how well does validation fitness track training
             gen_ratio = val_fitness / (train_fitness + 1e-8)
@@ -591,6 +606,7 @@ class FitnessEvaluator:
                 'val_pair_trade_coverage_multiplier': val_metrics.get(
                     'pair_trade_coverage_multiplier'
                 ),
+                'pair_split_trade_coverage_multiplier': pair_split_coverage,
                 # Map pair-split validation to holdout-compatible fields so
                 # overfit_analysis.classify_overfitting() can classify as
                 # SAFE/WARNING/OVERFIT instead of UNKNOWN.
@@ -1223,7 +1239,13 @@ class FitnessEvaluator:
         
         return metrics
     
-    def calculate_fitness(self, metrics: Dict[str, float], strategy_gene: StrategyGene = None) -> float:
+    def calculate_fitness(
+        self,
+        metrics: Dict[str, float],
+        strategy_gene: StrategyGene = None,
+        *,
+        apply_pair_coverage: bool = True,
+    ) -> float:
         """
         Calculate overall fitness score from metrics.
         
@@ -1468,7 +1490,12 @@ class FitnessEvaluator:
         self._dsr_tracker.register_evaluation(strategy_hash=strategy_hash)
         
         # Apply penalties and return
-        penalized_fitness = self._apply_penalties(fitness, metrics, strategy_gene)
+        penalized_fitness = self._apply_penalties(
+            fitness,
+            metrics,
+            strategy_gene,
+            apply_pair_coverage=apply_pair_coverage,
+        )
         
         # Ensure non-negative
         return max(0, penalized_fitness)
@@ -1524,7 +1551,32 @@ class FitnessEvaluator:
         
         return max(0.15, min(1.0, score))
     
-    def _apply_penalties(self, fitness: float, metrics: Dict[str, float], strategy_gene: StrategyGene = None) -> float:
+    def _pair_trade_coverage_multiplier(
+        self,
+        metrics: Dict[str, Any],
+    ) -> float:
+        penalties = self.fitness_penalties
+        per_pair_target = penalties.get('target_trades_per_pair', 0)
+        per_pair_trades = metrics.get('per_pair_trades')
+        if per_pair_target <= 0 or not per_pair_trades:
+            return 1.0
+        worst_pair_trades = min(per_pair_trades.values())
+        coverage_floor = penalties.get('pair_trade_penalty_floor', 0.01)
+        coverage_floor = max(0.0, min(float(coverage_floor), 1.0))
+        coverage_ratio = max(
+            0.0,
+            min(1.0, float(worst_pair_trades) / float(per_pair_target)),
+        )
+        return coverage_floor + (1.0 - coverage_floor) * coverage_ratio
+
+    def _apply_penalties(
+        self,
+        fitness: float,
+        metrics: Dict[str, float],
+        strategy_gene: StrategyGene = None,
+        *,
+        apply_pair_coverage: bool = True,
+    ) -> float:
         """
         Apply penalties for constraint violations.
         
@@ -1567,20 +1619,9 @@ class FitnessEvaluator:
         # strategy that produces dozens of trades on one pair and zero on
         # another. Use the worst declared pair and a continuous ramp so early
         # generations retain a useful gradient.
-        per_pair_target = penalties.get('target_trades_per_pair', 0)
-        per_pair_trades = metrics.get('per_pair_trades')
-        if per_pair_target > 0 and per_pair_trades:
-            worst_pair_trades = min(per_pair_trades.values())
-            coverage_floor = penalties.get('pair_trade_penalty_floor', 0.01)
-            coverage_floor = max(0.0, min(float(coverage_floor), 1.0))
-            coverage_ratio = max(
-                0.0,
-                min(1.0, float(worst_pair_trades) / float(per_pair_target)),
-            )
-            pair_trade_multiplier = coverage_floor + (
-                1.0 - coverage_floor
-            ) * coverage_ratio
-            fitness *= pair_trade_multiplier
+        pair_trade_multiplier = 1.0
+        if apply_pair_coverage:
+            pair_trade_multiplier = self._pair_trade_coverage_multiplier(metrics)
             metrics['pair_trade_coverage_multiplier'] = pair_trade_multiplier
         
         # Hard penalty for minimum trades per month
@@ -1781,6 +1822,13 @@ class FitnessEvaluator:
         min_penalized = penalties.get('min_penalty_floor', 0.10)
         if min_penalized > 0 and original_fitness > 0:
             fitness = max(fitness, original_fitness * min_penalized)
+
+        # Pair coverage is a non-compensable search constraint. Applying it
+        # before the generic penalty floor made a configured 0.01 multiplier
+        # become 0.10, allowing single-pair specialists to retain ten times
+        # their intended fitness. Keep the smooth gradient, but apply it after
+        # the floor so another penalty cannot silently weaken it.
+        fitness *= pair_trade_multiplier
         
         return fitness
 

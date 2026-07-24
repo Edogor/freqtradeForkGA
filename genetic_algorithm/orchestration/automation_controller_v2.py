@@ -500,6 +500,7 @@ def render_systemd_user_unit(
         f"WorkingDirectory={working_directory}\n"
         f"ExecStart={command}\n"
         "Restart=on-failure\n"
+        "SuccessExitStatus=2\n"
         "RestartPreventExitStatus=2\n"
         "RestartSec=30s\n"
         "TimeoutStopSec=30s\n"

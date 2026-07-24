@@ -3,6 +3,40 @@
 Stand: 24.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
 
+Achtundzwanzigster Slice (24.07.2026): Der begrenzte Diagnose-Root
+`wave-root-98ffe8fc62db2a7ba0a6` endete nach 13:39 Minuten, 1,5 GiB Peak-RAM
+und einem hashverifizierten erfolgreichen Attempt erwartungsgemäß an
+`MAX_WAVES_REACHED`; kein Child wurde erzeugt. Alle fünf Finalisten blieben
+korrekt ineligible. SOL erzielte je nach Kandidat 7,73–15,98 % bei 39–129
+Trades, aber BTC erzeugte bei allen Kandidaten null Trades. ETH/BNB lagen nur
+bei 6–20 beziehungsweise 4–15 Trades. Hohe Winrates und Teilrenditen sind
+deshalb kein Robustheitsnachweis; zusätzlich lagen unter anderem `N_eff` und
+Drawdown-Dauern einzelner SOL-Szenarien außerhalb der Promotion-Grenzen.
+
+Die Artefaktanalyse fand zwei Ursachen im Suchpfad. Erstens serialisiert die
+aktive Freqtrade-Version Trades als JSON-Recordliste; der Pair-Extractor
+verarbeitete nur DataFrames und schrieb daher trotz 39–600 aggregierter Trades
+für jedes Pair null. Zweitens hob der allgemeine 10-%-Penalty-Floor den
+konfigurierten 1-%-Worst-Pair-Multiplikator wieder an. Der Extractor unterstützt
+nun beide Payloadformen. Pair-Split-Fitness wird aus den unkompensierten
+Train-/Validation-Komponenten gebildet und anschließend genau einmal mit der
+schlechtesten Coverage über das gesamte Pairpanel multipliziert. Ein echter
+Replay der fünf Finalisten bestätigt korrekte Pairzahlen und für alle wegen
+BTC=0 den globalen Faktor 0,01; ihre korrigierten Search-Scores liegen nur noch
+bei 0,0071–0,0085 statt ungefähr 0,08–0,09.
+
+Der Diagnose-Root war außerdem keine unabhängige Seed-Wiederholung:
+Manifest/GA trugen 2001, aber explizite Preset-Islands überschrieben dies mit
+42–45. Der immutable Attempt-Seed ist nun auch für Generic Island
+authoritativ und leitet die Island-Seeds 2001–2004 ab. Automationsberichte
+persistieren diesen Seed-Roundtrip und markieren historische Abweichungen
+explizit. Exitcode 2 bleibt ein bewusster Guard-Stopp, wird in der
+`systemd`-Unit aber als erfolgreicher Exit klassifiziert statt als roter
+Servicefehler. 71 fokussierte Worker-/Fitness-/Pair-/Controller-Tests laufen
+nach den Korrekturen grün. Das begrenzte Preset ist für den nächsten, noch
+nicht gestarteten Root auf Seed 3001 umgestellt, damit dessen immutable
+Wave-Identität nicht mit dem historischen Seed-2001-Lauf kollidiert.
+
 Siebenundzwanzigster Slice (24.07.2026): Die zweite Versuchslinie wurde
 vollständig und recoverable unter
 `data/v2/trial_archives/second-generic-island-20260724-root-579e04974-plan-6985528f2`
@@ -15,9 +49,9 @@ Report automatisch in `automation/reports`, einschließlich einer bequem
 lesbaren `LATEST.md`.
 
 Der Automation-Controller liest Root-Seeds und Wave-Limit nun aus dem strikt
-validierten V2-Config-Vertrag. Das produktive Diagnose-Preset verwendet einen
-frischen Root-Seed `2001` und `max_waves: 1`: Der Root darf vollständig laufen
-und analysiert werden, danach blockiert `MAX_WAVES_REACHED` jede
+validierten V2-Config-Vertrag. Der erste Diagnose-Root verwendete den damals
+frischen Root-Seed `2001` und `max_waves: 1`: Der Root durfte vollständig laufen
+und analysiert werden, danach blockierte `MAX_WAVES_REACHED` jede
 Child-Materialisierung. So kann die neue Seed-Rotation separat von der
 Strategieentwicklung beurteilt werden, ohne versehentlich eine lange Kampagne
 zu starten. 146 fokussierte Vertrags-/Config-/Planner-/Controller-Tests sowie
@@ -465,6 +499,18 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   **Teilstand:** Candidate-Messstatus, einzelne Gate-Ergebnisse, diagnostischer RobustScore und
   Shadow-Promotion-Outcome sind getrennte versionierte Felder. Der Legacy-Search-Score ist noch
   nicht mit einer expliziten Policyversion im kanonischen Runner verbunden.
+- [x] **EVAL-011 – Pair-Coverage im echten Suchpfad nicht kompensierbar machen.**
+  Freqtrade-Trade-DataFrames und serialisierte Recordlisten liefern dieselben Per-Pair-Profite und
+  -Tradezahlen. Train-/Validation-Fitness kann ein Null-Pair nicht mehr durch ein aktives anderes
+  Split kompensieren; der schlechteste Multiplikator des gesamten Panels wird nach dem allgemeinen
+  Penalty-Floor genau einmal auf den Composite-Score angewandt. Reale Finalist-Replays und
+  Regressionstests belegen den aktiven Datenfluss.
+- [ ] **EVAL-012 – Zero-Loss-Profit-Factor versioniert modellieren.** Freqtrades Backtestreport
+  kodiert eine positive Stichprobe ohne Verlusttrade als Profit Factor `0.0`, obwohl der Quotient
+  mathematisch rechtszensiert/unendlich ist. Das darf weder als schlechtester PF noch als beliebige
+  riesige Zahl in Search oder V2 eingehen. Einen endlichen Cap plus explizites
+  `profit_factor_censored`-Feld definieren, Cache-/Resultatschema versionieren und Rankings gegen
+  gemischte sowie ausreichend große Samples testen.
 
 ## P0: Validierung und Evolutionslogik
 
@@ -698,10 +744,17 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   erhalten.
 - [x] **ORCH-025 – Diagnosekampagnen begrenzen und Analyseberichte persistieren.**
   Root-Seeds und maximales Wave-Budget sind typisierte V2-Configwerte. Der nächste reale Lauf
-  verwendet Seed 2001 und stoppt nach der Root-Analyse, bevor ein Child entsteht. Jede
+  nach dieser Implementierung verwendete Seed 2001 und stoppte nach der Root-Analyse, bevor ein
+  Child entstand; der folgende begrenzte Root ist mit der neuen Identität Seed 3001 vorbereitet. Jede
   Controller-Analysis persistiert einen kompakten immutable JSON-/Markdown-Bericht sowie
   `LATEST`-Kopien. Resultate werden vor der Zusammenfassung erneut hashverifiziert; Strategiecode,
   Genome, Einzeltrades und Runtime-Logs sind explizit nicht Bestandteil des Reports.
+- [x] **ORCH-026 – Attempt-Seed bis in explizite Generic Islands binden.**
+  Der Manifest-Seed ersetzt im derived Engine-Config sowohl
+  `genetic_algorithm.random_seed` als auch alle festen Preset-Island-Seeds; Island `n` erhält
+  deterministisch `attempt_seed + n` im 32-Bit-Raum. Der Report vergleicht Manifest-, GA- und
+  Island-Seeds und markiert einen abweichenden historischen Lauf. Guard-/Budget-Exitcode 2 gilt in
+  der generierten User-Unit als erfolgreicher, nicht neu zu startender Abschluss.
 
 ## P0: Config-Vertrag
 

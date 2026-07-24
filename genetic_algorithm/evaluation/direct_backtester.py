@@ -15,6 +15,7 @@ import tempfile
 import time
 import hashlib
 from collections import OrderedDict
+from collections.abc import Mapping
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -34,6 +35,60 @@ from genetic_algorithm.evaluation.equity_metrics_v2 import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _summarize_trades_by_pair(
+    trades: Any,
+    expected_pairs: List[str],
+) -> tuple[Dict[str, float], Dict[str, int]]:
+    """Return pair profit percentages and counts from dataframe or JSON records.
+
+    ``generate_backtest_stats`` exposes serialized trades as a list on the
+    active Freqtrade version.  The old extractor only handled a pandas
+    dataframe, silently leaving every declared pair at zero even when the
+    aggregate result contained hundreds of trades.
+    """
+
+    per_pair_profit = {pair: 0.0 for pair in expected_pairs}
+    per_pair_trades = {pair: 0 for pair in expected_pairs}
+    if trades is None:
+        return per_pair_profit, per_pair_trades
+
+    if hasattr(trades, "groupby") and hasattr(trades, "__len__"):
+        if len(trades) == 0:
+            return per_pair_profit, per_pair_trades
+        for pair, group in trades.groupby("pair"):
+            pair_name = str(pair)
+            per_pair_profit.setdefault(pair_name, 0.0)
+            per_pair_trades.setdefault(pair_name, 0)
+            if "profit_ratio" in group.columns:
+                per_pair_profit[pair_name] = float(group["profit_ratio"].sum()) * 100
+            per_pair_trades[pair_name] = len(group)
+        return per_pair_profit, per_pair_trades
+
+    if isinstance(trades, list):
+        for trade in trades:
+            if not isinstance(trade, Mapping):
+                continue
+            pair = trade.get("pair")
+            if not isinstance(pair, str) or not pair:
+                continue
+            per_pair_profit.setdefault(pair, 0.0)
+            per_pair_trades.setdefault(pair, 0)
+            per_pair_trades[pair] += 1
+            try:
+                profit_ratio = float(trade.get("profit_ratio", 0.0))
+            except (TypeError, ValueError):
+                profit_ratio = 0.0
+            if math.isfinite(profit_ratio):
+                per_pair_profit[pair] += profit_ratio * 100
+        return per_pair_profit, per_pair_trades
+
+    logger.warning(
+        "Unsupported trade payload type for pair metrics: %s",
+        type(trades).__name__,
+    )
+    return per_pair_profit, per_pair_trades
 
 
 def _monthly_returns_from_daily_equity(
@@ -1085,22 +1140,10 @@ class DirectBacktester:
                             strategy_results.get("pairlist")
                             or config_dict.get("exchange", {}).get("pair_whitelist", [])
                         )
-                        per_pair = {pair: 0.0 for pair in expected_pairs}
-                        per_pair_trades = {pair: 0 for pair in expected_pairs}
-                        if (
-                            trades_df is not None
-                            and hasattr(trades_df, "groupby")
-                            and len(trades_df) > 0
-                        ):
-                            for pair, group in trades_df.groupby("pair"):
-                                # Total return per pair over the full backtest period (sum of per-trade profit ratios)
-                                pair_profit = (
-                                    group["profit_ratio"].sum() * 100
-                                    if "profit_ratio" in group.columns
-                                    else 0.0
-                                )
-                                per_pair[pair] = pair_profit
-                                per_pair_trades[pair] = len(group)
+                        per_pair, per_pair_trades = _summarize_trades_by_pair(
+                            trades_df,
+                            expected_pairs,
+                        )
                         result.per_pair_profit = per_pair
                         result.per_pair_trades = per_pair_trades
                         logger.debug(

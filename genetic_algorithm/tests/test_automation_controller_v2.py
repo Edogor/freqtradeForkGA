@@ -71,7 +71,7 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources():
         ),
         automation_root=repo_root / "genetic_algorithm/data/v2/automation",
     )
-    assert policy.root_seeds == [2001]
+    assert policy.root_seeds == [3001]
     assert policy.max_waves == 1
 
 
@@ -90,6 +90,7 @@ def test_systemd_unit_restarts_crashes_but_not_guarded_stop(tmp_path: Path):
     assert f'"{repo_root / ".venv/bin/python"}"' in unit
     assert "automation start" in unit
     assert "Restart=on-failure" in unit
+    assert "SuccessExitStatus=2" in unit
     assert "RestartPreventExitStatus=2" in unit
     assert "KillMode=control-group" in unit
 
@@ -577,6 +578,7 @@ def test_real_mini_controller_executes_root_and_queues_next_wave(tmp_path: Path)
         assert report["root_wave_id"] == receipt.intent.wave_id
         assert report["controller_outcome"] == "CONTINUE_SEARCH"
         assert report["attempts"][0]["candidates"]
+        assert report["attempts"][0]["engine_seed_evidence"]["contract_matches"]
 
         def keys(value):
             if isinstance(value, dict):

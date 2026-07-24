@@ -649,8 +649,9 @@ def derive_engine_config(
     """Change only seed/concurrency and operational paths under this attempt."""
 
     config = copy.deepcopy(loaded.resolved_config)
+    attempt_seed = int(loaded.manifest.seeds[0]) % (2**32)
     ga = config.setdefault("genetic_algorithm", {})
-    ga["random_seed"] = loaded.manifest.seeds[0]
+    ga["random_seed"] = attempt_seed
     parallel = config.setdefault("parallel_evaluation", {})
     parallel["enabled"] = loaded.manifest.worker_count > 1
     parallel["num_workers"] = loaded.manifest.worker_count
@@ -682,6 +683,16 @@ def derive_engine_config(
     config.setdefault("warm_start", {})["enabled"] = False
     config["experiment_name"] = loaded.manifest.attempt_id
     generic_island = config.get("generic_island_model", {}).get("enabled", False)
+    if generic_island:
+        # Explicit island definitions historically carried fixed preset seeds
+        # (42, 43, ...), which overrode the hash-bound attempt seed. As a
+        # result, roots declared with different seeds reproduced the same
+        # search population. Preserve deterministic island diversity while
+        # making the attempt seed authoritative.
+        for ordinal, island in enumerate(
+            config["generic_island_model"].get("islands", [])
+        ):
+            island["seed"] = (attempt_seed + ordinal) % (2**32)
     island_names = (
         [
             str(item["name"])

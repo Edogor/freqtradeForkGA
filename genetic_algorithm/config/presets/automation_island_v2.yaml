@@ -18,7 +18,9 @@ safety_profile:
 # and stop before materializing a child wave. Raise this only after reviewing
 # the persisted report produced for the root.
 automation_controller:
-  root_seeds: [2001]
+  # Keep every diagnostic campaign distinct in the immutable wave namespace.
+  # Seed 2001 belongs to the completed historical diagnosis.
+  root_seeds: [3001]
   max_waves: 1
 
 backtesting:

@@ -49,8 +49,8 @@ Installation erzeugt werden:
 
 Danach die Datei bewusst nach `~/.config/systemd/user/ga-automation.service` übernehmen und mit
 `systemctl --user daemon-reload` sowie `systemctl --user enable --now ga-automation.service`
-aktivieren. Die Unit startet bei echten Prozessfehlern neu, aber nicht nach einem absichtlichen
-Guard-/Budget-Exitcode 2.
+aktivieren. Die Unit startet bei echten Prozessfehlern neu. Ein absichtlicher
+Guard-/Budget-Exitcode 2 gilt für systemd als erfolgreicher Abschluss und wird nicht neu gestartet.
 
 Ein einmaliger Reconciliation-Tick ohne dauerhafte Schleife:
 
@@ -72,6 +72,8 @@ Standardpfade:
 - Automation-Artefakte: `genetic_algorithm/data/v2/automation/`
 - persistenter Stop-Schalter:
   `genetic_algorithm/data/v2/automation/STOP_AUTOMATION`
+- kompakter, automatisch aktualisierter Analysebericht:
+  `genetic_algorithm/data/v2/automation/reports/LATEST.md`
 
 Eigene Pfade können mit `--state-db` und `--automation-root` gesetzt werden. Beide Optionen müssen
 bei Start und Status konsistent verwendet werden.
@@ -90,7 +92,8 @@ denselben Startbefehl erneut ausführen.
 ## Default-Budgets und Entscheidung
 
 - maximal 7 Tage Laufzeit
-- maximal 50 Waves
+- das aktuelle Diagnose-Preset stoppt nach genau einem Root-Wave; erst nach dessen Review darf
+  `automation_controller.max_waves` bewusst erhöht werden
 - maximal 148 Attempts
 - maximal ein paralleler Attempt
 - maximal 40 GiB unter dem Automation-Root
