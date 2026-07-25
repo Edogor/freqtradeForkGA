@@ -215,6 +215,7 @@ def evolution_context_factory(tmp_path: Path):
             )
             config["pair_validation"] = {
                 "enabled": True,
+                "evaluation_mode": "independent_pairs",
                 "training_pairs": [pair],
                 "validation_pairs": [validation_pair],
                 "weight_train": 0.6,

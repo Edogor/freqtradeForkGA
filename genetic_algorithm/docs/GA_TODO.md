@@ -1,7 +1,51 @@
 # GA TODO und Befundregister
 
-Stand: 24.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
+Stand: 25.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
+
+Neunundzwanzigster Slice (25.07.2026): Der Seed-3001-Diagnose-Root
+`wave-root-1f3d3b0a1d702c45a7da` endete nach einem vollständig erfolgreichen,
+hashverifizierten Attempt erwartungsgemäß an `MAX_WAVES_REACHED`. Alle
+Suchbacktests waren technisch erfolgreich; Manifest-, GA- und Island-Seeds
+3001–3004 stimmen überein. Der Worker benötigte etwa 18:32 Minuten, der
+gesamte Service einschließlich Replay und Controller etwa 20:20 Minuten bei
+circa 1,54 GiB Peak-RAM. Alle fünf Finalisten lieferten in allen vier
+Szenarien gültige Messungen, aber keiner war promotionsfähig. Der fachlich
+beste Kandidat (Rang 3) erreichte BTC +10,14 %, BNB +4,89 %, ETH -0,16 % und
+SOL -0,52 %; nur zwei von vier Pairs waren profitabel und die Drawdown-UCBs
+lagen bis 34,13 %. Bei anderen Finalisten verlor SOL bis 11,30 %. Insbesondere
+Expectancy-/Return-LCB, Worst-Return, Drawdown, profitable Pairquote und sehr
+lange Drawdown-Dauern blockierten korrekt.
+
+Die Reproduktion des Search-Scores zeigte einen kritischen Semantikfehler:
+Train und Pair-Validation wurden jeweils als gemeinsames Multi-Pair-Portfolio
+bewertet, während V2 jedes Pair isoliert replayt. Mit
+`max_open_trades: 1` konkurrierten die Pairs im Search-Lauf um denselben Slot
+und verdeckten dadurch eigenständig verlierende Pairs. Beim Rang-1-Finalisten
+meldete das gemeinsame Train-Portfolio +22,65 % und das gemeinsame
+Validation-Portfolio +25,16 %; derselbe unveränderte Phänotyp erzielte isoliert
+BTC +4,78 %, SOL -8,28 %, ETH -4,29 % und BNB -0,74 %. Der Strategiecode war
+zwischen Evolution und Replay hashidentisch; es war kein Genome-Roundtrip-,
+sondern ein Ausführungssemantikfehler.
+
+`automation_island_v2` erzwingt deshalb nun `evaluation_mode:
+independent_pairs`. Jeder Search-Kandidat wird auf jedem Pair einzeln
+backgetestet. Split-Fitness mischt Mittelwert und Worst-Pair und erhält
+zusätzlich nicht kompensierbare, glatte Faktoren für profitable Pairquote,
+maximalen Worst-Pair-Verlust und Trade-Coverage. Ein echter Replay aller fünf
+Seed-3001-Finalisten reproduziert die strikten Pair-Profite und -Tradezahlen
+exakt. Ihre korrigierten Search-Scores liegen bei 0,0285, 0,0331, 0,2310,
+0,0420 und 0,0319 statt ungefähr 0,72–0,74; Rang 3 wird nun sinnvoll zum
+besten, aber weiterhin schwachen Kandidaten.
+
+Die Provenienzbehandlung ignoriert künftig ausschließlich bekannte
+Laufzeitverzeichnisse für Registry, Corpus, Modelle und generierte Strategien.
+Andere tracked Änderungen einschließlich YAML und Lockfiles markieren einen
+Attempt weiterhin als dirty. Damit erzeugen automatisch aktualisierte
+Runtime-Artefakte keinen falschen Code-Patchhash. Das nächste begrenzte
+Diagnose-Preset verwendet Seed 4001. Der detaillierte Wochenlauf-Status und
+seine verbleibenden Go/No-Go-Gates stehen in
+[WEEK_RUN_READINESS_V2.md](WEEK_RUN_READINESS_V2.md).
 
 Achtundzwanzigster Slice (24.07.2026): Der begrenzte Diagnose-Root
 `wave-root-98ffe8fc62db2a7ba0a6` endete nach 13:39 Minuten, 1,5 GiB Peak-RAM
@@ -511,6 +555,12 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   riesige Zahl in Search oder V2 eingehen. Einen endlichen Cap plus explizites
   `profit_factor_censored`-Feld definieren, Cache-/Resultatschema versionieren und Rankings gegen
   gemischte sowie ausreichend große Samples testen.
+- [x] **EVAL-013 – Search- und Promotion-Pairsemantik identisch machen.** Das unattended
+  Generic-Island-Profil replayt jedes deklarierte Pair bereits während der Evolution isoliert,
+  genauso wie das V2-Panel. Gemeinsame Portfolios können dadurch bei kleinem `max_open_trades`
+  keinen verlierenden Pair mehr durch Slotkonkurrenz verstecken. Mittel-/Worst-Pair-Aggregation
+  sowie nicht kompensierbare profitable-Pair-, Worst-Loss- und Trade-Coverage-Faktoren sind
+  konfiguriert, strikt validiert und durch echte Seed-3001-Finalisten-Replays belegt.
 
 ## P0: Validierung und Evolutionslogik
 
@@ -755,6 +805,11 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   deterministisch `attempt_seed + n` im 32-Bit-Raum. Der Report vergleicht Manifest-, GA- und
   Island-Seeds und markiert einen abweichenden historischen Lauf. Guard-/Budget-Exitcode 2 gilt in
   der generierten User-Unit als erfolgreicher, nicht neu zu startender Abschluss.
+- [x] **ORCH-027 – Laufzeitdaten vom Code-Dirtiness-Vertrag trennen.** Änderungen in den
+  bekannten Runtime-Verzeichnissen für Registry, Corpus, trainierte Modelle und generierte
+  Strategien verändern den Code-Manifestzustand nicht. Alle übrigen tracked Dateien bleiben
+  vollständig gebunden; relevante untracked Source-Dateien werden weiterhin einzeln gehasht.
+  Regressionstests decken Runtime-JSON/-Binärdaten, Python-Source und tracked YAML ab.
 
 ## P0: Config-Vertrag
 

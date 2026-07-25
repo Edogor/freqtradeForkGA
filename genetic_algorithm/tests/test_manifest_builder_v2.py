@@ -30,7 +30,14 @@ def _git(root: Path, *arguments: str) -> None:
 def _repository(root: Path) -> None:
     _git(root, "init", "-q")
     (root / "engine.py").write_text("VALUE = 1\n")
-    _git(root, "add", "engine.py")
+    runtime_data = root / "genetic_algorithm" / "data"
+    runtime_data.mkdir(parents=True)
+    (runtime_data / "registry.json").write_text('{"runs": []}\n')
+    runtime_model = root / "genetic_algorithm" / "ml" / "models"
+    runtime_model.mkdir(parents=True)
+    (runtime_model / "archetype_classifier.pkl").write_bytes(b"model-v1")
+    (root / "runtime.yaml").write_text("enabled: true\n")
+    _git(root, "add", "engine.py", "runtime.yaml", "genetic_algorithm")
     _git(
         root,
         "-c",
@@ -67,6 +74,22 @@ def test_code_manifest_detects_tracked_and_untracked_source_changes(tmp_path: Pa
 
     assert clean.dirty is False
     assert clean.dirty_patch_hash is None
+
+    (tmp_path / "genetic_algorithm/data/registry.json").write_text(
+        '{"runs": ["runtime-only"]}\n'
+    )
+    (
+        tmp_path
+        / "genetic_algorithm/ml/models/archetype_classifier.pkl"
+    ).write_bytes(b"model-v2")
+    assert capture_code_manifest(tmp_path) == clean
+
+    (tmp_path / "runtime.yaml").write_text("enabled: false\n")
+    config_dirty = capture_code_manifest(tmp_path)
+    assert config_dirty.dirty is True
+    assert len(config_dirty.dirty_patch_hash or "") == 64
+    (tmp_path / "runtime.yaml").write_text("enabled: true\n")
+    assert capture_code_manifest(tmp_path) == clean
 
     (tmp_path / "engine.py").write_text("VALUE = 2\n")
     (tmp_path / "new_rule.py").write_text("RULE = True\n")

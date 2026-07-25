@@ -305,12 +305,18 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
     "output": {"plots_dir": ""},
     "pair_validation": {
         "enabled": False,
+        "evaluation_mode": "joint",
         "training_pairs": ["BTC/USDT"],
         "validation_pairs": ["ETH/USDT"],
         "weight_train": 0.6,
         "weight_val": 0.4,
         "min_val_fitness": 0.0,
         "validate_top_n_only": 0,
+        "worst_pair_weight": 0.5,
+        "min_profitable_pair_ratio": 0.0,
+        "profitable_pair_penalty_floor": 0.1,
+        "max_pair_loss_pct": 0.0,
+        "worst_pair_loss_penalty_floor": 0.1,
     },
     "generic_island_model": {
         "parallel_islands": False,
@@ -751,6 +757,38 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             "genetic_algorithm.max_runtime_minutes must be a positive integer or null"
         )
 
+    pair_validation = _nested_config(config, ("pair_validation",))
+    if pair_validation.get("enabled", False):
+        evaluation_mode = pair_validation.get("evaluation_mode", "joint")
+        if evaluation_mode not in {"joint", "independent_pairs"}:
+            errors.append(
+                "pair_validation.evaluation_mode must be joint or independent_pairs"
+            )
+        for key in (
+            "worst_pair_weight",
+            "min_profitable_pair_ratio",
+            "profitable_pair_penalty_floor",
+            "worst_pair_loss_penalty_floor",
+        ):
+            value = pair_validation.get(key, 0.0)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                errors.append(f"pair_validation.{key} must be between 0 and 1")
+        max_pair_loss_pct = pair_validation.get("max_pair_loss_pct", 0.0)
+        if (
+            not isinstance(max_pair_loss_pct, (int, float))
+            or isinstance(max_pair_loss_pct, bool)
+            or not math.isfinite(max_pair_loss_pct)
+            or max_pair_loss_pct < 0.0
+        ):
+            errors.append(
+                "pair_validation.max_pair_loss_pct must be a finite non-negative number"
+            )
+
     # --- NSGA-II contract ---
     mode = ga.get("mode")
     if mode == "multi_objective":
@@ -1023,6 +1061,11 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         pair_validation = _nested_config(config, ("pair_validation",))
         if not pair_validation.get("enabled", False):
             errors.append("automation_island_v2 requires pair_validation.enabled: true")
+        if pair_validation.get("evaluation_mode") != "independent_pairs":
+            errors.append(
+                "automation_island_v2 requires "
+                "pair_validation.evaluation_mode: independent_pairs"
+            )
         if pair_validation.get("validate_top_n_only", 0) != 0:
             errors.append(
                 "automation_island_v2 requires pair_validation.validate_top_n_only: 0"
@@ -1072,6 +1115,11 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         if not pair_validation.get("enabled", False):
             errors.append(
                 "automation_island_child_v2 requires pair_validation.enabled: true"
+            )
+        if pair_validation.get("evaluation_mode") != "independent_pairs":
+            errors.append(
+                "automation_island_child_v2 requires "
+                "pair_validation.evaluation_mode: independent_pairs"
             )
         if pair_validation.get("validate_top_n_only", 0) != 0:
             errors.append(

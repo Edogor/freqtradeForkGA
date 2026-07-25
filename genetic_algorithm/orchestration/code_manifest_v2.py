@@ -67,6 +67,7 @@ _SOURCE_SUFFIXES = {
 _EXCLUDED_PARTS = {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__"}
 _RUNTIME_SOURCE_PREFIXES = {
     ("genetic_algorithm", "data"),
+    ("genetic_algorithm", "ml", "models"),
     ("user_data", "strategies"),
 }
 
@@ -117,13 +118,43 @@ def _path_content(path: Path) -> bytes:
     return b"file\0" + path.read_bytes()
 
 
+def _is_runtime_or_excluded_path(relative: str) -> bool:
+    relative_path = Path(relative)
+    if any(part in _EXCLUDED_PARTS for part in relative_path.parts):
+        return True
+    if any(
+        tuple(relative_path.parts[: len(prefix)]) == prefix
+        for prefix in _RUNTIME_SOURCE_PREFIXES
+    ):
+        return True
+    return False
+
+
+def _is_relevant_untracked_source_path(relative: str) -> bool:
+    if _is_runtime_or_excluded_path(relative):
+        return False
+    return Path(relative).suffix.lower() in _SOURCE_SUFFIXES
+
+
 def _tracked_state_hash(root: Path) -> str:
-    raw_state = _git(root, "diff", "HEAD", "--raw", "--no-abbrev", "--no-ext-diff", "-z", "--")
     changed_paths = _git(root, "diff", "HEAD", "--name-only", "--no-ext-diff", "-z", "--")
-    chunks = [raw_state]
+    chunks = [b""]
     for raw_path in sorted(item for item in changed_paths.split(b"\0") if item):
         relative, path = _safe_repo_path(root, raw_path)
-        chunks.extend([os.fsencode(relative), _path_content(path)])
+        if _is_runtime_or_excluded_path(relative):
+            continue
+        raw_state = _git(
+            root,
+            "diff",
+            "HEAD",
+            "--raw",
+            "--no-abbrev",
+            "--no-ext-diff",
+            "-z",
+            "--",
+            relative,
+        )
+        chunks.extend([raw_state, os.fsencode(relative), _path_content(path)])
     return _digest_chunks(chunks)
 
 
@@ -132,15 +163,7 @@ def _untracked_source_files(root: Path) -> list[UntrackedSourceFileV2]:
     snapshots = []
     for raw_path in sorted(item for item in raw_files.split(b"\0") if item):
         relative, path = _safe_repo_path(root, raw_path)
-        relative_path = Path(relative)
-        if any(part in _EXCLUDED_PARTS for part in relative_path.parts):
-            continue
-        if any(
-            tuple(relative_path.parts[: len(prefix)]) == prefix
-            for prefix in _RUNTIME_SOURCE_PREFIXES
-        ):
-            continue
-        if relative_path.suffix.lower() not in _SOURCE_SUFFIXES:
+        if not _is_relevant_untracked_source_path(relative):
             continue
         content = _path_content(path)
         snapshots.append(

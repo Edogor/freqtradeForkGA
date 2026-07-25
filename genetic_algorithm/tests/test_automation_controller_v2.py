@@ -71,8 +71,12 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources():
         ),
         automation_root=repo_root / "genetic_algorithm/data/v2/automation",
     )
-    assert policy.root_seeds == [3001]
+    assert policy.root_seeds == [4001]
     assert policy.max_waves == 1
+    assert report.config_hash
+    assert load_config(
+        repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml"
+    )["pair_validation"]["evaluation_mode"] == "independent_pairs"
 
 
 def test_systemd_unit_restarts_crashes_but_not_guarded_stop(tmp_path: Path):
@@ -478,12 +482,18 @@ def test_real_mini_controller_executes_root_and_queues_next_wave(tmp_path: Path)
         )
         config["pair_validation"] = {
             "enabled": True,
+            "evaluation_mode": "independent_pairs",
             "training_pairs": [train_pair],
             "validation_pairs": [validation_pair],
             "weight_train": 0.6,
             "weight_val": 0.4,
             "min_val_fitness": 0.0,
             "validate_top_n_only": 0,
+            "worst_pair_weight": 0.5,
+            "min_profitable_pair_ratio": 0.0,
+            "profitable_pair_penalty_floor": 0.1,
+            "max_pair_loss_pct": 0.0,
+            "worst_pair_loss_penalty_floor": 0.1,
         }
         promotion = ShadowGatePolicyV2(
             policy_version="automation-controller-mini-v2",

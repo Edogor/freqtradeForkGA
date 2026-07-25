@@ -1,6 +1,6 @@
 # Betriebs-Runbook: Guarded Generic-Island-Automation V2
 
-Stand: 24.07.2026
+Stand: 25.07.2026
 
 Dieser Pfad automatisiert ausschließlich die **Strategie-Suche im Shadow-Modus**. Er deployt keine
 Strategie und autorisiert kein Live-/Paper-Trading. Das Profil
@@ -18,6 +18,12 @@ Regime- und Classic-Island-Pfade.
 Der mitgelieferte Datensatzvertrag erwartet aktuell BTC/SOL als Training und ETH/BNB als räumliche
 Validation auf 1h für `20230325-20260327`. Fehlende Dateien, Candle-Lücken, abweichende Hashes oder
 eine veränderte Config blockieren vor Ausführung.
+
+Im Profil `automation_island_v2` wird jedes Pair bereits während der Suche
+isoliert backgetestet. Gemeinsame Multi-Pair-Portfolios sind untersagt, weil
+Slotkonkurrenz bei kleinem `max_open_trades` verlierende Pairs verdecken kann.
+Vor einem unbeaufsichtigten Wochenlauf müssen zusätzlich alle Punkte in
+[WEEK_RUN_READINESS_V2.md](WEEK_RUN_READINESS_V2.md) erfüllt sein.
 
 Der read-only Produktions-Preflight prüft zusätzlich Venv, Daten-/Split-/Codehash, freien
 Plattenplatz und verfügbaren RAM:

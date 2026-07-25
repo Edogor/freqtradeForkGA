@@ -441,6 +441,12 @@ class FitnessEvaluator:
             Tuple of (composite_fitness, metrics_dict)
         """
         pv = self.pair_validation_config
+        if pv.get("evaluation_mode", "joint") == "independent_pairs":
+            return self._evaluate_pair_split_independent(
+                strategy_gene,
+                skip_validation=skip_validation,
+            )
+
         training_pairs = pv.get('training_pairs', [])
         validation_pairs = pv.get('validation_pairs', [])
         weight_train = pv.get('weight_train', 0.6)
@@ -643,6 +649,425 @@ class FitnessEvaluator:
                 'profit': 0.0, 'num_trades': 0,
                 'complexity': strategy_gene.calculate_complexity(),
                 'error': str(e)
+            }
+
+    def _aggregate_independent_pair_metrics(
+        self,
+        pair_metrics: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build a pessimistic split summary from independently replayed pairs.
+
+        Joint pair backtests with ``max_open_trades=1`` let pairs compete for a
+        single portfolio slot.  That portfolio-selection effect can make every
+        joint per-pair result look profitable while the same frozen strategy
+        loses when a pair is replayed on its own.  The strict V2 promotion
+        panel is pair-independent, so the search contract must use the same
+        evidence.
+        """
+
+        worst_weight = float(
+            self.pair_validation_config.get("worst_pair_weight", 0.5)
+        )
+        worst_weight = max(0.0, min(worst_weight, 1.0))
+
+        def pessimistic(key: str, *, lower_is_better: bool = False) -> float:
+            values = [
+                float(metrics[key])
+                for metrics in pair_metrics.values()
+                if isinstance(metrics.get(key), (int, float))
+                and not isinstance(metrics.get(key), bool)
+                and math.isfinite(float(metrics[key]))
+            ]
+            if not values:
+                return 0.0
+            mean_value = sum(values) / len(values)
+            worst_value = max(values) if lower_is_better else min(values)
+            return (1.0 - worst_weight) * mean_value + worst_weight * worst_value
+
+        per_pair_profit = {
+            pair: float(metrics.get("profit", 0.0))
+            for pair, metrics in pair_metrics.items()
+        }
+        per_pair_trades = {
+            pair: int(metrics.get("num_trades", 0))
+            for pair, metrics in pair_metrics.items()
+        }
+        profits = list(per_pair_profit.values())
+        mean_profit = sum(profits) / len(profits) if profits else 0.0
+        pair_profit_std = (
+            (
+                sum((profit - mean_profit) ** 2 for profit in profits)
+                / len(profits)
+            )
+            ** 0.5
+            if profits
+            else 0.0
+        )
+        total_trades = sum(per_pair_trades.values())
+
+        summary: Dict[str, Any] = {
+            "profit": pessimistic("profit"),
+            "sharpe_ratio": pessimistic("sharpe_ratio"),
+            "sortino_ratio": pessimistic("sortino_ratio"),
+            "profit_factor": pessimistic("profit_factor"),
+            "max_drawdown": pessimistic(
+                "max_drawdown",
+                lower_is_better=True,
+            ),
+            "win_rate": pessimistic("win_rate"),
+            "avg_profit": pessimistic("avg_profit"),
+            "num_trades": total_trades,
+            "per_pair_profit": per_pair_profit,
+            "per_pair_trades": per_pair_trades,
+            "pair_profit_std": pair_profit_std,
+            "worst_pair_profit": min(profits) if profits else 0.0,
+            "worst_pair_trades": (
+                min(per_pair_trades.values()) if per_pair_trades else 0
+            ),
+            "active_pair_ratio": (
+                sum(trades > 0 for trades in per_pair_trades.values())
+                / len(per_pair_trades)
+                if per_pair_trades
+                else 0.0
+            ),
+            "independent_pair_evaluation": True,
+            "independent_pair_worst_weight": worst_weight,
+            "independent_pair_metrics": {
+                pair: {
+                    "profit": metrics.get("profit", 0.0),
+                    "num_trades": metrics.get("num_trades", 0),
+                    "max_drawdown": metrics.get("max_drawdown", 0.0),
+                    "sharpe_ratio": metrics.get("sharpe_ratio", 0.0),
+                    "profit_factor": metrics.get("profit_factor", 0.0),
+                }
+                for pair, metrics in pair_metrics.items()
+            },
+        }
+        drawdown_duration = [
+            metrics.get("max_drawdown_duration_days")
+            for metrics in pair_metrics.values()
+            if metrics.get("max_drawdown_duration_days") is not None
+        ]
+        if drawdown_duration:
+            summary["max_drawdown_duration_days"] = max(drawdown_duration)
+        consecutive_losses = [
+            metrics.get("max_consecutive_losses")
+            for metrics in pair_metrics.values()
+            if metrics.get("max_consecutive_losses") is not None
+        ]
+        if consecutive_losses:
+            summary["max_consecutive_losses"] = max(consecutive_losses)
+        return summary
+
+    def _evaluate_independent_pair_group(
+        self,
+        *,
+        strategy_code: str,
+        generated_name: str,
+        strategy_gene: StrategyGene,
+        pairs: List[str],
+        split_name: str,
+    ) -> Tuple[float, Dict[str, Any], Optional[str]]:
+        """Replay every pair alone and score a pessimistic split aggregate."""
+
+        pair_metrics: Dict[str, Dict[str, Any]] = {}
+        for pair in pairs:
+            result = self.backtester.backtest_strategy(
+                strategy_code,
+                generated_name,
+                strategy_max_open_trades=strategy_gene.max_open_trades,
+                pairs_override=[pair],
+            )
+            if not result.success:
+                logger.warning(
+                    "[PAIR-SPLIT] %s: independent %s backtest failed for %s",
+                    generated_name,
+                    split_name,
+                    pair,
+                )
+                return 0.0, {}, f"{split_name}_backtest_failed:{pair}"
+            metrics = self._backtest_result_to_metrics(result)
+            metrics["complexity"] = strategy_gene.calculate_complexity()
+            pair_metrics[pair] = metrics
+
+        summary = self._aggregate_independent_pair_metrics(pair_metrics)
+        summary["complexity"] = strategy_gene.calculate_complexity()
+        fitness = self.calculate_fitness(
+            summary,
+            strategy_gene,
+            apply_pair_coverage=False,
+        )
+        return fitness, summary, None
+
+    def _profitable_pair_multiplier(self, per_pair_profit: Dict[str, float]) -> float:
+        if not per_pair_profit:
+            return 0.0
+        required = float(
+            self.pair_validation_config.get("min_profitable_pair_ratio", 0.0)
+        )
+        if required <= 0.0:
+            return 1.0
+        ratio = sum(profit > 0.0 for profit in per_pair_profit.values()) / len(
+            per_pair_profit
+        )
+        if ratio >= required:
+            return 1.0
+        floor = float(
+            self.pair_validation_config.get(
+                "profitable_pair_penalty_floor",
+                0.1,
+            )
+        )
+        floor = max(0.0, min(floor, 1.0))
+        progress = max(0.0, min(ratio / required, 1.0))
+        return floor + (1.0 - floor) * progress**2
+
+    def _worst_pair_loss_multiplier(
+        self,
+        per_pair_profit: Dict[str, float],
+    ) -> float:
+        if not per_pair_profit:
+            return 0.0
+        max_loss = float(
+            self.pair_validation_config.get("max_pair_loss_pct", 0.0)
+        )
+        if max_loss <= 0.0:
+            return 1.0
+        worst_profit = min(per_pair_profit.values())
+        if worst_profit >= -max_loss:
+            return 1.0
+        floor = float(
+            self.pair_validation_config.get(
+                "worst_pair_loss_penalty_floor",
+                0.1,
+            )
+        )
+        floor = max(0.0, min(floor, 1.0))
+        progress = max(0.0, min(max_loss / abs(worst_profit), 1.0))
+        return floor + (1.0 - floor) * progress**2
+
+    def _evaluate_pair_split_independent(
+        self,
+        strategy_gene: StrategyGene,
+        *,
+        skip_validation: bool,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Evaluate pair-split fitness on the same independent panel as V2."""
+
+        pv = self.pair_validation_config
+        training_pairs = list(pv.get("training_pairs", []))
+        validation_pairs = list(pv.get("validation_pairs", []))
+        weight_train = float(pv.get("weight_train", 0.6))
+        weight_val = float(pv.get("weight_val", 0.4))
+        weight_total = weight_train + weight_val
+        if weight_total > 0.0:
+            weight_train /= weight_total
+            weight_val /= weight_total
+        generated_name = (
+            f"GAStrategy_Gen{strategy_gene.generation}_Ind"
+            f"{strategy_gene.individual_id}"
+        )
+
+        try:
+            strategy_code = self.strategy_generator.generate_strategy_code(
+                strategy_gene
+            )
+            train_fitness, train_metrics, error = (
+                self._evaluate_independent_pair_group(
+                    strategy_code=strategy_code,
+                    generated_name=generated_name,
+                    strategy_gene=strategy_gene,
+                    pairs=training_pairs,
+                    split_name="train",
+                )
+            )
+            if error:
+                return 0.0, {
+                    "profit": 0.0,
+                    "num_trades": 0,
+                    "error": error,
+                }
+
+            train_coverage = self._pair_trade_coverage_multiplier(train_metrics)
+            train_profitability = self._profitable_pair_multiplier(
+                train_metrics["per_pair_profit"]
+            )
+            train_loss = self._worst_pair_loss_multiplier(
+                train_metrics["per_pair_profit"]
+            )
+            if skip_validation:
+                discount = weight_train + weight_val * 0.8
+                score = (
+                    train_fitness
+                    * discount
+                    * train_coverage
+                    * train_profitability
+                    * train_loss
+                )
+                return score, {
+                    **train_metrics,
+                    "train_fitness": train_fitness,
+                    "val_fitness": None,
+                    "training_only": True,
+                    "training_pairs": ",".join(training_pairs),
+                    "validation_pairs": ",".join(validation_pairs),
+                    "train_per_pair_profit": train_metrics["per_pair_profit"],
+                    "train_per_pair_trades": train_metrics["per_pair_trades"],
+                    "train_worst_pair_trades": train_metrics[
+                        "worst_pair_trades"
+                    ],
+                    "train_active_pair_ratio": train_metrics[
+                        "active_pair_ratio"
+                    ],
+                    "train_pair_trade_coverage_multiplier": train_coverage,
+                    "pair_split_profitable_pair_multiplier": train_profitability,
+                    "pair_split_worst_pair_loss_multiplier": train_loss,
+                }
+
+            val_fitness, val_metrics, error = (
+                self._evaluate_independent_pair_group(
+                    strategy_code=strategy_code,
+                    generated_name=generated_name,
+                    strategy_gene=strategy_gene,
+                    pairs=validation_pairs,
+                    split_name="val",
+                )
+            )
+            if error:
+                return 0.0, {
+                    "profit": 0.0,
+                    "num_trades": 0,
+                    "error": error,
+                }
+
+            train_coverage = self._pair_trade_coverage_multiplier(train_metrics)
+            val_coverage = self._pair_trade_coverage_multiplier(val_metrics)
+            pair_coverage = min(train_coverage, val_coverage)
+            all_pair_profit = {
+                **train_metrics["per_pair_profit"],
+                **val_metrics["per_pair_profit"],
+            }
+            profitable_pair_ratio = sum(
+                profit > 0.0 for profit in all_pair_profit.values()
+            ) / len(all_pair_profit)
+            profitable_pair_multiplier = self._profitable_pair_multiplier(
+                all_pair_profit
+            )
+            worst_pair_loss_multiplier = self._worst_pair_loss_multiplier(
+                all_pair_profit
+            )
+            composite = (
+                train_fitness * weight_train + val_fitness * weight_val
+            )
+            composite *= (
+                pair_coverage
+                * profitable_pair_multiplier
+                * worst_pair_loss_multiplier
+            )
+
+            min_val_fitness = float(pv.get("min_val_fitness", 0.0))
+            if min_val_fitness > 0.0 and val_fitness < min_val_fitness:
+                composite *= max(0.0, val_fitness / min_val_fitness)
+
+            metrics: Dict[str, Any] = {
+                "profit": train_metrics["profit"],
+                "sharpe_ratio": train_metrics["sharpe_ratio"],
+                "sortino_ratio": train_metrics["sortino_ratio"],
+                "max_drawdown": train_metrics["max_drawdown"],
+                "win_rate": train_metrics["win_rate"],
+                "num_trades": train_metrics["num_trades"],
+                "profit_factor": train_metrics["profit_factor"],
+                "complexity": train_metrics["complexity"],
+                "train_fitness": train_fitness,
+                "val_fitness": val_fitness,
+                "pair_generalization_ratio": val_fitness
+                / (train_fitness + 1e-8),
+                "val_profit": val_metrics["profit"],
+                "val_sharpe": val_metrics["sharpe_ratio"],
+                "val_trades": val_metrics["num_trades"],
+                "val_max_drawdown": val_metrics["max_drawdown"],
+                "val_win_rate": val_metrics["win_rate"],
+                "training_pairs": ",".join(training_pairs),
+                "validation_pairs": ",".join(validation_pairs),
+                "train_per_pair_profit": train_metrics["per_pair_profit"],
+                "train_per_pair_trades": train_metrics["per_pair_trades"],
+                "train_worst_pair_trades": train_metrics[
+                    "worst_pair_trades"
+                ],
+                "train_active_pair_ratio": train_metrics["active_pair_ratio"],
+                "train_pair_trade_coverage_multiplier": train_coverage,
+                "val_per_pair_profit": val_metrics["per_pair_profit"],
+                "val_per_pair_trades": val_metrics["per_pair_trades"],
+                "val_worst_pair_trades": val_metrics["worst_pair_trades"],
+                "val_active_pair_ratio": val_metrics["active_pair_ratio"],
+                "val_pair_trade_coverage_multiplier": val_coverage,
+                "pair_split_trade_coverage_multiplier": pair_coverage,
+                "pair_split_profitable_pair_ratio": profitable_pair_ratio,
+                "pair_split_profitable_pair_multiplier": (
+                    profitable_pair_multiplier
+                ),
+                "pair_split_worst_pair_profit": min(all_pair_profit.values()),
+                "pair_split_worst_pair_loss_multiplier": (
+                    worst_pair_loss_multiplier
+                ),
+                "independent_pair_evaluation": True,
+                "independent_pair_worst_weight": train_metrics[
+                    "independent_pair_worst_weight"
+                ],
+                "train_independent_pair_metrics": train_metrics[
+                    "independent_pair_metrics"
+                ],
+                "val_independent_pair_metrics": val_metrics[
+                    "independent_pair_metrics"
+                ],
+                "holdout_fitness": val_fitness,
+                "holdout_degradation": (
+                    (train_fitness - val_fitness)
+                    / max(abs(train_fitness), 1e-4)
+                    if train_fitness > 1e-8
+                    else 0.0
+                ),
+                "holdout_profit": val_metrics["profit"],
+                "holdout_trades": val_metrics["num_trades"],
+                "holdout_drawdown": val_metrics["max_drawdown"],
+                "train_val_gap": (
+                    (train_fitness - val_fitness)
+                    / max(abs(train_fitness), 1e-4)
+                    if train_fitness > 1e-4
+                    else 0.0
+                ),
+            }
+            if any(
+                trades == 0
+                for trades in (
+                    list(train_metrics["per_pair_trades"].values())
+                    + list(val_metrics["per_pair_trades"].values())
+                )
+            ):
+                metrics["no_trades"] = True
+            logger.info(
+                "[PAIR-SPLIT-INDEPENDENT] %s: train=%.4f val=%.4f "
+                "composite=%.4f positive_pairs=%.2f worst_pair=%.2f%%",
+                generated_name,
+                train_fitness,
+                val_fitness,
+                composite,
+                profitable_pair_ratio,
+                min(all_pair_profit.values()),
+            )
+            return composite, metrics
+        except Exception as exc:
+            logger.error(
+                "[PAIR-SPLIT-INDEPENDENT] Error evaluating %s: %s",
+                generated_name,
+                exc,
+                exc_info=True,
+            )
+            return 0.0, {
+                "profit": 0.0,
+                "num_trades": 0,
+                "complexity": strategy_gene.calculate_complexity(),
+                "error": str(exc),
             }
     
     def run_deferred_validation(self, population) -> int:

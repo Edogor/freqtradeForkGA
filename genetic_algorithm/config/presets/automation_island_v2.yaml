@@ -19,8 +19,8 @@ safety_profile:
 # the persisted report produced for the root.
 automation_controller:
   # Keep every diagnostic campaign distinct in the immutable wave namespace.
-  # Seed 2001 belongs to the completed historical diagnosis.
-  root_seeds: [3001]
+  # Seeds 2001 and 3001 belong to completed historical diagnoses.
+  root_seeds: [4001]
   max_waves: 1
 
 backtesting:
@@ -107,6 +107,10 @@ generic_island_model:
 
 pair_validation:
   enabled: true
+  # Search and strict V2 promotion must observe the same pair semantics.
+  # Joint portfolios can hide a losing pair when max_open_trades is smaller
+  # than the pair count, so every pair is replayed independently.
+  evaluation_mode: independent_pairs
   training_pairs: [BTC/USDT, SOL/USDT]
   validation_pairs: [ETH/USDT, BNB/USDT]
   weight_train: 0.6
@@ -115,6 +119,13 @@ pair_validation:
   # Zero means every evaluated candidate receives pair validation. Deferred
   # top-N validation is intentionally forbidden in the unattended profile.
   validate_top_n_only: 0
+  # Blend each split's mean evidence with its worst pair, then apply smooth
+  # non-compensable penalties aligned with the strict promotion gates.
+  worst_pair_weight: 0.5
+  min_profitable_pair_ratio: 0.75
+  profitable_pair_penalty_floor: 0.1
+  max_pair_loss_pct: 5.0
+  worst_pair_loss_penalty_floor: 0.1
 
 # Keep the cheap search objective directionally aligned with the strict replay
 # panel. Sixty trades per pair corresponds to the promotion floor of twelve

@@ -10,6 +10,7 @@ This folder contains all documentation for the FreqTrade Genetic Algorithm Strat
 > - [GA_EVALUATION_SPEC.md](GA_EVALUATION_SPEC.md) — target evaluation and promotion contract
 > - [NEXT_WAVE_AUTOMATION_PLAN.md](NEXT_WAVE_AUTOMATION_PLAN.md) — guarded automation design
 > - [AUTOMATION_RUNBOOK_V2.md](AUTOMATION_RUNBOOK_V2.md) — start, restart, status and kill switch
+> - [WEEK_RUN_READINESS_V2.md](WEEK_RUN_READINESS_V2.md) — go/no-go checklist for the first week run
 > - [GA_TODO.md](GA_TODO.md) — prioritized implementation backlog
 > - [GENOME_MIGRATION_GUIDE.md](GENOME_MIGRATION_GUIDE.md) — fail-closed migration of legacy seeds
 
@@ -22,6 +23,7 @@ docs/
 ├── GA_EVALUATION_SPEC.md     # Target metric and promotion semantics
 ├── NEXT_WAVE_AUTOMATION_PLAN.md
 ├── AUTOMATION_RUNBOOK_V2.md
+├── WEEK_RUN_READINESS_V2.md
 ├── GENOME_MIGRATION_GUIDE.md
 ├── GA_TODO.md                # Prioritized repair and feature backlog
 ├── features/                 # Feature documentation
@@ -89,6 +91,7 @@ docs/
 | [GA_EVALUATION_SPEC.md](GA_EVALUATION_SPEC.md) | Proposed equity-, risk- and confidence-aware evaluation model |
 | [NEXT_WAVE_AUTOMATION_PLAN.md](NEXT_WAVE_AUTOMATION_PLAN.md) | Transactional lifecycle and staged next-wave automation |
 | [AUTOMATION_RUNBOOK_V2.md](AUTOMATION_RUNBOOK_V2.md) | Operational guarded-automation runbook |
+| [WEEK_RUN_READINESS_V2.md](WEEK_RUN_READINESS_V2.md) | Evidence and remaining gates for first week run |
 | [GA_TODO.md](GA_TODO.md) | Prioritized issues, acceptance criteria and work order |
 | [GENOME_MIGRATION_GUIDE.md](GENOME_MIGRATION_GUIDE.md) | Reproducible legacy-genome migration and warm-start binding |
 

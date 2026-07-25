@@ -386,6 +386,30 @@ def test_v2_contract_declares_active_short_surrogate_and_nsga_fields(tmp_path):
     assert not any("unknown config paths" in error for error in resolve_config(path).errors)
 
 
+def test_v2_contract_validates_independent_pair_search_controls(tmp_path):
+    path = _write(
+        tmp_path,
+        {
+            "config_schema_version": 2,
+            "pair_validation": {
+                "enabled": True,
+                "evaluation_mode": "portfolio_magic",
+                "worst_pair_weight": 1.1,
+                "min_profitable_pair_ratio": -0.1,
+                "profitable_pair_penalty_floor": 0.1,
+                "max_pair_loss_pct": -5.0,
+                "worst_pair_loss_penalty_floor": 0.1,
+            },
+        },
+    )
+
+    errors = resolve_config(path).errors
+    assert any("evaluation_mode" in error for error in errors)
+    assert any("worst_pair_weight" in error for error in errors)
+    assert any("min_profitable_pair_ratio" in error for error in errors)
+    assert any("max_pair_loss_pct" in error for error in errors)
+
+
 @pytest.mark.parametrize(
     ("override", "expected_error"),
     [
