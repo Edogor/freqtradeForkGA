@@ -311,6 +311,14 @@ def adapt_shadow_backtest_result(
             else None
         ),
         profit_factor=result.profit_factor if result.total_trades > 0 else None,
+        profit_factor_censored=(
+            result.profit_factor_censored if result.total_trades > 0 else None
+        ),
+        profit_factor_contract_version=(
+            result.profit_factor_contract_version
+            if result.total_trades > 0
+            else None
+        ),
         win_rate=result.win_rate if result.total_trades > 0 else None,
         trade_count=max(0, result.total_trades),
         effective_sample_size=(

@@ -7,7 +7,7 @@ Stand: 25.07.2026
 **NO-GO für den sofortigen Wochenstart.** Der Seed-3001-Lauf war technisch
 stabil, hat aber einen wesentlichen Search-/Replay-Semantikfehler sichtbar
 gemacht. Die Korrektur ist implementiert. Vor einem siebentägigen Lauf fehlen
-noch zwei reale Kurzlauf-Nachweise und eine begrenzte Metrikkorrektur.
+noch zwei reale Kurzlauf-Nachweise.
 
 Der Wochenlauf bleibt ein Search-only-Shadow-Lauf. Auch ein vollständig
 bestandener Wochenlauf autorisiert weder Paper- noch Live-Trading und ist kein
@@ -25,6 +25,10 @@ Ersatz für ein bisher unberührtes finales Pair-x-Zeit-Panel.
 - Search und V2 verwenden nach der Korrektur beide isolierte Pair-Replays.
   Ein Replay aller fünf Seed-3001-Finalisten reproduziert Pair-Profite und
   Tradezahlen exakt.
+- Profitable Zero-Loss-Samples besitzen einen versionierten, endlichen und
+  explizit rechtszensierten Profit Factor. Kleine zensierte Samples erhalten
+  im Search-Score erst mit wachsender Tradezahl Vertrauen; Cache-Schema 9 und
+  V2-Metrikschema 2.1 trennen die neue Semantik von Altdaten.
 - Der beobachtete Root benötigte rund 23 MiB Artefaktspeicher und etwa
   1,54 GiB Peak-RAM. Die vorhandenen 40-GiB-/20-GiB-Reserve- und
   2-GiB-RAM-Gates bleiben deutlich konservativer.
@@ -38,12 +42,11 @@ Ersatz für ein bisher unberührtes finales Pair-x-Zeit-Panel.
 Das Diagnose-Preset bleibt auf `max_waves: 1`. Der Lauf muss den neuen
 `independent_pairs`-Search-Pfad real ausführen.
 
-Vorher wird die abgeschlossene Seed-3001-Kampagne mit State-DB, Root-Artefakten
-und immutable Bericht recoverable archiviert. Erst danach werden die aktiven
-State-/Automation-Pfade für die neue Kampagne freigegeben. Der Preflight muss
-einen noch vorhandenen Bootstrap-Intent mit abweichender Config, Policy oder
-Seed ausdrücklich blockieren; ein bloß grüner Daten-/Ressourcencheck genügt
-nicht.
+Die abgeschlossene Seed-3001-Kampagne ist mit State-DB, Root-Artefakten und
+immutable Bericht recoverable archiviert. Die aktiven State-/Automation-Pfade
+sind für Seed 4001 frei. Der Preflight blockiert einen noch vorhandenen
+Bootstrap-Intent mit abweichender Config, Policy oder Seed ausdrücklich; ein
+bloß grüner Daten-/Ressourcencheck genügt nicht.
 
 Go-Kriterien:
 
@@ -84,24 +87,7 @@ Die synthetischen E2E-Tests belegen diese Mechanik bereits, ein vollständiger
 realer Generic-Island-Child wurde im aktuellen Produktionspfad aber noch nicht
 ausgeführt. Das ist der wichtigste verbleibende Automationsnachweis.
 
-### 3. `EVAL-012` abschließen
-
-Positive Stichproben ohne Verlusttrade werden von der aktuellen
-Freqtrade-Ausgabe als Profit Factor `0.0` dargestellt. Vor einer langen Suche
-muss dies als rechtszensierte Messung mit explizitem Flag und endlichem,
-versioniertem Cap behandelt werden. Sonst kann eine seltene All-Winner-
-Stichprobe falsch schlecht oder nach einer Ad-hoc-Korrektur beliebig gut
-gerankt werden.
-
-Erforderlich sind Cache-/Resultatschema-Bump sowie Tests für:
-
-- keine Trades;
-- nur Gewinner;
-- Gewinner und Verlierer;
-- kleine zensierte Samples gegen ausreichend große gemischte Samples;
-- identische Semantik in Search, gespeichertem Resultat und V2-Replay.
-
-### 4. Wochenprofil und Betriebsprobe separat freigeben
+### 3. Wochenprofil und Betriebsprobe separat freigeben
 
 Das Diagnose-Preset wird nicht direkt zum Wochenprofil umgebaut. Nach den
 beiden Canaries wird ein separates, strikt validiertes Wochenpreset angelegt.
@@ -132,11 +118,10 @@ Unmittelbar vor dem Start:
 ## Empfohlene Reihenfolge
 
 1. Aktuelle Korrektur testen, committen und ohne Laufzeitdaten pushen.
-2. Seed 3001 recoverable archivieren; danach muss der Seed-4001-Preflight grün
-   sein.
+2. Der Seed-4001-Preflight muss nach der abgeschlossenen Seed-3001-Archivierung
+   grün sein.
 3. Seed-4001-Diagnose-Root starten und nach Abschluss analysieren.
-4. `EVAL-012` implementieren und testen.
-5. Reales Zwei-Wave-Canary ausführen und Restart/Child-Vertrag prüfen.
-6. Laufzeit- und Speicherbudgets aus Seed 4001 plus Canary kalibrieren.
-7. Separates Wochenpreset erstellen, Preflight und Operatorprobe bestehen.
-8. Erst dann den einwöchigen Search-only-Lauf starten.
+4. Reales Zwei-Wave-Canary ausführen und Restart/Child-Vertrag prüfen.
+5. Laufzeit- und Speicherbudgets aus Seed 4001 plus Canary kalibrieren.
+6. Separates Wochenpreset erstellen, Preflight und Operatorprobe bestehen.
+7. Erst dann den einwöchigen Search-only-Lauf starten.

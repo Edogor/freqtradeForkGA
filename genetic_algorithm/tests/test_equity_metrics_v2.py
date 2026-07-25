@@ -534,6 +534,34 @@ def test_direct_backtest_parser_keeps_missing_equity_as_none():
     assert result.equity_error_message is not None
 
 
+def test_direct_parser_versions_profitable_zero_loss_profit_factor():
+    from genetic_algorithm.evaluation.direct_backtester import DirectBacktester
+    from genetic_algorithm.evaluation.profit_factor_v2 import (
+        PROFIT_FACTOR_CENSORED_CAP,
+        PROFIT_FACTOR_CONTRACT_VERSION,
+    )
+
+    parser = object.__new__(DirectBacktester)
+    result = parser._parse_stats(
+        {
+            "profit_total": 0.02,
+            "profit_total_abs": 2.0,
+            "total_trades": 3,
+            "wins": 3,
+            "losses": 0,
+            "profit_factor": 0.0,
+        },
+        "AllWinnerStrategy",
+    )
+
+    assert result.profit_factor == PROFIT_FACTOR_CENSORED_CAP
+    assert result.profit_factor_censored is True
+    assert (
+        result.profit_factor_contract_version
+        == PROFIT_FACTOR_CONTRACT_VERSION
+    )
+
+
 def test_result_contract_rejects_realized_close_equity_as_valid():
     from pydantic import ValidationError
 
@@ -577,9 +605,13 @@ def test_result_contract_rejects_realized_close_equity_as_valid():
                 "daily_expected_shortfall_5": 0.01,
                 "daily_expected_shortfall_5_ucb": 0.015,
                 "net_expectancy": 0.01,
-                "net_expectancy_lcb": 0.001,
-                "profit_factor": 1.5,
-                "win_rate": 0.6,
+                    "net_expectancy_lcb": 0.001,
+                    "profit_factor": 1.5,
+                    "profit_factor_censored": False,
+                    "profit_factor_contract_version": (
+                        "right-censored-profit-factor-v1"
+                    ),
+                    "win_rate": 0.6,
                 "effective_sample_size": 1.0,
                 **expectancy_metrics(
                     trade_count=1,

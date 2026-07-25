@@ -93,6 +93,11 @@ class TestBacktestCacheV2:
         assert payload["max_drawdown_duration_days"] == 4.5
         assert payload["trade_profit_ratios"] == result.trade_profit_ratios
         assert payload["no_trades"] is False
+        assert payload["profit_factor_censored"] is False
+        assert (
+            payload["profit_factor_contract_version"]
+            == "right-censored-profit-factor-v1"
+        )
 
     def test_ram_and_disk_hits_have_identical_metric_payloads(self, tmp_path: Path):
         from genetic_algorithm.evaluation.cache import BacktestCache, CACHE_SCHEMA_VERSION

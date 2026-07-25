@@ -73,9 +73,13 @@ def _record(
             "daily_expected_shortfall_5": 0.01,
             "daily_expected_shortfall_5_ucb": 0.02,
             "net_expectancy": 0.003,
-            "net_expectancy_lcb": 0.001,
-            "profit_factor": 1.5,
-            "win_rate": 0.60,
+                "net_expectancy_lcb": 0.001,
+                "profit_factor": 1.5,
+                "profit_factor_censored": False,
+                "profit_factor_contract_version": (
+                    "right-censored-profit-factor-v1"
+                ),
+                "win_rate": 0.60,
             "trade_count": len(trades),
             "effective_sample_size": 40.0,
             **expectancy_metrics(

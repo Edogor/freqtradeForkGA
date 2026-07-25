@@ -14,6 +14,7 @@ from typing import Tuple, Dict, Any, List, Optional
 
 from genetic_algorithm.core.strategy_gene import StrategyGene
 from genetic_algorithm.evaluation.direct_backtester import DirectBacktester, BacktestResult
+from genetic_algorithm.evaluation.profit_factor_v2 import profit_factor_for_scoring
 from genetic_algorithm.strategies.generator import StrategyGenerator
 from genetic_algorithm.utils.timerange import (
     create_walk_forward_windows,
@@ -732,6 +733,18 @@ class FitnessEvaluator:
             ),
             "independent_pair_evaluation": True,
             "independent_pair_worst_weight": worst_weight,
+            "profit_factor_censored": any(
+                bool(metrics.get("profit_factor_censored", False))
+                for metrics in pair_metrics.values()
+            ),
+            "profit_factor_censored_trade_count": min(
+                (
+                    int(metrics.get("num_trades", 0))
+                    for metrics in pair_metrics.values()
+                    if metrics.get("profit_factor_censored", False)
+                ),
+                default=total_trades,
+            ),
             "independent_pair_metrics": {
                 pair: {
                     "profit": metrics.get("profit", 0.0),
@@ -739,6 +752,13 @@ class FitnessEvaluator:
                     "max_drawdown": metrics.get("max_drawdown", 0.0),
                     "sharpe_ratio": metrics.get("sharpe_ratio", 0.0),
                     "profit_factor": metrics.get("profit_factor", 0.0),
+                    "profit_factor_censored": metrics.get(
+                        "profit_factor_censored",
+                        False,
+                    ),
+                    "profit_factor_contract_version": metrics.get(
+                        "profit_factor_contract_version"
+                    ),
                 }
                 for pair, metrics in pair_metrics.items()
             },
@@ -1590,6 +1610,10 @@ class FitnessEvaluator:
             'win_rate': result.win_rate,
             'num_trades': result.total_trades,
             'profit_factor': result.profit_factor,
+            'profit_factor_censored': result.profit_factor_censored,
+            'profit_factor_contract_version': (
+                result.profit_factor_contract_version
+            ),
             'sortino_ratio': max(-10.0, min(50.0, result.sortino_ratio)),  # Clamp to sane display range
             # FreqTrade's ``profit_mean`` is already a decimal ratio.
             'avg_profit': result.avg_profit,
@@ -1693,6 +1717,14 @@ class FitnessEvaluator:
         drawdown = metrics.get('max_drawdown', 0)
         win_rate = metrics.get('win_rate', 0)
         trades = metrics.get('num_trades', 0)
+        profit_factor = profit_factor_for_scoring(
+            profit_factor,
+            censored=bool(metrics.get('profit_factor_censored', False)),
+            trade_count=int(
+                metrics.get('profit_factor_censored_trade_count', trades)
+            ),
+            normalization_cap=self.profit_factor_norm,
+        )
         
         # NaN/Inf protection: replace invalid values with minimum bounds
         # Using minimum bounds (not 0) prevents NaN Sharpe from scoring as 0.33

@@ -58,6 +58,14 @@ def adapt_legacy_backtest_result(
         max_drawdown=result.max_drawdown if result.success else None,
         net_expectancy=result.avg_profit if result.total_trades > 0 else None,
         profit_factor=result.profit_factor if result.total_trades > 0 else None,
+        profit_factor_censored=(
+            result.profit_factor_censored if result.total_trades > 0 else None
+        ),
+        profit_factor_contract_version=(
+            result.profit_factor_contract_version
+            if result.total_trades > 0
+            else None
+        ),
         win_rate=result.win_rate if result.total_trades > 0 else None,
         trade_count=max(0, result.total_trades),
         active_months=0,

@@ -33,6 +33,10 @@ from genetic_algorithm.evaluation.equity_metrics_v2 import (
     build_mark_to_market_equity,
     calculate_equity_risk_metrics,
 )
+from genetic_algorithm.evaluation.profit_factor_v2 import (
+    PROFIT_FACTOR_CONTRACT_VERSION,
+    normalize_profit_factor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +176,8 @@ class BacktestResult:
     sharpe_ratio: float = 0.0
     sortino_ratio: float = 0.0
     profit_factor: float = 0.0
+    profit_factor_censored: bool = False
+    profit_factor_contract_version: str = PROFIT_FACTOR_CONTRACT_VERSION
 
     # Trade metrics
     avg_profit: float = 0.0
@@ -249,6 +255,8 @@ class BacktestResult:
             "sharpe_ratio": self.sharpe_ratio,
             "sortino_ratio": self.sortino_ratio,
             "profit_factor": self.profit_factor,
+            "profit_factor_censored": self.profit_factor_censored,
+            "profit_factor_contract_version": self.profit_factor_contract_version,
             "avg_profit": self.avg_profit,
             "median_profit": self.median_profit,
             "avg_duration": self.avg_duration,
@@ -1606,6 +1614,12 @@ class DirectBacktester:
         # Extract metrics from stats
         # Note: FreqTrade uses 'max_drawdown_account' for percentage drawdown (as ratio, e.g., 0.15 = 15%)
         max_drawdown = stats.get("max_drawdown_account", stats.get("max_drawdown", 0.0))
+        profit_factor, profit_factor_censored = normalize_profit_factor(
+            stats.get("profit_factor", 0.0),
+            total_trades=total_trades,
+            losses=losses,
+            net_profit=max(float(profit_total_abs), float(profit_total)),
+        )
 
         config = getattr(self, "config", {})
         evaluation_v2 = config.get("evaluation_v2", {}) if isinstance(config, dict) else {}
@@ -1690,7 +1704,8 @@ class DirectBacktester:
             max_drawdown_abs=stats.get("max_drawdown_abs", 0.0),
             sharpe_ratio=stats.get("sharpe", 0.0),
             sortino_ratio=stats.get("sortino", 0.0),
-            profit_factor=stats.get("profit_factor", 0.0),
+            profit_factor=profit_factor,
+            profit_factor_censored=profit_factor_censored,
             avg_profit=stats.get("profit_mean", 0.0),
             median_profit=stats.get("profit_median", 0.0),
             # FreqTrade uses 'holding_avg' (timedelta) at strategy level, not 'duration_avg'

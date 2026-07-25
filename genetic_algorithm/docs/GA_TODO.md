@@ -552,12 +552,13 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   Split kompensieren; der schlechteste Multiplikator des gesamten Panels wird nach dem allgemeinen
   Penalty-Floor genau einmal auf den Composite-Score angewandt. Reale Finalist-Replays und
   Regressionstests belegen den aktiven Datenfluss.
-- [ ] **EVAL-012 – Zero-Loss-Profit-Factor versioniert modellieren.** Freqtrades Backtestreport
+- [x] **EVAL-012 – Zero-Loss-Profit-Factor versioniert modellieren.** Freqtrades Backtestreport
   kodiert eine positive Stichprobe ohne Verlusttrade als Profit Factor `0.0`, obwohl der Quotient
-  mathematisch rechtszensiert/unendlich ist. Das darf weder als schlechtester PF noch als beliebige
-  riesige Zahl in Search oder V2 eingehen. Einen endlichen Cap plus explizites
-  `profit_factor_censored`-Feld definieren, Cache-/Resultatschema versionieren und Rankings gegen
-  gemischte sowie ausreichend große Samples testen.
+  mathematisch rechtszensiert/unendlich ist. Der Parser persistiert nun einen endlichen Cap,
+  `profit_factor_censored` und den Subvertrag `right-censored-profit-factor-v1`. Cache-Schema 9
+  und V2-Metrikschema 2.1 invalidieren die alte Semantik. Der Search-Score diskontiert zensierte
+  Samples bis 30 Trades kontinuierlich; Regressionstests belegen, dass ein einzelner Gewinner
+  keine ausreichend große gemischte Stichprobe allein durch PF überholt.
 - [x] **EVAL-013 – Search- und Promotion-Pairsemantik identisch machen.** Das unattended
   Generic-Island-Profil replayt jedes deklarierte Pair bereits während der Evolution isoliert,
   genauso wie das V2-Panel. Gemeinsame Portfolios können dadurch bei kleinem `max_open_trades`

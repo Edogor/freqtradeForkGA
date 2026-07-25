@@ -101,6 +101,8 @@ def _metrics(seed: int) -> ScenarioMetricsV2:
         net_expectancy=0.003,
         net_expectancy_lcb=0.001,
         profit_factor=1.5,
+        profit_factor_censored=False,
+        profit_factor_contract_version="right-censored-profit-factor-v1",
         win_rate=0.6,
         trade_count=60,
         effective_sample_size=40.0,

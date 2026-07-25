@@ -22,9 +22,13 @@ from genetic_algorithm.evaluation.equity_metrics_v2 import (
     CALENDAR_DAYS_PER_YEAR,
     RISK_METRIC_CONTRACT_VERSION,
 )
+from genetic_algorithm.evaluation.profit_factor_v2 import (
+    PROFIT_FACTOR_CENSORED_CAP,
+    PROFIT_FACTOR_CONTRACT_VERSION,
+)
 
 
-METRIC_SCHEMA_VERSION = "2.0"
+METRIC_SCHEMA_VERSION = "2.1"
 RESULT_SCHEMA_VERSION = "2.0"
 
 
@@ -143,6 +147,10 @@ class ScenarioMetricsV2(StrictV2Model):
         default=None, ge=1
     )
     profit_factor: Optional[float] = Field(default=None, ge=0)
+    profit_factor_censored: Optional[bool] = None
+    profit_factor_contract_version: Optional[
+        Literal["right-censored-profit-factor-v1"]
+    ] = None
     win_rate: Optional[float] = Field(default=None, ge=0, le=1)
 
     trade_count: int = Field(ge=0)
@@ -187,6 +195,8 @@ class ScenarioMetricsV2(StrictV2Model):
             "daily_expected_shortfall_5_ucb",
             "expectancy_contract_version",
             "profit_factor",
+            "profit_factor_censored",
+            "profit_factor_contract_version",
             "win_rate",
             "max_consecutive_losses",
             "max_drawdown_duration_days",
@@ -200,6 +210,20 @@ class ScenarioMetricsV2(StrictV2Model):
                 raise ValueError(f"VALID scenario is missing metrics: {', '.join(missing)}")
         elif not self.error_code:
             raise ValueError("non-VALID scenario requires a machine-readable error_code")
+        if self.profit_factor is not None:
+            if (
+                self.profit_factor_censored is None
+                or self.profit_factor_contract_version
+                != PROFIT_FACTOR_CONTRACT_VERSION
+            ):
+                raise ValueError("profit factor evidence is missing its versioned censor state")
+            if self.profit_factor_censored and not math.isclose(
+                self.profit_factor,
+                PROFIT_FACTOR_CENSORED_CAP,
+            ):
+                raise ValueError("censored profit factor must use the versioned finite cap")
+        elif self.profit_factor_censored:
+            raise ValueError("censored profit factor requires a measured value")
         if (
             self.expectancy_contract_version is not None
             and self.expectancy_contract_version != EXPECTANCY_CONTRACT_VERSION
@@ -295,7 +319,7 @@ class ScenarioMetricsV2(StrictV2Model):
 class BacktestRecordV2(StrictV2Model):
     """Canonical measured output of one scenario backtest."""
 
-    metric_schema_version: Literal["2.0"] = METRIC_SCHEMA_VERSION
+    metric_schema_version: Literal["2.1"] = METRIC_SCHEMA_VERSION
     attempt_id: str = Field(min_length=1)
     wave_id: str = Field(min_length=1)
     experiment_id: str = Field(min_length=1)
