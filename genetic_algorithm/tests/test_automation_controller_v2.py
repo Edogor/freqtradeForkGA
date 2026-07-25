@@ -150,6 +150,34 @@ def test_systemd_unit_restarts_crashes_but_not_guarded_stop(tmp_path: Path):
     assert "KillMode=control-group" in unit
 
 
+def test_two_wave_canary_changes_only_campaign_identity_and_budget():
+    repo_root = Path(__file__).resolve().parents[2]
+    baseline = load_config(
+        repo_root
+        / "genetic_algorithm/config/presets/automation_island_v2.yaml"
+    )
+    canary = load_config(
+        repo_root
+        / "genetic_algorithm/config/presets/automation_island_canary_v2.yaml"
+    )
+
+    assert canary["automation_controller"] == {
+        "root_seeds": [5001],
+        "max_waves": 2,
+    }
+    baseline_without_campaign = {
+        key: value
+        for key, value in baseline.items()
+        if key != "automation_controller"
+    }
+    canary_without_campaign = {
+        key: value
+        for key, value in canary.items()
+        if key != "automation_controller"
+    }
+    assert canary_without_campaign == baseline_without_campaign
+
+
 def _bootstrap(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[2]
     config_path = repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml"

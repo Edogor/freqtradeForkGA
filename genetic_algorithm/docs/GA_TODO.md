@@ -3,6 +3,30 @@
 Stand: 25.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
 
+Dreißigster Slice (25.07.2026): Der korrigierte Seed-4001-Root
+`wave-root-c3ba6d0b42542b05f764` endete mit einem hashverifizierten
+`SUCCEEDED`-Attempt und kontrolliert an `MAX_WAVES_REACHED`. Alle 48
+Evaluationsbatches meldeten null Fehler. Worker und Dienst benötigten etwa
+24:41 beziehungsweise 26:15 Minuten bei 1,55 GiB Peak-RAM und 16 MiB
+Artefakten.
+
+Die neue unabhängige Pair-Semantik erzeugte erstmals durchgehend brauchbare
+Cross-Pair-Finalisten. Alle fünf waren auf BTC, SOL, ETH und BNB profitabel.
+Der Topkandidat erreichte isoliert BTC +11,89 %, SOL +11,60 %, ETH +8,56 % und
+BNB +8,53 % bei 91–260 Trades. Search und strikter Replay stimmen für alle
+vier Pair-Profite und Tradezahlen exakt überein. Die Best-Fitness stieg von
+0,276 in Generation 4 auf 0,589 in Generation 11; alle Hall-of-Fame-
+Kandidaten entstanden in Generation 11. Die Evolution besitzt damit einen
+sinnvollen Gradient statt der früheren Portfolio-Slot-Illusion.
+
+Kein Finalist war bereits promotionsfähig. Erwartungswert- und Annual-Return-
+LCBs blieben negativ, DD-UCB lag teilweise knapp über 25 %, die schlechteste
+Tradefrequenz bei nur etwa 2,46–2,84 Trades pro aktivem Monat und
+Drawdown-Dauern bei 489–745 Tagen. Diese konservativen Gates arbeiten
+erwartungsgemäß. Seed 4001 ist recoverable archiviert. Das separate
+`automation_island_canary_v2`-Preset verwendet nun Seed 5001 und exakt zwei
+Waves, um den realen Root-zu-Child-Planer nachzuweisen.
+
 Neunundzwanzigster Slice (25.07.2026): Der Seed-3001-Diagnose-Root
 `wave-root-1f3d3b0a1d702c45a7da` endete nach einem vollständig erfolgreichen,
 hashverifizierten Attempt erwartungsgemäß an `MAX_WAVES_REACHED`. Alle

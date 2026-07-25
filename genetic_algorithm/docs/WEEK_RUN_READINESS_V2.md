@@ -25,6 +25,11 @@ Ersatz für ein bisher unberührtes finales Pair-x-Zeit-Panel.
 - Search und V2 verwenden nach der Korrektur beide isolierte Pair-Replays.
   Ein Replay aller fünf Seed-3001-Finalisten reproduziert Pair-Profite und
   Tradezahlen exakt.
+- Der korrigierte Seed-4001-Root endete ohne technischen Fehler. Alle fünf
+  Finalisten waren auf allen vier Pairs profitabel; der Topkandidat erreichte
+  BTC +11,89 %, SOL +11,60 %, ETH +8,56 % und BNB +8,53 %. Search und strikter
+  Replay stimmen bei Pair-Profit und Tradezahl exakt überein. Die beste
+  Search-Fitness stieg von 0,276 in Generation 4 auf 0,589 in Generation 11.
 - Profitable Zero-Loss-Samples besitzen einen versionierten, endlichen und
   explizit rechtszensierten Profit Factor. Kleine zensierte Samples erhalten
   im Search-Score erst mit wachsender Tradezahl Vertrauen; Cache-Schema 9 und
@@ -37,7 +42,7 @@ Ersatz für ein bisher unberührtes finales Pair-x-Zeit-Panel.
 
 ## Muss vor dem Wochenlauf erledigt werden
 
-### 1. Korrigierten Seed-4001-Root ausführen
+### 1. Korrigierten Seed-4001-Root ausführen – abgeschlossen
 
 Das Diagnose-Preset bleibt auf `max_waves: 1`. Der Lauf muss den neuen
 `independent_pairs`-Search-Pfad real ausführen.
@@ -62,15 +67,17 @@ Go-Kriterien:
   isolierte Backtests pro Kandidat mehr Arbeit als zwei gemeinsame
   Split-Portfolios verursachen.
 
-Ein promotionsfähiger Kandidat ist für diesen Diagnoseschritt nicht
-erforderlich. Ein technisch gesunder Lauf mit erkennbarer Verbesserung und
-korrekter konservativer Rangfolge genügt.
+Die Kriterien sind erfüllt. Der Lauf benötigte etwa 24:41 Minuten Workerzeit,
+26:15 Minuten Dienstzeit, 1,55 GiB Peak-RAM und 16 MiB Artefakte. Kein
+Kandidat war bereits promotionsfähig, weil konservative Expectancy-/
+Annual-Return-LCBs, Drawdown-Dauer, Tradefrequenz und teilweise DD-UCB weiter
+blockierten. Das ist ein fachliches Ergebnis, kein technischer Fehler.
 
 ### 2. Einen echten Zwei-Wave-Canary durchführen
 
-Erst nach Seed 4001 wird ein separates Canary-Preset mit `max_waves: 2`
-verwendet. Es muss einen Root analysieren, genau einen sinnvollen Child-Plan
-materialisieren und den Child tatsächlich starten und abschließen.
+Das separate Preset `automation_island_canary_v2` verwendet Seed 5001 und
+`max_waves: 2`. Es muss einen Root analysieren, genau einen sinnvollen
+Child-Plan materialisieren und den Child tatsächlich starten und abschließen.
 
 Go-Kriterien:
 
@@ -118,10 +125,7 @@ Unmittelbar vor dem Start:
 ## Empfohlene Reihenfolge
 
 1. Aktuelle Korrektur testen, committen und ohne Laufzeitdaten pushen.
-2. Der Seed-4001-Preflight muss nach der abgeschlossenen Seed-3001-Archivierung
-   grün sein.
-3. Seed-4001-Diagnose-Root starten und nach Abschluss analysieren.
-4. Reales Zwei-Wave-Canary ausführen und Restart/Child-Vertrag prüfen.
-5. Laufzeit- und Speicherbudgets aus Seed 4001 plus Canary kalibrieren.
-6. Separates Wochenpreset erstellen, Preflight und Operatorprobe bestehen.
-7. Erst dann den einwöchigen Search-only-Lauf starten.
+2. Reales Zwei-Wave-Canary ausführen und Restart/Child-Vertrag prüfen.
+3. Laufzeit- und Speicherbudgets aus Seed 4001 plus Canary kalibrieren.
+4. Separates Wochenpreset erstellen, Preflight und Operatorprobe bestehen.
+5. Erst dann den einwöchigen Search-only-Lauf starten.

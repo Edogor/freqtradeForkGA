@@ -1,0 +1,12 @@
+# Real two-wave Generic-Island automation canary.
+#
+# This profile changes only campaign identity and the wave budget. All search,
+# evaluation, safety, resource and promotion contracts are inherited from the
+# audited automation_island_v2 preset.
+
+config_schema_version: 2
+preset: automation_island_v2
+
+automation_controller:
+  root_seeds: [5001]
+  max_waves: 2

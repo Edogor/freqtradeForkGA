@@ -647,9 +647,15 @@ def config_type_errors(config: Dict[str, Any]) -> List[str]:
 _PRESETS_DIR = Path(__file__).parent / "presets"
 
 
-def resolve_preset(config: Dict[str, Any]) -> Dict[str, Any]:
-    """If *config* contains a ``preset`` key, load that preset YAML and
-    merge *config* on top of it (config overrides preset overrides defaults).
+def _resolve_preset_chain(
+    config: Dict[str, Any],
+    *,
+    seen: Tuple[str, ...],
+) -> Dict[str, Any]:
+    """Resolve inherited presets and reject recursive inheritance.
+
+    Each child config overrides its preset, which in turn overrides any
+    parent preset. Defaults are merged later by the normal config resolver.
     """
     if not isinstance(config, dict):
         raise ValueError("Config root must be a YAML mapping")
@@ -663,6 +669,9 @@ def resolve_preset(config: Dict[str, Any]) -> Dict[str, Any]:
         or preset_name in {".", ".."}
     ):
         raise ValueError(f"Invalid preset name: {preset_name!r}")
+    if preset_name in seen:
+        chain = " -> ".join((*seen, preset_name))
+        raise ValueError(f"Recursive preset inheritance: {chain}")
 
     preset_file = _PRESETS_DIR / f"{preset_name}.yaml"
     if not preset_file.exists():
@@ -676,9 +685,19 @@ def resolve_preset(config: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(preset_data, dict):
         raise ValueError(f"Preset '{preset_name}' root must be a YAML mapping")
 
-    # preset overrides defaults, then user config overrides preset
-    merged = deep_merge(preset_data, config)
+    resolved_preset = _resolve_preset_chain(
+        preset_data,
+        seen=(*seen, preset_name),
+    )
+    # deepest preset overrides defaults, then each child overrides its parent
+    merged = deep_merge(resolved_preset, config)
     return merged
+
+
+def resolve_preset(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve all inherited presets into one detached config mapping."""
+
+    return _resolve_preset_chain(config, seen=())
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from genetic_algorithm import cli
+from genetic_algorithm.config import schema as config_schema
 from genetic_algorithm.config.schema import (
     DEFAULTS,
     load_config,
@@ -536,6 +537,37 @@ def test_preset_resolution_is_detached_and_idempotent():
 
     assert raw == before
     assert first == second
+
+
+def test_nested_preset_resolution_and_cycle_rejection(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_schema, "_PRESETS_DIR", tmp_path)
+    _write(
+        tmp_path,
+        {"backtesting": {"pairs": ["BTC/USDT"], "fee": 0.002}},
+        name="base.yaml",
+    )
+    _write(
+        tmp_path,
+        {"preset": "base", "backtesting": {"fee": 0.001}},
+        name="child.yaml",
+    )
+
+    resolved = resolve_preset(
+        {"preset": "child", "backtesting": {"pairs": ["ETH/USDT"]}}
+    )
+
+    assert resolved["backtesting"] == {
+        "pairs": ["ETH/USDT"],
+        "fee": 0.001,
+    }
+
+    _write(tmp_path, {"preset": "cycle_b"}, name="cycle_a.yaml")
+    _write(tmp_path, {"preset": "cycle_a"}, name="cycle_b.yaml")
+    with pytest.raises(
+        ValueError,
+        match="Recursive preset inheritance: cycle_a -> cycle_b -> cycle_a",
+    ):
+        resolve_preset({"preset": "cycle_a"})
 
 
 def test_preset_name_cannot_escape_preset_directory(tmp_path):
