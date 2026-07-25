@@ -32,7 +32,10 @@ Plattenplatz und verfügbaren RAM:
 .venv/bin/python -m genetic_algorithm automation preflight automation_island_v2
 ```
 
-Nur `ready: true` mit `PREFLIGHT_READY` ist startfähig.
+Nur `ready: true` mit `PREFLIGHT_READY` ist startfähig. Ein vorhandener
+Bootstrap-Intent einer älteren Kampagne blockiert bei abweichender Config,
+Policy oder Seed. Die ältere Kampagne muss zuerst recoverable archiviert und
+aus den aktiven State-/Automation-Pfaden entfernt werden.
 
 ## Start oder Wiederanlauf
 

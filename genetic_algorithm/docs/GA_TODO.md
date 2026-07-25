@@ -42,9 +42,12 @@ Die Provenienzbehandlung ignoriert künftig ausschließlich bekannte
 Laufzeitverzeichnisse für Registry, Corpus, Modelle und generierte Strategien.
 Andere tracked Änderungen einschließlich YAML und Lockfiles markieren einen
 Attempt weiterhin als dirty. Damit erzeugen automatisch aktualisierte
-Runtime-Artefakte keinen falschen Code-Patchhash. Das nächste begrenzte
-Diagnose-Preset verwendet Seed 4001. Der detaillierte Wochenlauf-Status und
-seine verbleibenden Go/No-Go-Gates stehen in
+Runtime-Artefakte keinen falschen Code-Patchhash. Der Produktions-Preflight
+blockiert außerdem einen noch aktiven Bootstrap-Intent, wenn Config, Policy
+oder Seed vom geplanten Lauf abweichen; ein grüner Daten-/Ressourcencheck kann
+dadurch keinen alten Kampagnenzustand mehr verdecken. Das nächste begrenzte
+Diagnose-Preset verwendet nach recoverable Archivierung von Seed 3001 den Seed
+4001. Der detaillierte Wochenlauf-Status und seine verbleibenden Go/No-Go-Gates stehen in
 [WEEK_RUN_READINESS_V2.md](WEEK_RUN_READINESS_V2.md).
 
 Achtundzwanzigster Slice (24.07.2026): Der begrenzte Diagnose-Root
@@ -810,6 +813,10 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   Strategien verändern den Code-Manifestzustand nicht. Alle übrigen tracked Dateien bleiben
   vollständig gebunden; relevante untracked Source-Dateien werden weiterhin einzeln gehasht.
   Regressionstests decken Runtime-JSON/-Binärdaten, Python-Source und tracked YAML ab.
+- [x] **ORCH-028 – Preflight gegen alten Bootstrap-Zustand binden.** Ein vorhandener immutable
+  Bootstrap-Intent wird read-only gegen den geplanten Config-, Automation-Policy- und Seedvertrag
+  geprüft. Abweichungen sowie ein Receipt ohne Intent blockieren mit maschinenlesbaren
+  Reason-Codes, bevor `automation start` erst im mutierenden Bootstrap scheitert.
 
 ## P0: Config-Vertrag
 

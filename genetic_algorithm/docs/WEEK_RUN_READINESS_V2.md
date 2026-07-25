@@ -38,6 +38,13 @@ Ersatz für ein bisher unberührtes finales Pair-x-Zeit-Panel.
 Das Diagnose-Preset bleibt auf `max_waves: 1`. Der Lauf muss den neuen
 `independent_pairs`-Search-Pfad real ausführen.
 
+Vorher wird die abgeschlossene Seed-3001-Kampagne mit State-DB, Root-Artefakten
+und immutable Bericht recoverable archiviert. Erst danach werden die aktiven
+State-/Automation-Pfade für die neue Kampagne freigegeben. Der Preflight muss
+einen noch vorhandenen Bootstrap-Intent mit abweichender Config, Policy oder
+Seed ausdrücklich blockieren; ein bloß grüner Daten-/Ressourcencheck genügt
+nicht.
+
 Go-Kriterien:
 
 - keine technischen Backtestfehler oder fehlenden Pairmessungen;
@@ -125,9 +132,11 @@ Unmittelbar vor dem Start:
 ## Empfohlene Reihenfolge
 
 1. Aktuelle Korrektur testen, committen und ohne Laufzeitdaten pushen.
-2. Seed-4001-Diagnose-Root starten und nach Abschluss analysieren.
-3. `EVAL-012` implementieren und testen.
-4. Reales Zwei-Wave-Canary ausführen und Restart/Child-Vertrag prüfen.
-5. Laufzeit- und Speicherbudgets aus Seed 4001 plus Canary kalibrieren.
-6. Separates Wochenpreset erstellen, Preflight und Operatorprobe bestehen.
-7. Erst dann den einwöchigen Search-only-Lauf starten.
+2. Seed 3001 recoverable archivieren; danach muss der Seed-4001-Preflight grün
+   sein.
+3. Seed-4001-Diagnose-Root starten und nach Abschluss analysieren.
+4. `EVAL-012` implementieren und testen.
+5. Reales Zwei-Wave-Canary ausführen und Restart/Child-Vertrag prüfen.
+6. Laufzeit- und Speicherbudgets aus Seed 4001 plus Canary kalibrieren.
+7. Separates Wochenpreset erstellen, Preflight und Operatorprobe bestehen.
+8. Erst dann den einwöchigen Search-only-Lauf starten.

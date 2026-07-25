@@ -402,6 +402,7 @@ def build_automation_preflight(
     config = load_config(config_path)
     _validate_automation_config(config)
     policy = default_automation_policy(config, automation_root=root)
+    config_hash = canonical_config_hash(config)
     promotion = shadow_gate_policy_from_config(config)
     pairs = sorted({item.pair for item in promotion.required_scenarios})
     data_root = repository / resolve_spot_data_root(config, pairs)
@@ -423,12 +424,29 @@ def build_automation_preflight(
         reasons.append("INSUFFICIENT_AVAILABLE_MEMORY")
     if not memory_available:
         reasons.append("MEMORY_AVAILABILITY_UNPROVEN")
+    intent_path = root / "bootstrap_intent.json"
+    if intent_path.is_file():
+        try:
+            intent = AutomationBootstrapIntentV2.model_validate_json(
+                intent_path.read_bytes()
+            )
+        except (OSError, ValueError):
+            reasons.append("BOOTSTRAP_INTENT_INVALID")
+        else:
+            if intent.config_hash != config_hash:
+                reasons.append("BOOTSTRAP_INTENT_CONFIG_MISMATCH")
+            if intent.automation_policy_hash != policy.policy_hash:
+                reasons.append("BOOTSTRAP_INTENT_POLICY_MISMATCH")
+            if intent.seeds != policy.root_seeds:
+                reasons.append("BOOTSTRAP_INTENT_SEED_MISMATCH")
+    elif (root / "bootstrap_receipt.json").exists():
+        reasons.append("BOOTSTRAP_RECEIPT_WITHOUT_INTENT")
     if not reasons:
         reasons.append("PREFLIGHT_READY")
     return AutomationPreflightV2(
         checked_at=checked_at or datetime.now(UTC),
         ready=reasons == ["PREFLIGHT_READY"],
-        config_hash=canonical_config_hash(config),
+        config_hash=config_hash,
         code_manifest_hash=canonical_config_hash(
             code_manifest.model_dump(mode="json")
         ),

@@ -17,6 +17,7 @@ from genetic_algorithm import cli
 from genetic_algorithm.orchestration import automation_controller_v2
 from genetic_algorithm.config.schema import load_config
 from genetic_algorithm.orchestration.automation_controller_v2 import (
+    AutomationBootstrapIntentV2,
     AutomationControllerV2,
     bootstrap_automation_wave,
     build_automation_preflight,
@@ -48,11 +49,16 @@ class _SchedulerMustNotRun:
         return None
 
 
-def test_real_preset_preflight_proves_pair_split_data_and_resources():
+def test_real_preset_preflight_proves_pair_split_data_and_resources(
+):
     repo_root = Path(__file__).resolve().parents[2]
+    automation_root = (
+        repo_root / "genetic_algorithm/data/v2/preflight-test-empty"
+    )
+    assert not automation_root.exists()
     report = build_automation_preflight(
         repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml",
-        automation_root=repo_root / "genetic_algorithm/data/v2/automation",
+        automation_root=automation_root,
         repo_root=repo_root,
         checked_at=NOW,
     )
@@ -69,7 +75,7 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources():
             repo_root
             / "genetic_algorithm/config/presets/automation_island_v2.yaml"
         ),
-        automation_root=repo_root / "genetic_algorithm/data/v2/automation",
+        automation_root=automation_root,
     )
     assert policy.root_seeds == [4001]
     assert policy.max_waves == 1
@@ -77,6 +83,51 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources():
     assert load_config(
         repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml"
     )["pair_validation"]["evaluation_mode"] == "independent_pairs"
+
+
+def test_preflight_blocks_an_existing_campaign_with_different_contract(
+    tmp_path: Path,
+    monkeypatch,
+):
+    repo_root = Path(__file__).resolve().parents[2]
+    automation_root = tmp_path / "automation"
+    automation_root.mkdir()
+    intent = AutomationBootstrapIntentV2(
+        created_at=NOW,
+        config_hash="0" * 64,
+        automation_policy_hash="1" * 64,
+        seeds=[3001],
+        wave_id="wave-root-old",
+        experiment_id="experiment-root-old",
+    )
+    (automation_root / "bootstrap_intent.json").write_text(
+        intent.model_dump_json(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        automation_controller_v2.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=100 * 1024**3),
+    )
+    monkeypatch.setattr(
+        automation_controller_v2,
+        "_available_memory_bytes",
+        lambda: 16 * 1024**3,
+    )
+
+    report = build_automation_preflight(
+        repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml",
+        automation_root=automation_root,
+        repo_root=repo_root,
+        checked_at=NOW,
+    )
+
+    assert report.ready is False
+    assert report.reason_codes == [
+        "BOOTSTRAP_INTENT_CONFIG_MISMATCH",
+        "BOOTSTRAP_INTENT_POLICY_MISMATCH",
+        "BOOTSTRAP_INTENT_SEED_MISMATCH",
+    ]
 
 
 def test_systemd_unit_restarts_crashes_but_not_guarded_stop(tmp_path: Path):
