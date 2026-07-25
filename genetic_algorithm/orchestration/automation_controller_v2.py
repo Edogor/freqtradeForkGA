@@ -730,12 +730,17 @@ def bootstrap_automation_wave(
                 reason="BOOTSTRAP_QUEUED",
             )
     store.register_experiment(receipt.experiment_spec)
-    store.begin_collection(
-        intent.wave_id,
-        started_at=intent.created_at
-        + timedelta(microseconds=4 + len(receipt.attempts) * 3),
-        actor="automation-bootstrap-v2",
-    )
+    # A service restart always replays the immutable root bootstrap. Once the
+    # root has handed off to a child it is deliberately QUEUED and must not be
+    # transitioned back into collection.
+    root_wave = store.get_wave(intent.wave_id)
+    if root_wave.status == WaveLifecycleStatus.DRAFT:
+        store.begin_collection(
+            intent.wave_id,
+            started_at=intent.created_at
+            + timedelta(microseconds=4 + len(receipt.attempts) * 3),
+            actor="automation-bootstrap-v2",
+        )
     return receipt
 
 
@@ -1020,22 +1025,29 @@ class AutomationControllerV2:
                 reason_codes=["MEMORY_RESERVE_ACTIVE"],
             )
 
-        scheduler_tick = self.scheduler.run_once(observed_at=now)
-        progressed = bool(
-            scheduler_tick.launched_attempt_ids
-            or scheduler_tick.completed_attempt_ids
-            or scheduler_tick.reconciliation
-        )
+        # Register collection before exposing a newly materialized child's
+        # QUEUED attempts to the scheduler. Otherwise the scheduler can claim
+        # an attempt while its wave is still DRAFT.
         lineage = self._lineage()
         wave = lineage[-1]
-
+        began_collection = False
         if wave.status == WaveLifecycleStatus.DRAFT:
             wave = self.store.begin_collection(
                 wave.wave_id,
                 started_at=max(now, wave.updated_at),
                 actor="guarded-automation-controller-v2",
             )
-            progressed = True
+            began_collection = True
+
+        scheduler_tick = self.scheduler.run_once(observed_at=now)
+        progressed = bool(
+            began_collection
+            or scheduler_tick.launched_attempt_ids
+            or scheduler_tick.completed_attempt_ids
+            or scheduler_tick.reconciliation
+        )
+        lineage = self._lineage()
+        wave = lineage[-1]
 
         if wave.status == WaveLifecycleStatus.COLLECTING:
             attempts = self._attempts(wave.wave_id)

@@ -162,7 +162,7 @@ def test_two_wave_canary_changes_only_campaign_identity_and_budget():
     )
 
     assert canary["automation_controller"] == {
-        "root_seeds": [5001],
+        "root_seeds": [5002],
         "max_waves": 2,
     }
     baseline_without_campaign = {
@@ -453,7 +453,7 @@ def test_cli_stop_then_start_bootstraps_without_launching_work(tmp_path: Path):
     )
 
 
-def test_real_mini_controller_executes_root_and_queues_next_wave(tmp_path: Path):
+def test_real_mini_controller_executes_two_waves_across_restart(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[2]
     suffix = hashlib.sha256(str(tmp_path).encode()).hexdigest()[:10].upper()
     train_pair = f"UNITTESTAUTOMATIONTRAIN{suffix}/BTC"
@@ -662,10 +662,58 @@ def test_real_mini_controller_executes_root_and_queues_next_wave(tmp_path: Path)
             item.worker_binding.worker_kind == WorkerKind.GENERIC_ISLAND_EVOLUTION
             for item in child_attempts
         )
+
+        # The systemd entry point replays bootstrap on every restart. An
+        # already queued root must remain immutable while the child resumes.
+        restarted_receipt = bootstrap_automation_wave(
+            config_path,
+            store=store,
+            policy=policy,
+            automation_root=automation_root,
+            repo_root=repo_root,
+            created_at=datetime.now(UTC),
+        )
+        assert restarted_receipt == receipt
+        assert (
+            store.get_wave(receipt.intent.wave_id).status
+            == WaveLifecycleStatus.QUEUED
+        )
+
+        with AutomationControllerV2(
+            store=store,
+            root_wave_id=receipt.intent.wave_id,
+            policy=policy,
+            automation_root=automation_root,
+            repo_root=repo_root,
+        ) as child_controller:
+            deadline = time.monotonic() + 30
+            final_tick = None
+            while time.monotonic() < deadline:
+                final_tick = child_controller.run_once()
+                if final_tick.outcome == "STOPPED_LIMIT":
+                    break
+                time.sleep(0.05)
+
+        assert final_tick is not None
+        assert final_tick.outcome == "STOPPED_LIMIT"
+        assert final_tick.reason_codes == ["MAX_WAVES_REACHED"]
+        waves = store.list_waves()
+        assert len(waves) == 2
+        assert waves[0].status == WaveLifecycleStatus.QUEUED
+        assert waves[1].status == WaveLifecycleStatus.BLOCKED
+        child_attempts = [
+            item for item in store.list_attempts() if item.wave_id == waves[1].wave_id
+        ]
+        assert all(
+            item.status == AttemptLifecycleStatus.SUCCEEDED
+            for item in child_attempts
+        )
         report_path = automation_root / "reports" / "LATEST.json"
         report = json.loads(report_path.read_text(encoding="utf-8"))
         assert report["root_wave_id"] == receipt.intent.wave_id
-        assert report["controller_outcome"] == "CONTINUE_SEARCH"
+        assert report["wave_id"] == waves[1].wave_id
+        assert report["controller_outcome"] == "STOPPED_LIMIT"
+        assert report["controller_reason_codes"] == ["MAX_WAVES_REACHED"]
         assert report["attempts"][0]["candidates"]
         assert report["attempts"][0]["engine_seed_evidence"]["contract_matches"]
 

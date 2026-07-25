@@ -3,6 +3,28 @@
 Stand: 25.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
 
+Einunddreißigster Slice (25.07.2026): Der erste reale Zwei-Wave-Canary mit
+Seed 5001 führte seinen Root `wave-root-5b304ca3495b79c82f21` technisch
+erfolgreich aus. Das Resultat ist hashverifiziert, alle 48
+Evaluationsbatches meldeten null Fehler und alle fünf Finalisten waren auf
+allen vier Pairs profitabel. Der Planner reagierte korrekt auf fehlende
+eligible Kandidaten: genau ein Scratch-Control, keine Verzweigung, keine
+doppelte Wave und der deterministisch rotierte Seed 2995895734.
+
+Der Child wurde unveränderlich materialisiert, aber nicht ausgeführt. Vor
+seinem `COLLECTING`-Übergang konnte der Scheduler bereits den Attempt claimen.
+Nach diesem Fehler spielte systemd den Root-Bootstrap erneut ab; dieser
+behandelte den nach dem atomaren Handoff korrekt `QUEUED` Root fälschlich wie
+einen neuen `DRAFT`-Root. Die Folge war eine Restart-Schleife mit
+`collection can only begin from DRAFT`.
+
+Beide Ursachen sind korrigiert: Der Bootstrap verändert fortgeschrittene
+Roots nicht und ein neuer Child wird vor dem Scheduler auf `COLLECTING`
+gesetzt. Der echte Mini-E2E führt nun Root und Child über einen simulierten
+Service-Neustart bis zum kontrollierten Zwei-Wave-Limit aus. Der Seed-5001-
+Canary ist mit State-DB, Rootresultat, Childmaterialisierung und Berichten
+recoverable archiviert. Der frische Real-Canary verwendet Seed 5002.
+
 Dreißigster Slice (25.07.2026): Der korrigierte Seed-4001-Root
 `wave-root-c3ba6d0b42542b05f764` endete mit einem hashverifizierten
 `SUCCEEDED`-Attempt und kontrolliert an `MAX_WAVES_REACHED`. Alle 48
@@ -24,7 +46,7 @@ LCBs blieben negativ, DD-UCB lag teilweise knapp über 25 %, die schlechteste
 Tradefrequenz bei nur etwa 2,46–2,84 Trades pro aktivem Monat und
 Drawdown-Dauern bei 489–745 Tagen. Diese konservativen Gates arbeiten
 erwartungsgemäß. Seed 4001 ist recoverable archiviert. Das separate
-`automation_island_canary_v2`-Preset verwendet nun Seed 5001 und exakt zwei
+`automation_island_canary_v2`-Preset verwendet nun Seed 5002 und exakt zwei
 Waves, um den realen Root-zu-Child-Planer nachzuweisen.
 
 Neunundzwanzigster Slice (25.07.2026): Der Seed-3001-Diagnose-Root

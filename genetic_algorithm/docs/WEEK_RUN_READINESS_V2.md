@@ -38,7 +38,9 @@ Ersatz für ein bisher unberührtes finales Pair-x-Zeit-Panel.
   1,54 GiB Peak-RAM. Die vorhandenen 40-GiB-/20-GiB-Reserve- und
   2-GiB-RAM-Gates bleiben deutlich konservativer.
 - Restart-, Lease-, PID-, Idempotenz-, Kill-Switch- und synthetische
-  Root-zu-Child-Verträge sind automatisiert getestet.
+  Root-zu-Child-Verträge sind automatisiert getestet. Der Mini-E2E führt
+  inzwischen beide Waves einschließlich Bootstrap-Neustart und kontrolliertem
+  `MAX_WAVES_REACHED` tatsächlich aus.
 
 ## Muss vor dem Wochenlauf erledigt werden
 
@@ -75,7 +77,21 @@ blockierten. Das ist ein fachliches Ergebnis, kein technischer Fehler.
 
 ### 2. Einen echten Zwei-Wave-Canary durchführen
 
-Das separate Preset `automation_island_canary_v2` verwendet Seed 5001 und
+Der erste Versuch mit Seed 5001 führte den Root technisch erfolgreich aus:
+48 Evaluationsbatches hatten null Fehler, das Resultat ist hashverifiziert
+und alle fünf Finalisten waren auf allen vier Pairs profitabel. Der Planner
+erzeugte korrekt genau ein frisches Control mit rotiertem Seed 2995895734.
+
+Der anschließende Root-zu-Child-Handoff deckte zwei Controllerfehler auf. Der
+Scheduler konnte den Child-Attempt vor `COLLECTING` claimen; nach dem Crash
+versuchte der Service-Bootstrap außerdem, den bereits `QUEUED` Root erneut zu
+starten. Dadurch blieb der Child in `DRAFT` und systemd wiederholte den
+failenden Bootstrap. Die Restart-Schleife wurde gestoppt und recoverable
+archiviert. Der Bootstrap überspringt nun fortgeschrittene Roots und der
+Controller setzt neue Child-Waves vor dem Scheduler auf `COLLECTING`.
+
+Das separate Preset `automation_island_canary_v2` verwendet für den
+korrigierten Wiederholungslauf Seed 5002 und
 `max_waves: 2`. Es muss einen Root analysieren, genau einen sinnvollen
 Child-Plan materialisieren und den Child tatsächlich starten und abschließen.
 
@@ -90,9 +106,10 @@ Go-Kriterien:
   fertigen Zustand;
 - `LATEST.md`, State-DB und immutable Resultate berichten denselben Ausgang.
 
-Die synthetischen E2E-Tests belegen diese Mechanik bereits, ein vollständiger
-realer Generic-Island-Child wurde im aktuellen Produktionspfad aber noch nicht
-ausgeführt. Das ist der wichtigste verbleibende Automationsnachweis.
+Der vollständige Mini-E2E belegt diese Mechanik einschließlich Neustart und
+Child-Ausführung. Ein vollständiger realer Generic-Island-Child wurde im
+Produktionspfad noch nicht abgeschlossen. Der Seed-5002-Wiederholungslauf ist
+deshalb der wichtigste verbleibende Automationsnachweis.
 
 ### 3. Wochenprofil und Betriebsprobe separat freigeben
 
