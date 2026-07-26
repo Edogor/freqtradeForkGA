@@ -1,6 +1,6 @@
 # GA TODO und Befundregister
 
-Stand: 25.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
+Stand: 26.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
 
 Zweiunddreißigster Slice (26.07.2026): Der korrigierte reale Zwei-Wave-Canary
@@ -22,6 +22,13 @@ bei gemessenen rund 28 Minuten und 15,5 MiB pro Attempt bleibt der
 7-Tage-Guard erreichbar, während nur etwa 6,2 GiB Artefakte projiziert sind.
 Parallelität eins, 40-GiB-Artefaktlimit, 20-GiB-Freireserve und
 2-GiB-RAM-Reserve bleiben unverändert.
+
+Die finale Operatorprobe bestand ebenfalls: Mit gesetztem Kill-Switch
+initialisierte systemd ausschließlich den hashgebundenen Seed-6001-Root,
+startete keinen Attempt und endete kontrolliert mit
+`STOPPED_KILL_SWITCH`. Nach Entfernen des Markers war der Preflight erneut
+`PREFLIGHT_READY`. Der Wochenlauf ist damit technisch startbereit; die Unit
+bleibt bis zur ausdrücklichen Startfreigabe deaktiviert und inaktiv.
 
 Einunddreißigster Slice (25.07.2026): Der erste reale Zwei-Wave-Canary mit
 Seed 5001 führte seinen Root `wave-root-5b304ca3495b79c82f21` technisch

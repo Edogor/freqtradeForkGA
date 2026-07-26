@@ -1,13 +1,13 @@
 # Readiness für den ersten einwöchigen Generic-Island-Lauf
 
-Stand: 25.07.2026
+Stand: 26.07.2026
 
 ## Entscheidung
 
-**NO-GO für den sofortigen Wochenstart.** Der Seed-3001-Lauf war technisch
-stabil, hat aber einen wesentlichen Search-/Replay-Semantikfehler sichtbar
-gemacht. Die Korrektur ist implementiert. Vor einem siebentägigen Lauf fehlen
-noch die abschließende Betriebsprobe des Wochenprofils.
+**GO nach ausdrücklicher Startfreigabe.** Search-/Replay-Semantik,
+Root-zu-Child-Handoff, Restart-Verhalten, Wochenbudgets und die reale
+Kill-Switch-/systemd-Betriebsprobe sind nachgewiesen. Der vorbereitete Dienst
+bleibt bis zur bewussten Freigabe deaktiviert und inaktiv.
 
 Der Wochenlauf bleibt ein Search-only-Shadow-Lauf. Auch ein vollständig
 bestandener Wochenlauf autorisiert weder Paper- noch Live-Trading und ist kein
@@ -151,10 +151,13 @@ Unmittelbar vor dem Start:
 7. freien Speicher und RAM prüfen sowie sicherstellen, dass kein Legacy-
    Scheduler dieselbe Queue verwendet.
 
+Alle sieben Punkte wurden am 26.07.2026 bestanden. Der Kill-Switch-Probelauf
+endete ohne gestarteten Attempt mit `STOPPED_KILL_SWITCH`; nach recoverable
+Entfernen des Markers meldete der Preflight erneut ausschließlich
+`PREFLIGHT_READY`. Die finale Unit verweist auf
+`automation_island_week_v2`, ist aber deaktiviert und inaktiv.
+
 ## Empfohlene Reihenfolge
 
-1. Aktuelle Korrektur testen, committen und ohne Laufzeitdaten pushen.
-2. Reales Zwei-Wave-Canary ausführen und Restart/Child-Vertrag prüfen.
-3. Laufzeit- und Speicherbudgets aus Seed 4001 plus Canary kalibrieren.
-4. Separates Wochenpreset erstellen, Preflight und Operatorprobe bestehen.
-5. Erst dann den einwöchigen Search-only-Lauf starten.
+Die Vorbereitungsschritte 1–4 sind abgeschlossen. Verbleibend ist nur die
+bewusste Freigabe und der Start des einwöchigen Search-only-Laufs.
