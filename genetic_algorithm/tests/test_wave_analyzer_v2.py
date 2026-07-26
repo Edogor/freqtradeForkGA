@@ -296,6 +296,11 @@ def test_analysis_is_deterministic_and_aggregates_profit_risk_and_activity(tmp_p
     assert candidate.worst_daily_es5_ucb == pytest.approx(0.02)
     assert candidate.median_profit_factor == pytest.approx(1.5)
     assert candidate.median_win_rate == pytest.approx(0.6)
+    assert candidate.min_scenario_net_return == pytest.approx(0.08)
+    assert candidate.profitable_scenario_ratio == pytest.approx(1.0)
+    assert candidate.max_drawdown_duration_days == pytest.approx(20.0)
+    assert candidate.median_gate_alignment_score == pytest.approx(1.0)
+    assert candidate.failed_gate_count == 0
     assert candidate.scenario_trade_count_sum == 120
     assert first.to_decision() == second.to_decision()
     assert first.to_decision().input_hash == snapshot.snapshot_hash
@@ -352,6 +357,8 @@ def test_failed_candidate_gate_cannot_be_compensated_by_good_metrics(tmp_path: P
     assert "RETURN_LCB_TOO_LOW" in candidate.failed_gate_reason_codes
     assert candidate.valid_observation_count == 2
     assert candidate.median_annualized_return_lcb == pytest.approx(0.05)
+    assert candidate.median_gate_alignment_score == pytest.approx(0.5)
+    assert candidate.failed_gate_count == 1
     assert analysis.has_eligible_candidates is False
     assert analysis.planning_allowed is False
     assert "NO_ELIGIBLE_CANDIDATES" in analysis.reason_codes

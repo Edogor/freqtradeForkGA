@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import time
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -32,12 +33,17 @@ from genetic_algorithm.orchestration.attempt_state_v2 import (
     WorkerBindingV2,
     WorkerKind,
 )
+from genetic_algorithm.orchestration.automation_report_v2 import (
+    persist_automation_analysis_report,
+)
 from genetic_algorithm.orchestration.candidate_selector_v2 import (
     CandidateSelectionPolicyV2,
 )
-from genetic_algorithm.orchestration.data_manifest_v2 import resolve_spot_data_root
-from genetic_algorithm.orchestration.data_manifest_v2 import build_data_manifest
 from genetic_algorithm.orchestration.code_manifest_v2 import capture_code_manifest
+from genetic_algorithm.orchestration.data_manifest_v2 import (
+    build_data_manifest,
+    resolve_spot_data_root,
+)
 from genetic_algorithm.orchestration.evolution_worker_v2 import (
     evolution_worker_argv,
     load_evolution_worker,
@@ -50,14 +56,11 @@ from genetic_algorithm.orchestration.promotion_policy_v2 import (
     shadow_gate_policy_from_config,
 )
 from genetic_algorithm.orchestration.result_contract import StrictV2Model
-from genetic_algorithm.orchestration.automation_report_v2 import (
-    persist_automation_analysis_report,
+from genetic_algorithm.orchestration.shadow_scheduler_v2 import (
+    ShadowSchedulerConfigV2,
 )
 from genetic_algorithm.orchestration.split_contract_v2 import (
     build_evaluation_split_plan,
-)
-from genetic_algorithm.orchestration.shadow_scheduler_v2 import (
-    ShadowSchedulerConfigV2,
 )
 from genetic_algorithm.orchestration.wave_analyzer_v2 import (
     WaveAnalysisV2,
@@ -65,6 +68,7 @@ from genetic_algorithm.orchestration.wave_analyzer_v2 import (
     WaveAnalyzerV2,
 )
 from genetic_algorithm.orchestration.wave_materializer_v2 import (
+    ChildWaveMaterializationV2,
     MaterializedAttemptV2,
     PreparedChildWaveMaterializationV2,
     materialize_evolution_wave,
@@ -87,7 +91,6 @@ from genetic_algorithm.orchestration.wave_state_v2 import (
     WaveDecisionV2,
     WaveLifecycleStatus,
     WaveSpecV2,
-    WaveStateError,
     WaveStateStoreV2,
     WaveStateV2,
 )
@@ -104,6 +107,7 @@ class AutomationPolicyV2(StrictV2Model):
     max_waves: int = Field(ge=1)
     max_total_attempts: int = Field(ge=1)
     max_consecutive_failed_waves: int = Field(ge=1)
+    max_continuation_parent_waves: int = Field(default=3, ge=1)
     max_concurrent: int = Field(ge=1)
     max_runtime_seconds: int = Field(ge=1)
     max_attempt_runtime_seconds: int = Field(ge=1)
@@ -316,7 +320,7 @@ def default_automation_policy(
         max_wallclock_seconds=48 * 60 * 60,
     )
     return AutomationPolicyV2(
-        automation_policy_version="guarded-island-search-v2.2",
+        automation_policy_version="guarded-island-search-v2.3",
         root_seeds=controller_config["root_seeds"],
         max_waves=controller_config["max_waves"],
         # The measured Generic-Island path needs roughly 28 minutes and
@@ -325,6 +329,7 @@ def default_automation_policy(
         # the independent 40-GiB artifact cap.
         max_total_attempts=400,
         max_consecutive_failed_waves=3,
+        max_continuation_parent_waves=3,
         max_concurrent=1,
         max_runtime_seconds=7 * 24 * 60 * 60,
         max_attempt_runtime_seconds=12 * 60 * 60,
@@ -345,12 +350,26 @@ def default_automation_policy(
             require_eligible_candidate_for_planning=False,
         ),
         selection_policy=CandidateSelectionPolicyV2(
-            selection_policy_version="guarded-island-pareto-v2.0",
+            selection_policy_version="guarded-island-pareto-v2.1-continuation",
             max_selected=1,
             min_selected=1,
             max_per_experiment=1,
             max_pareto_rank=1,
             min_normalized_objective_distance=0,
+            allow_continuation_candidates=True,
+            continuation_allowed_failed_gate_reason_codes=[
+                "ANNUAL_RETURN_LCB_TOO_LOW",
+                "DRAWDOWN_DURATION_TOO_HIGH",
+                "EXPECTANCY_LCB_TOO_LOW",
+                "MAX_DRAWDOWN_UCB_TOO_HIGH",
+                "TRADE_RATE_TOO_LOW",
+            ],
+            continuation_min_scenario_net_return=0.0,
+            continuation_max_drawdown_ucb=0.30,
+            continuation_max_daily_es5_ucb=0.05,
+            continuation_min_effective_sample_size=30.0,
+            continuation_min_profitable_scenario_ratio=0.75,
+            continuation_max_drawdown_duration_days=365.0,
         ),
         planner_policy=WavePlannerPolicyV2(
             planner_policy_version="guarded-island-next-wave-v2.1",
@@ -868,8 +887,43 @@ class AutomationControllerV2:
             experiments,
             self._resolved_configs(experiments),
             self.policy.planner_policy,
+            excluded_continuation_phenotype_hashes=(
+                self._saturated_continuation_parents()
+            ),
         )
         return analysis, plan
+
+    def _saturated_continuation_parents(self) -> list[str]:
+        """Bound repeated continuation from the same phenotype across child waves."""
+
+        counts: Counter[str] = Counter()
+        materialization_root = self.automation_root / "waves"
+        if not materialization_root.exists():
+            return []
+        for receipt_path in sorted(materialization_root.glob("*/materialization.json")):
+            try:
+                receipt = ChildWaveMaterializationV2.model_validate_json(
+                    receipt_path.read_bytes()
+                )
+            except (OSError, ValueError) as error:
+                raise AutomationControllerError(
+                    f"invalid child materialization receipt: {receipt_path}"
+                ) from error
+            selected_in_wave = {
+                str(experiment.source.phenotype_hash)
+                for experiment in receipt.plan.experiments
+                if (
+                    experiment.source.source_mode
+                    == PlannerSourceMode.SELECTED_CANDIDATES
+                    and experiment.source.phenotype_hash is not None
+                )
+            }
+            counts.update(selected_in_wave)
+        return sorted(
+            phenotype_hash
+            for phenotype_hash, count in counts.items()
+            if count >= self.policy.max_continuation_parent_waves
+        )
 
     def _guard_plan(
         self,
@@ -929,7 +983,12 @@ class AutomationControllerV2:
         )
         return self.store.apply_decision(
             WaveDecisionV2(
-                decision_id=f"block-{canonical_config_hash({'wave': wave.wave_id, 'reasons': reasons})[:24]}",
+                decision_id=(
+                    "block-"
+                    + canonical_config_hash(
+                        {"wave": wave.wave_id, "reasons": reasons}
+                    )[:24]
+                ),
                 wave_id=wave.wave_id,
                 decision_type=WaveDecisionType.BLOCK,
                 created_at=analysis.created_at + timedelta(microseconds=1),

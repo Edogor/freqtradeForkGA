@@ -1,0 +1,12 @@
+# Canary for guarded continuation from economically safe, non-promotable candidates.
+#
+# This profile changes only campaign identity and the wave budget. Search,
+# evaluation, promotion, resource, disabled-feature and no-trading contracts
+# are inherited unchanged from the audited automation_island_v2 baseline.
+
+config_schema_version: 2
+preset: automation_island_v2
+
+automation_controller:
+  root_seeds: [7001]
+  max_waves: 2

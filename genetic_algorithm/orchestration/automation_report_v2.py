@@ -22,6 +22,7 @@ from genetic_algorithm.orchestration.wave_state_v2 import WaveStateStoreV2
 
 
 REPORT_SCHEMA_VERSION = "2.0"
+CAMPAIGN_SUMMARY_SCHEMA_VERSION = "1.0"
 
 
 def _atomic_replace(path: Path, payload: bytes) -> None:
@@ -35,7 +36,7 @@ def _atomic_replace(path: Path, payload: bytes) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -107,6 +108,7 @@ def _attempt_summaries(
         state = attempts[attempt_id]
         summary: dict[str, Any] = {
             "attempt_id": attempt_id,
+            "experiment_id": state.experiment_id,
             "status": state.status.value,
             "result_status": None,
             "error_code": None,
@@ -117,6 +119,11 @@ def _attempt_summaries(
             "config_hash": None,
             "data_manifest_hash": None,
             "seeds": [],
+            "artifact_bytes": sum(
+                path.stat().st_size
+                for path in Path(state.artifact_root).rglob("*")
+                if path.is_file()
+            ),
             "candidates": [],
         }
         if state.result_path:
@@ -198,6 +205,241 @@ def _attempt_summaries(
     return summaries
 
 
+def build_campaign_summary_v2(
+    reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build one deterministic, sanitized cross-wave campaign rollup."""
+
+    root_wave_ids = {str(item["root_wave_id"]) for item in reports}
+    if len(root_wave_ids) > 1:
+        raise ValueError("campaign summary cannot mix root wave lineages")
+    ordered = sorted(
+        reports,
+        key=lambda item: (
+            str(item["analyzed_at"]),
+            str(item["wave_id"]),
+            str(item["analysis_hash"]),
+        ),
+    )
+    seen_phenotypes: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    for report in ordered:
+        candidates = report.get("candidate_analyses", [])
+        phenotype_hashes = sorted(
+            {
+                str(item["phenotype_hash"])
+                for item in candidates
+                if item.get("phenotype_hash")
+            }
+        )
+        repeated = sorted(set(phenotype_hashes).intersection(seen_phenotypes))
+        seen_phenotypes.update(phenotype_hashes)
+        best = max(
+            candidates,
+            key=lambda item: (
+                (
+                    0.0
+                    if item.get("median_gate_alignment_score") is None
+                    else float(item["median_gate_alignment_score"])
+                ),
+                (
+                    float("-inf")
+                    if item.get("median_robust_score") is None
+                    else float(item["median_robust_score"])
+                ),
+                str(item.get("phenotype_hash", "")),
+            ),
+            default=None,
+        )
+        attempts = report.get("attempts", [])
+        entries.append(
+            {
+                "wave_id": report["wave_id"],
+                "analyzed_at": report["analyzed_at"],
+                "controller_outcome": report["controller_outcome"],
+                "controller_reason_codes": report["controller_reason_codes"],
+                "analysis_reason_codes": report["analysis_reason_codes"],
+                "attempt_count": len(attempts),
+                "successful_attempt_count": sum(
+                    item.get("result_status") == "SUCCEEDED" for item in attempts
+                ),
+                "duration_seconds": sum(
+                    float(item.get("duration_seconds") or 0.0) for item in attempts
+                ),
+                "artifact_bytes": sum(
+                    int(item.get("artifact_bytes") or 0) for item in attempts
+                ),
+                "seeds": sorted(
+                    {
+                        int(seed)
+                        for item in attempts
+                        for seed in item.get("seeds", [])
+                    }
+                ),
+                "candidate_count": len(candidates),
+                "promotion_eligible_candidate_count": sum(
+                    item.get("eligibility_status") == "ELIGIBLE"
+                    for item in candidates
+                ),
+                "unique_phenotype_count": len(phenotype_hashes),
+                "repeated_phenotype_count": len(repeated),
+                "repeated_phenotype_hashes": repeated,
+                "failed_gate_reason_codes": sorted(
+                    {
+                        str(reason)
+                        for item in candidates
+                        for reason in item.get("failed_gate_reason_codes", [])
+                    }
+                ),
+                "best_candidate": (
+                    None
+                    if best is None
+                    else {
+                        "experiment_id": best["experiment_id"],
+                        "phenotype_hash": best["phenotype_hash"],
+                        "eligibility_status": best["eligibility_status"],
+                        "median_gate_alignment_score": best.get(
+                            "median_gate_alignment_score"
+                        ),
+                        "median_robust_score": best.get("median_robust_score"),
+                        "min_scenario_net_return": best.get(
+                            "min_scenario_net_return"
+                        ),
+                        "worst_max_drawdown_ucb": best.get(
+                            "worst_max_drawdown_ucb"
+                        ),
+                        "min_trades_per_active_month": best.get(
+                            "min_trades_per_active_month"
+                        ),
+                        "max_drawdown_duration_days": best.get(
+                            "max_drawdown_duration_days"
+                        ),
+                        "failed_gate_reason_codes": best.get(
+                            "failed_gate_reason_codes", []
+                        ),
+                    }
+                ),
+            }
+        )
+    return {
+        "schema_version": CAMPAIGN_SUMMARY_SCHEMA_VERSION,
+        "report_kind": "SEARCH_ONLY_CAMPAIGN_SUMMARY",
+        "promotion_authorized": False,
+        "root_wave_id": ordered[0]["root_wave_id"] if ordered else None,
+        "wave_count": len(entries),
+        "attempt_count": sum(item["attempt_count"] for item in entries),
+        "successful_attempt_count": sum(
+            item["successful_attempt_count"] for item in entries
+        ),
+        "duration_seconds": sum(item["duration_seconds"] for item in entries),
+        "artifact_bytes": sum(item["artifact_bytes"] for item in entries),
+        "unique_phenotype_count": len(seen_phenotypes),
+        "repeated_phenotype_observation_count": sum(
+            item["repeated_phenotype_count"] for item in entries
+        ),
+        "waves": entries,
+    }
+
+
+def _campaign_markdown(summary: dict[str, Any]) -> str:
+    lines = [
+        "# Automation campaign summary",
+        "",
+        "Search-only evidence. This summary never authorizes strategy promotion "
+        "or trading.",
+        "",
+        f"- Root wave: `{summary['root_wave_id']}`",
+        f"- Waves: `{summary['wave_count']}`",
+        f"- Successful attempts: `{summary['successful_attempt_count']}` / "
+        f"`{summary['attempt_count']}`",
+        f"- Artifact bytes: `{summary['artifact_bytes']}`",
+        f"- Unique phenotypes: `{summary['unique_phenotype_count']}`",
+        f"- Repeated phenotype observations: "
+        f"`{summary['repeated_phenotype_observation_count']}`",
+        "",
+        "| Wave | Outcome | Attempts | Candidates | Eligible | Gate alignment | "
+        "Worst return | DD UCB | Trades/month | DD days | Repeats |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for item in summary["waves"]:
+        best = item["best_candidate"] or {}
+
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{item['wave_id']}`",
+                    str(item["controller_outcome"]),
+                    str(item["attempt_count"]),
+                    str(item["candidate_count"]),
+                    str(item["promotion_eligible_candidate_count"]),
+                    _summary_metric(best, "median_gate_alignment_score"),
+                    _summary_metric(best, "min_scenario_net_return"),
+                    _summary_metric(best, "worst_max_drawdown_ucb"),
+                    _summary_metric(best, "min_trades_per_active_month"),
+                    _summary_metric(best, "max_drawdown_duration_days"),
+                    str(item["repeated_phenotype_count"]),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _summary_metric(best: dict[str, Any], name: str) -> str:
+    raw = best.get(name)
+    return "—" if raw is None else f"{float(raw):.4f}"
+
+
+def _persist_campaign_summary(
+    reports_root: Path,
+    *,
+    root_wave_id: str,
+) -> tuple[Path, Path]:
+    by_wave: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+    for path in sorted(reports_root.glob("wave-*/*.json")):
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if report.get("report_kind") != "SEARCH_ONLY_ANALYSIS":
+            continue
+        if report.get("root_wave_id") != root_wave_id:
+            continue
+        by_wave.setdefault(str(report["wave_id"]), []).append((path, report))
+    outcome_priority = {
+        "CONTINUE_SEARCH": 1,
+        "BLOCKED": 2,
+        "STOPPED_LIMIT": 3,
+    }
+    selected_reports = [
+        max(
+            items,
+            key=lambda pair: (
+                outcome_priority.get(
+                    str(pair[1].get("controller_outcome")), 0
+                ),
+                pair[0].name,
+            ),
+        )[1]
+        for _, items in sorted(by_wave.items())
+    ]
+    summary = build_campaign_summary_v2(selected_reports)
+    json_payload = (
+        json.dumps(
+            summary,
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode()
+    json_path = reports_root / "CAMPAIGN_SUMMARY.json"
+    markdown_path = reports_root / "CAMPAIGN_SUMMARY.md"
+    _atomic_replace(json_path, json_payload)
+    _atomic_replace(markdown_path, _campaign_markdown(summary).encode())
+    return json_path, markdown_path
+
+
 def build_automation_analysis_report(
     store: WaveStateStoreV2,
     *,
@@ -251,7 +493,8 @@ def _markdown(report: dict[str, Any]) -> str:
         "",
         "## Candidate scenarios",
         "",
-        "| Candidate | Pair | Role | Status | Trades | Return | DD UCB | Win rate | Profit factor |",
+        "| Candidate | Pair | Role | Status | Trades | Return | DD UCB | "
+        "Win rate | Profit factor |",
         "|---|---|---|---|---:|---:|---:|---:|---:|",
     ]
     rows = 0
@@ -332,4 +575,5 @@ def persist_automation_analysis_report(
     latest_dir = Path(automation_root).resolve() / "reports"
     _atomic_replace(latest_dir / "LATEST.json", json_payload)
     _atomic_replace(latest_dir / "LATEST.md", markdown_payload)
+    _persist_campaign_summary(latest_dir, root_wave_id=root_wave_id)
     return json_path, markdown_path

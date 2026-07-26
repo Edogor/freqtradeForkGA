@@ -85,6 +85,11 @@ def _candidate() -> CandidateAnalysisV2:
         median_win_rate=0.6,
         min_effective_sample_size=40,
         min_trades_per_active_month=10,
+        min_scenario_net_return=0.04,
+        profitable_scenario_ratio=1.0,
+        max_drawdown_duration_days=20,
+        median_gate_alignment_score=1.0,
+        failed_gate_count=0,
         scenario_trade_count_sum=120,
     )
 
@@ -251,6 +256,97 @@ def test_control_is_unchanged_and_selected_arm_has_exact_declared_delta():
     assert by_arm["exploit"].source.phenotype_hash == "f" * 64
     assert by_arm["exploit"].source.observation_ref is not None
     assert by_arm["exploit"].source.observation_ref.seed == 11
+
+
+def test_continuation_candidate_creates_control_replication_and_explore_arms():
+    continuation = _candidate().model_copy(
+        update={
+            "eligibility_status": CandidateEligibilityStatus.INELIGIBLE,
+            "reason_codes": ["TRADE_RATE_TOO_LOW"],
+            "failed_gate_reason_codes": ["TRADE_RATE_TOO_LOW"],
+            "median_gate_alignment_score": 0.8,
+            "failed_gate_count": 1,
+        }
+    )
+    analysis = _analysis().model_copy(
+        update={
+            "candidates": [continuation],
+            "has_eligible_candidates": False,
+        }
+    )
+    selection = select_wave_candidates(
+        analysis,
+        CandidateSelectionPolicyV2(
+            selection_policy_version="selection-continuation-planner-test",
+            max_selected=1,
+            min_selected=1,
+            max_per_experiment=1,
+            min_normalized_objective_distance=0,
+            allow_continuation_candidates=True,
+            continuation_allowed_failed_gate_reason_codes=[
+                "TRADE_RATE_TOO_LOW"
+            ],
+        ),
+    )
+    policy = WavePlannerPolicyV2(
+        planner_policy_version="planner-continuation-test",
+        child_result_policy_version="result-planner-test",
+        child_search_space_version="search-space-child-test",
+        budget=WaveBudgetV2(
+            max_attempts=3,
+            max_parallel=1,
+            max_wallclock_seconds=7200,
+        ),
+        arm_templates=[
+            WaveArmTemplateV2(
+                arm_id="control",
+                arm_type=ExperimentArmType.CONTROL,
+                source_mode=PlannerSourceMode.BASELINE_CONTROL,
+                hypothesis="Fresh paired control.",
+                primary_metric="annualized_net_return_lcb",
+                seeds=[101],
+            ),
+            WaveArmTemplateV2(
+                arm_id="replication",
+                arm_type=ExperimentArmType.REPLICATION,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Continue from selected genome.",
+                primary_metric="annualized_net_return_lcb",
+                seeds=[101],
+            ),
+            WaveArmTemplateV2(
+                arm_id="explore",
+                arm_type=ExperimentArmType.EXPLORE,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Explore around selected genome.",
+                primary_metric="annualized_net_return_lcb",
+                factor_delta={"ga.mutation_rate": 0.25},
+                seeds=[101],
+            ),
+        ],
+    )
+
+    plan = plan_child_wave(
+        analysis,
+        selection,
+        [_parent_experiment()],
+        {BASE_CONFIG_HASH: BASE_CONFIG},
+        policy,
+    )
+
+    assert selection.assessments[0].selection_basis == "CONTINUATION_ELIGIBLE"
+    assert plan.planning_allowed is True
+    assert {item.arm_type for item in plan.experiments} == {
+        ExperimentArmType.CONTROL,
+        ExperimentArmType.REPLICATION,
+        ExperimentArmType.EXPLORE,
+    }
+    selected_sources = [
+        item.source
+        for item in plan.experiments
+        if item.source.source_mode == PlannerSourceMode.SELECTED_CANDIDATES
+    ]
+    assert {item.phenotype_hash for item in selected_sources} == {"f" * 64}
 
 
 def test_unknown_or_type_changing_factor_delta_is_rejected():

@@ -37,6 +37,10 @@ def _candidate(
     es_ucb: float,
     panel_hash: str = PANEL,
     eligible: bool = True,
+    failed_reason: str = "RISK_GATE_FAILED",
+    min_scenario_return: float = 0.02,
+    profitable_scenario_ratio: float | None = None,
+    max_drawdown_duration_days: float = 180,
 ) -> CandidateAnalysisV2:
     phenotype_hash = marker * 64
     candidate_ids = [f"candidate-{marker}-1", f"candidate-{marker}-2"]
@@ -64,9 +68,9 @@ def _candidate(
             else CandidateEligibilityStatus.INELIGIBLE
         ),
         reason_codes=(
-            ["CANDIDATE_ELIGIBLE"] if eligible else ["RISK_GATE_FAILED"]
+            ["CANDIDATE_ELIGIBLE"] if eligible else [failed_reason]
         ),
-        failed_gate_reason_codes=[] if eligible else ["RISK_GATE_FAILED"],
+        failed_gate_reason_codes=[] if eligible else [failed_reason],
         comparison_panel_hash=panel_hash,
         median_robust_score=annual_return_lcb - drawdown_ucb - es_ucb,
         worst_annualized_return_lcb=annual_return_lcb,
@@ -78,6 +82,17 @@ def _candidate(
         median_win_rate=0.6,
         min_effective_sample_size=40,
         min_trades_per_active_month=10,
+        min_scenario_net_return=min_scenario_return,
+        profitable_scenario_ratio=(
+            profitable_scenario_ratio
+            if profitable_scenario_ratio is not None
+            else 1.0
+            if min_scenario_return > 0
+            else 0.75
+        ),
+        max_drawdown_duration_days=max_drawdown_duration_days,
+        median_gate_alignment_score=0.8,
+        failed_gate_count=0 if eligible else 1,
         scenario_trade_count_sum=120,
     )
 
@@ -332,3 +347,123 @@ def test_ineligible_candidates_never_enter_pareto_pool():
     assert selection.ineligible_candidate_count == 1
     assert len(selection.assessments) == 1
     assert selection.assessments[0].phenotype_hash == eligible.phenotype_hash
+
+
+def test_continuation_candidate_can_seed_search_without_promotion_eligibility():
+    continuation = _candidate(
+        "a",
+        annual_return_lcb=-0.01,
+        expectancy_lcb=-0.001,
+        drawdown_ucb=0.28,
+        es_ucb=0.03,
+        eligible=False,
+        failed_reason="TRADE_RATE_TOO_LOW",
+    )
+    policy = _policy(
+        allow_continuation_candidates=True,
+        continuation_allowed_failed_gate_reason_codes=["TRADE_RATE_TOO_LOW"],
+        continuation_min_scenario_net_return=0.0,
+        continuation_max_drawdown_ucb=0.30,
+        continuation_max_daily_es5_ucb=0.05,
+        continuation_min_effective_sample_size=30,
+    )
+
+    selection = select_wave_candidates(_analysis([continuation]), policy)
+
+    assert selection.planning_allowed is True
+    assert selection.eligible_candidate_count == 0
+    assert selection.continuation_candidate_count == 1
+    assert selection.rejected_candidate_count == 0
+    assert selection.assessments[0].selection_basis == "CONTINUATION_ELIGIBLE"
+    assert selection.assessments[0].selected is True
+
+
+@pytest.mark.parametrize(
+    ("override", "failed_reason"),
+    [
+        ({"min_scenario_return": -0.01}, "TRADE_RATE_TOO_LOW"),
+        (
+            {"profitable_scenario_ratio": 0.5},
+            "TRADE_RATE_TOO_LOW",
+        ),
+        (
+            {"max_drawdown_duration_days": 366},
+            "DRAWDOWN_DURATION_TOO_HIGH",
+        ),
+        ({}, "PROFITABLE_SCENARIO_RATIO_TOO_LOW"),
+    ],
+)
+def test_continuation_rejects_unsafe_economics_or_unapproved_gate_failure(
+    override,
+    failed_reason,
+):
+    candidate = _candidate(
+        "a",
+        annual_return_lcb=-0.01,
+        expectancy_lcb=-0.001,
+        drawdown_ucb=0.28,
+        es_ucb=0.03,
+        eligible=False,
+        failed_reason=failed_reason,
+        **override,
+    )
+    policy = _policy(
+        allow_continuation_candidates=True,
+        continuation_allowed_failed_gate_reason_codes=sorted(
+            ["DRAWDOWN_DURATION_TOO_HIGH", "TRADE_RATE_TOO_LOW"]
+        ),
+    )
+
+    selection = select_wave_candidates(_analysis([candidate]), policy)
+
+    assert selection.planning_allowed is False
+    assert selection.continuation_candidate_count == 0
+    assert selection.rejected_candidate_count == 1
+    assert "NO_CONTINUATION_CANDIDATES" in selection.reason_codes
+
+
+def test_saturated_continuation_parent_is_excluded_but_promotion_candidate_is_not():
+    continuation = _candidate(
+        "a",
+        annual_return_lcb=-0.01,
+        expectancy_lcb=-0.001,
+        drawdown_ucb=0.20,
+        es_ucb=0.02,
+        eligible=False,
+        failed_reason="TRADE_RATE_TOO_LOW",
+    )
+    policy = _policy(
+        allow_continuation_candidates=True,
+        continuation_allowed_failed_gate_reason_codes=["TRADE_RATE_TOO_LOW"],
+    )
+
+    blocked = select_wave_candidates(
+        _analysis([continuation]),
+        policy,
+        excluded_continuation_phenotype_hashes=[continuation.phenotype_hash],
+    )
+
+    assert blocked.planning_allowed is False
+    assert blocked.continuation_candidate_count == 0
+    assert blocked.rejected_candidate_count == 1
+    assert blocked.excluded_continuation_phenotype_hashes == [
+        continuation.phenotype_hash
+    ]
+    assert "NO_CONTINUATION_CANDIDATES" in blocked.reason_codes
+
+    promoted = continuation.model_copy(
+        update={
+            "eligibility_status": CandidateEligibilityStatus.ELIGIBLE,
+            "reason_codes": ["CANDIDATE_ELIGIBLE"],
+            "failed_gate_reason_codes": [],
+        }
+    )
+    allowed = select_wave_candidates(
+        _analysis([promoted]),
+        policy,
+        excluded_continuation_phenotype_hashes=[promoted.phenotype_hash],
+    )
+
+    assert allowed.planning_allowed is True
+    assert allowed.eligible_candidate_count == 1
+    assert allowed.excluded_continuation_phenotype_hashes == []

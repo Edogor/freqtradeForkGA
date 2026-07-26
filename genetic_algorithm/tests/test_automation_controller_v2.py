@@ -14,8 +14,12 @@ import yaml
 
 from freqtrade.misc import pair_to_filename
 from genetic_algorithm import cli
-from genetic_algorithm.orchestration import automation_controller_v2
 from genetic_algorithm.config.schema import load_config
+from genetic_algorithm.orchestration import automation_controller_v2
+from genetic_algorithm.orchestration.attempt_state_v2 import (
+    AttemptLifecycleStatus,
+    WorkerKind,
+)
 from genetic_algorithm.orchestration.automation_controller_v2 import (
     AutomationBootstrapIntentV2,
     AutomationControllerV2,
@@ -24,14 +28,11 @@ from genetic_algorithm.orchestration.automation_controller_v2 import (
     default_automation_policy,
     render_systemd_user_unit,
 )
-from genetic_algorithm.orchestration.attempt_state_v2 import (
-    AttemptLifecycleStatus,
-    WorkerKind,
-)
 from genetic_algorithm.orchestration.promotion_policy_v2 import (
     ScenarioRequirementV2,
     ShadowGatePolicyV2,
 )
+from genetic_algorithm.orchestration.wave_planner_v2 import PlannerSourceMode
 from genetic_algorithm.orchestration.wave_state_v2 import (
     WaveLifecycleStatus,
     WaveStateStoreV2,
@@ -83,6 +84,11 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources(
     assert policy.max_runtime_seconds == 7 * 24 * 60 * 60
     assert policy.max_artifact_bytes == 40 * 1024**3
     assert policy.max_concurrent == 1
+    assert policy.max_continuation_parent_waves == 3
+    assert policy.selection_policy.allow_continuation_candidates is True
+    assert policy.selection_policy.continuation_min_scenario_net_return == 0.0
+    assert policy.selection_policy.continuation_min_profitable_scenario_ratio == 0.75
+    assert policy.selection_policy.continuation_max_drawdown_duration_days == 365.0
     assert report.config_hash
     assert load_config(
         repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml"
@@ -180,6 +186,70 @@ def test_two_wave_canary_changes_only_campaign_identity_and_budget():
         if key != "automation_controller"
     }
     assert canary_without_campaign == baseline_without_campaign
+
+
+def test_continuation_canary_changes_only_campaign_identity_and_budget():
+    repo_root = Path(__file__).resolve().parents[2]
+    baseline = load_config(
+        repo_root
+        / "genetic_algorithm/config/presets/automation_island_v2.yaml"
+    )
+    canary = load_config(
+        repo_root
+        / "genetic_algorithm/config/presets/automation_island_continuation_canary_v2.yaml"
+    )
+
+    assert canary["automation_controller"] == {
+        "root_seeds": [7001],
+        "max_waves": 2,
+    }
+    assert {
+        key: value
+        for key, value in canary.items()
+        if key != "automation_controller"
+    } == {
+        key: value
+        for key, value in baseline.items()
+        if key != "automation_controller"
+    }
+
+
+def test_continuation_parent_limit_counts_each_materialized_wave_once(
+    tmp_path: Path,
+    monkeypatch,
+):
+    automation_root = tmp_path / "automation"
+    for marker in ("a", "b", "c"):
+        receipt_path = (
+            automation_root / "waves" / f"wave-{marker}" / "materialization.json"
+        )
+        receipt_path.parent.mkdir(parents=True)
+        receipt_path.write_text("{}\n", encoding="utf-8")
+    phenotype_hash = "f" * 64
+    selected_source = SimpleNamespace(
+        source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+        phenotype_hash=phenotype_hash,
+    )
+    # Replication and Explore point at the same parent but count as one reuse
+    # because the bound applies per materialized child wave, not per arm.
+    receipt = SimpleNamespace(
+        plan=SimpleNamespace(
+            experiments=[
+                SimpleNamespace(source=selected_source),
+                SimpleNamespace(source=selected_source),
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        automation_controller_v2,
+        "ChildWaveMaterializationV2",
+        SimpleNamespace(model_validate_json=lambda payload: receipt),
+    )
+    controller = object.__new__(AutomationControllerV2)
+    controller.automation_root = automation_root
+    controller.policy = SimpleNamespace(max_continuation_parent_waves=3)
+
+    assert controller._saturated_continuation_parents() == [phenotype_hash]
 
 
 def test_week_profile_changes_only_campaign_identity_and_budget():

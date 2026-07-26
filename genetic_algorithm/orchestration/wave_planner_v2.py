@@ -593,6 +593,7 @@ def plan_child_wave(
 
     fallback_reasons = {
         "NO_ELIGIBLE_CANDIDATES",
+        "NO_CONTINUATION_CANDIDATES",
         "INSUFFICIENT_DIVERSE_CANDIDATES",
     }
     use_control_fallback = (
@@ -610,6 +611,7 @@ def plan_child_wave(
     recovery_selection_reasons = {
         "ANALYSIS_BLOCKED",
         "NO_ELIGIBLE_CANDIDATES",
+        "NO_CONTINUATION_CANDIDATES",
         "INSUFFICIENT_DIVERSE_CANDIDATES",
     }
     use_control_recovery = (
@@ -702,8 +704,16 @@ def select_and_plan_child_wave(
     parent_experiments: list[ExperimentSpecV2],
     resolved_configs: Mapping[str, Mapping[str, Any]],
     planner_policy: WavePlannerPolicyV2,
+    *,
+    excluded_continuation_phenotype_hashes: list[str] | None = None,
 ) -> tuple[CandidateSelectionV2, ChildWavePlanV2]:
-    selection = select_wave_candidates(analysis, selection_policy)
+    selection = select_wave_candidates(
+        analysis,
+        selection_policy,
+        excluded_continuation_phenotype_hashes=(
+            excluded_continuation_phenotype_hashes
+        ),
+    )
     plan = plan_child_wave(
         analysis,
         selection,

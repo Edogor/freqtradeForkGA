@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from statistics import median
+from statistics import mean, median
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -152,6 +152,11 @@ class CandidateAnalysisV2(StrictV2Model):
     median_win_rate: float | None = Field(default=None, ge=0, le=1)
     min_effective_sample_size: float | None = Field(default=None, ge=0)
     min_trades_per_active_month: float | None = Field(default=None, ge=0)
+    min_scenario_net_return: float | None = None
+    profitable_scenario_ratio: float | None = Field(default=None, ge=0, le=1)
+    max_drawdown_duration_days: float | None = Field(default=None, ge=0)
+    median_gate_alignment_score: float | None = Field(default=None, ge=0, le=1)
+    failed_gate_count: int = Field(default=0, ge=0)
     scenario_trade_count_sum: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
@@ -435,6 +440,31 @@ def _comparison_panel_hash(candidate: CandidateEvaluationV2) -> str:
     return canonical_config_hash({"cells": cells})
 
 
+def _gate_alignment_score(candidate: CandidateEvaluationV2) -> float:
+    """Return a shadow-only 0..1 proximity score for declared numeric gates."""
+
+    components: list[float] = []
+    for gate in candidate.gates:
+        if gate.status != EvaluationStatus.VALID:
+            continue
+        if gate.passed is True:
+            components.append(1.0)
+            continue
+        if gate.observed is None or gate.threshold is None or gate.operator is None:
+            components.append(0.0)
+            continue
+        observed = float(gate.observed)
+        threshold = float(gate.threshold)
+        if gate.operator in {">", ">="} and threshold > 0:
+            components.append(max(0.0, min(1.0, observed / threshold)))
+        elif gate.operator in {"<", "<="} and observed > 0 and threshold >= 0:
+            components.append(max(0.0, min(1.0, threshold / observed)))
+        else:
+            # Zero/negative thresholds have no stable ratio interpretation.
+            components.append(0.0)
+    return mean(components) if components else 0.0
+
+
 def _candidate_analysis(
     experiment_id: str,
     phenotype_hash: str,
@@ -493,11 +523,18 @@ def _candidate_analysis(
     profit_factors = [float(record.metrics.profit_factor) for record in scenarios]
     win_rates = [float(record.metrics.win_rate) for record in scenarios]
     effective_samples = [float(record.metrics.effective_sample_size) for record in scenarios]
+    scenario_returns = [float(record.metrics.net_return) for record in scenarios]
     trades_per_month = [
         record.metrics.trade_count / record.metrics.active_months
         if record.metrics.active_months
         else 0.0
         for record in scenarios
+    ]
+    drawdown_durations = [
+        float(record.metrics.max_drawdown_duration_days) for record in scenarios
+    ]
+    gate_alignment_scores = [
+        _gate_alignment_score(item.candidate) for item in valid
     ]
     return CandidateAnalysisV2(
         experiment_id=experiment_id,
@@ -537,6 +574,19 @@ def _candidate_analysis(
         median_win_rate=median(win_rates) if win_rates else None,
         min_effective_sample_size=min(effective_samples) if effective_samples else None,
         min_trades_per_active_month=min(trades_per_month) if trades_per_month else None,
+        min_scenario_net_return=min(scenario_returns) if scenario_returns else None,
+        profitable_scenario_ratio=(
+            sum(value > 0 for value in scenario_returns) / len(scenario_returns)
+            if scenario_returns
+            else None
+        ),
+        max_drawdown_duration_days=(
+            max(drawdown_durations) if drawdown_durations else None
+        ),
+        median_gate_alignment_score=(
+            median(gate_alignment_scores) if gate_alignment_scores else None
+        ),
+        failed_gate_count=len(failed_gates),
         scenario_trade_count_sum=sum(record.metrics.trade_count for record in scenarios),
     )
 

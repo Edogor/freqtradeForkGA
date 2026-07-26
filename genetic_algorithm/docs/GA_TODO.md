@@ -891,6 +891,23 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   Bootstrap-Intent wird read-only gegen den geplanten Config-, Automation-Policy- und Seedvertrag
   geprüft. Abweichungen sowie ein Receipt ohne Intent blockieren mit maschinenlesbaren
   Reason-Codes, bevor `automation start` erst im mutierenden Bootstrap scheitert.
+- [x] **ORCH-029 – Sichere Continuation-Kandidaten von Promotion trennen.** Eine technisch
+  vollständige Strategie ohne negatives Szenario darf die Suche fortsetzen, obwohl sie
+  ausgewählte Aktivitäts-/Unsicherheitsgates noch nicht besteht. Dies autorisiert ausdrücklich
+  keine Promotion. Unbekannte Gatefehler, negative Szenariorendite, DD-UCB über 30 %, Daily-ES-UCB
+  über 5 %, zu kleine effektive Stichprobe oder unvollständige Evidenz blockieren. Der
+  Pareto-Vertrag bleibt Return/Expectancy versus DD/ES ohne kompensierenden Gesamtscore.
+- [x] **ORCH-030 – Campaign-Rollup ohne sensible Artefakte persistieren.** Zusätzlich zu
+  immutable Wave-Berichten entstehen atomar aktualisierte `CAMPAIGN_SUMMARY.json` und `.md`.
+  Sie aggregieren Laufzeit, Speicher, Seeds, Gatefehler, beste konservative Metriken und
+  wiederkehrende Phänotyphashes. Root-Lineages dürfen nicht vermischt werden; Strategiecode,
+  Genome, Trades und Logs bleiben ausgeschlossen.
+- [x] **ORCH-031 – Endlose Parent-Ausbeutung begrenzen und Gate-Nähe beobachten.** Ein
+  Shadow-only Gate-Alignment-Score zeigt, ob Kandidaten sich den deklarierten Gates annähern,
+  verändert aber weder Gates noch Promotion. Derselbe nur als Continuation zugelassene
+  Phänotyp darf höchstens drei Child-Waves speisen; danach fällt der Planner auf ein frisches
+  Control zurück. Wird derselbe Phänotyp später vollständig promotionsfähig, greift diese
+  Continuation-Sperre nicht.
 
 ## P0: Config-Vertrag
 

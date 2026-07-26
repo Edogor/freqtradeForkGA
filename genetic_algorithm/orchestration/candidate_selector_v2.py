@@ -51,11 +51,29 @@ class CandidateSelectionPolicyV2(StrictV2Model):
     dominance_epsilon: float = Field(default=1e-12, ge=0)
     require_common_comparison_panel: bool = True
     require_analysis_planning_allowed: bool = True
+    allow_continuation_candidates: bool = False
+    continuation_allowed_failed_gate_reason_codes: list[str] = Field(
+        default_factory=list
+    )
+    continuation_min_scenario_net_return: float = 0.0
+    continuation_max_drawdown_ucb: float = Field(default=0.30, ge=0)
+    continuation_max_daily_es5_ucb: float = Field(default=0.05, ge=0)
+    continuation_min_effective_sample_size: float = Field(default=30.0, ge=0)
+    continuation_min_profitable_scenario_ratio: float = Field(
+        default=0.75, ge=0, le=1
+    )
+    continuation_max_drawdown_duration_days: float = Field(default=365.0, ge=0)
 
     @model_validator(mode="after")
     def _coherent_capacity(self) -> CandidateSelectionPolicyV2:
         if self.min_selected > self.max_selected:
             raise ValueError("min_selected cannot exceed max_selected")
+        if self.continuation_allowed_failed_gate_reason_codes != sorted(
+            set(self.continuation_allowed_failed_gate_reason_codes)
+        ):
+            raise ValueError(
+                "continuation allowed gate reasons must be unique and sorted"
+            )
         return self
 
     @property
@@ -67,6 +85,7 @@ class ParetoAssessmentV2(StrictV2Model):
     experiment_id: str = Field(min_length=1)
     phenotype_hash: str = Field(min_length=8)
     comparison_panel_hash: str = Field(min_length=64, max_length=64)
+    selection_basis: Literal["PROMOTION_ELIGIBLE", "CONTINUATION_ELIGIBLE"]
     pareto_rank: int | None = Field(default=None, ge=0)
     selected: bool
     selection_order: int | None = Field(default=None, ge=0)
@@ -110,7 +129,12 @@ class CandidateSelectionV2(StrictV2Model):
     objective_schema: Literal["return-risk-pareto-v1"] = OBJECTIVE_SCHEMA
     comparison_panel_hash: str | None = Field(default=None, min_length=64, max_length=64)
     eligible_candidate_count: int = Field(ge=0)
+    continuation_candidate_count: int = Field(default=0, ge=0)
+    rejected_candidate_count: int = Field(default=0, ge=0)
     ineligible_candidate_count: int = Field(ge=0)
+    excluded_continuation_phenotype_hashes: list[str] = Field(
+        default_factory=list
+    )
     assessments: list[ParetoAssessmentV2] = Field(default_factory=list)
     selected_candidate_keys: list[str] = Field(default_factory=list)
     planning_allowed: bool
@@ -134,6 +158,12 @@ class CandidateSelectionV2(StrictV2Model):
             raise ValueError("selected candidate keys differ from assessments")
         if self.reason_codes != sorted(set(self.reason_codes)):
             raise ValueError("selection reason_codes must be unique and sorted")
+        if self.excluded_continuation_phenotype_hashes != sorted(
+            set(self.excluded_continuation_phenotype_hashes)
+        ):
+            raise ValueError(
+                "excluded continuation phenotype hashes must be unique and sorted"
+            )
         if self.planning_allowed and len(selected) < self.selection_policy.min_selected:
             raise ValueError("planning allowed with too few selected candidates")
         return self
@@ -168,6 +198,56 @@ def _objectives(candidate: CandidateAnalysisV2) -> dict[ParetoObjective, float]:
             "worst_daily_es5_ucb",
         ),
     }
+
+
+def _continuation_candidate(
+    candidate: CandidateAnalysisV2,
+    policy: CandidateSelectionPolicyV2,
+) -> bool:
+    if not policy.allow_continuation_candidates:
+        return False
+    if candidate.eligibility_status == CandidateEligibilityStatus.ELIGIBLE:
+        return False
+    if candidate.valid_observation_count != candidate.observation_count:
+        return False
+    if candidate.comparison_panel_hash is None:
+        return False
+    failed = set(candidate.failed_gate_reason_codes)
+    if not failed:
+        return False
+    if not failed.issubset(
+        set(policy.continuation_allowed_failed_gate_reason_codes)
+    ):
+        return False
+    if set(candidate.reason_codes) - failed:
+        return False
+    required = (
+        candidate.median_robust_score,
+        candidate.worst_annualized_return_lcb,
+        candidate.worst_max_drawdown_ucb,
+        candidate.worst_daily_es5_ucb,
+        candidate.worst_net_expectancy_lcb,
+        candidate.min_effective_sample_size,
+        candidate.min_scenario_net_return,
+        candidate.profitable_scenario_ratio,
+        candidate.max_drawdown_duration_days,
+    )
+    if any(value is None or not math.isfinite(float(value)) for value in required):
+        return False
+    return bool(
+        float(candidate.min_scenario_net_return)
+        >= policy.continuation_min_scenario_net_return
+        and float(candidate.worst_max_drawdown_ucb)
+        <= policy.continuation_max_drawdown_ucb
+        and float(candidate.worst_daily_es5_ucb)
+        <= policy.continuation_max_daily_es5_ucb
+        and float(candidate.min_effective_sample_size)
+        >= policy.continuation_min_effective_sample_size
+        and float(candidate.profitable_scenario_ratio)
+        >= policy.continuation_min_profitable_scenario_ratio
+        and float(candidate.max_drawdown_duration_days)
+        <= policy.continuation_max_drawdown_duration_days
+    )
 
 
 def _maximization_vector(values: dict[ParetoObjective, float]) -> tuple[float, ...]:
@@ -317,41 +397,68 @@ def _select_diverse(
 def select_wave_candidates(
     analysis: WaveAnalysisV2,
     policy: CandidateSelectionPolicyV2,
+    *,
+    excluded_continuation_phenotype_hashes: list[str] | None = None,
 ) -> CandidateSelectionV2:
     """Rank and select candidates without collapsing return and risk to one score."""
 
+    excluded = set(excluded_continuation_phenotype_hashes or [])
     eligible = [
         item
         for item in analysis.candidates
         if item.eligibility_status == CandidateEligibilityStatus.ELIGIBLE
     ]
+    all_continuation = [
+        item
+        for item in analysis.candidates
+        if _continuation_candidate(item, policy)
+    ]
+    continuation = [
+        item
+        for item in all_continuation
+        if item.phenotype_hash not in excluded
+    ]
+    applied_exclusions = sorted(
+        {
+            item.phenotype_hash
+            for item in all_continuation
+            if item.phenotype_hash in excluded
+        }
+    )
+    selectable = [*eligible, *continuation]
     ineligible_count = len(analysis.candidates) - len(eligible)
+    rejected_count = len(analysis.candidates) - len(selectable)
     reasons: set[str] = set()
     if policy.require_analysis_planning_allowed and not analysis.planning_allowed:
         reasons.add("ANALYSIS_BLOCKED")
-    if not eligible:
-        reasons.add("NO_ELIGIBLE_CANDIDATES")
+    if not selectable:
+        reasons.add(
+            "NO_CONTINUATION_CANDIDATES"
+            if policy.allow_continuation_candidates
+            else "NO_ELIGIBLE_CANDIDATES"
+        )
 
-    panel_hashes = {item.comparison_panel_hash for item in eligible}
+    panel_hashes = {item.comparison_panel_hash for item in selectable}
     if None in panel_hashes:
-        raise CandidateSelectionError("eligible candidate lacks comparison panel hash")
+        raise CandidateSelectionError("selectable candidate lacks comparison panel hash")
     common_panel = next(iter(panel_hashes)) if len(panel_hashes) == 1 else None
     if policy.require_common_comparison_panel and len(panel_hashes) > 1:
         reasons.add("INCOMPARABLE_CANDIDATE_PANELS")
 
     values = {
-        (item.experiment_id, item.phenotype_hash): _objectives(item) for item in eligible
+        (item.experiment_id, item.phenotype_hash): _objectives(item)
+        for item in selectable
     }
-    may_compare = bool(eligible) and (
+    may_compare = bool(selectable) and (
         common_panel is not None or not policy.require_common_comparison_panel
     )
     ranks = (
-        _pareto_ranks(eligible, values, policy.dominance_epsilon)
+        _pareto_ranks(selectable, values, policy.dominance_epsilon)
         if may_compare
         else {}
     )
     selected, distances = (
-        _select_diverse(eligible, values, ranks, policy)
+        _select_diverse(selectable, values, ranks, policy)
         if may_compare and "ANALYSIS_BLOCKED" not in reasons
         else ([], {})
     )
@@ -362,7 +469,10 @@ def select_wave_candidates(
 
     order = {key: index for index, key in enumerate(selected)}
     assessments: list[ParetoAssessmentV2] = []
-    for candidate in eligible:
+    continuation_keys = {
+        (item.experiment_id, item.phenotype_hash) for item in continuation
+    }
+    for candidate in selectable:
         key = (candidate.experiment_id, candidate.phenotype_hash)
         candidate_reasons: set[str] = set()
         if key in order:
@@ -378,6 +488,11 @@ def select_wave_candidates(
                 experiment_id=candidate.experiment_id,
                 phenotype_hash=candidate.phenotype_hash,
                 comparison_panel_hash=str(candidate.comparison_panel_hash),
+                selection_basis=(
+                    "CONTINUATION_ELIGIBLE"
+                    if key in continuation_keys
+                    else "PROMOTION_ELIGIBLE"
+                ),
                 pareto_rank=ranks.get(key),
                 selected=key in order,
                 selection_order=order.get(key),
@@ -403,7 +518,10 @@ def select_wave_candidates(
         selection_policy_hash=policy.policy_hash,
         comparison_panel_hash=common_panel,
         eligible_candidate_count=len(eligible),
+        continuation_candidate_count=len(continuation),
+        rejected_candidate_count=rejected_count,
         ineligible_candidate_count=ineligible_count,
+        excluded_continuation_phenotype_hashes=applied_exclusions,
         assessments=assessments,
         selected_candidate_keys=[item.candidate_key for item in selected_assessments],
         planning_allowed=planning_allowed,

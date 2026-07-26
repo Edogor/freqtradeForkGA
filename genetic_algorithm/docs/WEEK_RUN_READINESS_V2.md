@@ -4,7 +4,8 @@ Stand: 26.07.2026
 
 ## Entscheidung
 
-**GO nach ausdrücklicher Startfreigabe.** Search-/Replay-Semantik,
+**GO für den neuen Continuation-Canary; Wochenlauf danach erneut freigeben.**
+Search-/Replay-Semantik,
 Root-zu-Child-Handoff, Restart-Verhalten, Wochenbudgets und die reale
 Kill-Switch-/systemd-Betriebsprobe sind nachgewiesen. Der vorbereitete Dienst
 bleibt bis zur bewussten Freigabe deaktiviert und inaktiv.
@@ -159,5 +160,16 @@ Entfernen des Markers meldete der Preflight erneut ausschließlich
 
 ## Empfohlene Reihenfolge
 
-Die Vorbereitungsschritte 1–4 sind abgeschlossen. Verbleibend ist nur die
-bewusste Freigabe und der Start des einwöchigen Search-only-Laufs.
+Die bisherige Wochenlauf-Bereitschaft bleibt nachgewiesen. Vor dem Start mit
+der neuen Policyversion muss aber ein kurzer Seed-7001-Canary zusätzlich
+belegen:
+
+1. sichere, noch nicht promotionsfähige Evidenz erzeugt tatsächlich
+   Control/Replication/Explore statt endloser Scratch-Controls;
+2. negative oder unbekannt fehlschlagende Kandidaten bleiben ausgeschlossen;
+3. `CAMPAIGN_SUMMARY` stimmt mit immutable Wave-Berichten und State-DB überein;
+4. der Dienst stoppt weiterhin sauber an `MAX_WAVES_REACHED`.
+
+Danach werden der frische Wochen-Bootstrap und die systemd-Unit aus dem
+getesteten Commit neu erzeugt. Der Seed-6001-Bootstrap der vorherigen
+Policyversion wurde recoverable archiviert und wird nicht wiederverwendet.

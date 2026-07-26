@@ -83,6 +83,8 @@ Standardpfade:
   `genetic_algorithm/data/v2/automation/STOP_AUTOMATION`
 - kompakter, automatisch aktualisierter Analysebericht:
   `genetic_algorithm/data/v2/automation/reports/LATEST.md`
+- kampagnenweiter, sanitizierter Verlauf:
+  `genetic_algorithm/data/v2/automation/reports/CAMPAIGN_SUMMARY.md`
 
 Eigene Pfade können mit `--state-db` und `--automation-root` gesetzt werden. Beide Optionen müssen
 bei Start und Status konsistent verwendet werden.
@@ -115,14 +117,20 @@ denselben Startbefehl erneut ausführen.
 - der Executor beendet die gesamte Worker-Prozessgruppe spätestens nach 12 Stunden
 - maximal drei vollständig fehlgeschlagene Waves werden als Scratch-Control recovered; danach
   blockiert der Controller
+- derselbe nur bedingt geeignete Continuation-Phänotyp darf höchstens drei Child-Waves speisen
 - pro Child-Wave höchstens drei Attempts: Control, Replication, Explore
 - erlaubtes Config-Delta: nur `genetic_algorithm.mutation_rate`
 
 Wenn ein robuster Kandidat alle Gates besteht, wird er Pareto-basiert anhand konservativer
 Return-/Expectancy-LCBs und DD-/ES-UCBs ausgewählt. Replication und Explore erhalten sein
-hashverifiziertes Genom. Wenn eine technisch gesunde Wave noch keinen eligible Kandidaten enthält,
-läuft nur eine neue Scratch-Control weiter. Technische Fehlerquoten, unvollständige Evidenz,
-unbekannte Deltas, unsichere Configs, Budgetgrenzen oder Hashabweichungen blockieren fail-closed.
+hashverifiziertes Genom. Ein Kandidat, der noch nicht promotionsfähig ist, darf ausschließlich
+zur Fortsetzung der Suche dienen, wenn kein Szenario eine negative Nettorendite hat, mindestens
+75 % der Szenarien profitabel sind, Evidenz und Stichprobe vollständig sind, DD-/ES- sowie eine
+365-Tage-Drawdown-Dauergrenze eingehalten werden und nur ausdrücklich erlaubte Gategründe
+fehlschlagen. Diese Continuation bleibt Search-only und ist auf drei Parent-Waves begrenzt.
+Existiert kein solcher Kandidat, läuft nur eine neue Scratch-Control weiter. Technische
+Fehlerquoten, unvollständige Evidenz, unbekannte Deltas, unsichere Configs, Budgetgrenzen oder
+Hashabweichungen blockieren fail-closed.
 Ein einzelner technischer Totalausfall darf ebenfalls als Scratch-Control recovered werden, aber
 nur bis zur fest gebundenen Serie von drei vollständig fehlgeschlagenen Waves.
 
