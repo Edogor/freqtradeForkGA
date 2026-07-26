@@ -79,6 +79,10 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources(
     )
     assert policy.root_seeds == [4001]
     assert policy.max_waves == 1
+    assert policy.max_total_attempts == 400
+    assert policy.max_runtime_seconds == 7 * 24 * 60 * 60
+    assert policy.max_artifact_bytes == 40 * 1024**3
+    assert policy.max_concurrent == 1
     assert report.config_hash
     assert load_config(
         repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml"
@@ -176,6 +180,43 @@ def test_two_wave_canary_changes_only_campaign_identity_and_budget():
         if key != "automation_controller"
     }
     assert canary_without_campaign == baseline_without_campaign
+
+
+def test_week_profile_changes_only_campaign_identity_and_budget():
+    repo_root = Path(__file__).resolve().parents[2]
+    baseline = load_config(
+        repo_root
+        / "genetic_algorithm/config/presets/automation_island_v2.yaml"
+    )
+    week = load_config(
+        repo_root
+        / "genetic_algorithm/config/presets/automation_island_week_v2.yaml"
+    )
+
+    assert week["automation_controller"] == {
+        "root_seeds": [6001],
+        "max_waves": 400,
+    }
+    assert {
+        key: value
+        for key, value in week.items()
+        if key != "automation_controller"
+    } == {
+        key: value
+        for key, value in baseline.items()
+        if key != "automation_controller"
+    }
+    policy = default_automation_policy(
+        week,
+        automation_root=repo_root
+        / "genetic_algorithm/data/v2/week-preflight-test-empty",
+    )
+    assert policy.max_total_attempts == 400
+    assert policy.max_runtime_seconds == 7 * 24 * 60 * 60
+    assert policy.max_artifact_bytes == 40 * 1024**3
+    assert policy.min_free_disk_bytes == 20 * 1024**3
+    assert policy.min_available_memory_bytes == 2 * 1024**3
+    assert policy.max_concurrent == 1
 
 
 def _bootstrap(tmp_path: Path):

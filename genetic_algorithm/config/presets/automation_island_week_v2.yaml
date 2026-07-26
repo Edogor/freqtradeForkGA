@@ -1,0 +1,12 @@
+# First guarded multi-day Generic-Island search-only campaign.
+#
+# This profile changes only campaign identity and the wave budget. Search,
+# evaluation, promotion, resource, disabled-feature and no-trading contracts
+# are inherited unchanged from the audited automation_island_v2 baseline.
+
+config_schema_version: 2
+preset: automation_island_v2
+
+automation_controller:
+  root_seeds: [6001]
+  max_waves: 400

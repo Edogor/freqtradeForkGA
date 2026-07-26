@@ -3,6 +3,26 @@
 Stand: 25.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
 
+Zweiunddreißigster Slice (26.07.2026): Der korrigierte reale Zwei-Wave-Canary
+mit Seed 5002 erfüllte den vollständigen Root-zu-Child-Vertrag. Root
+`wave-root-752b0431cf834e8d8b45` und Child
+`wave-7967ae58a5fd801345dcfc97` endeten mit hashverifizierten
+`SUCCEEDED`-Attempts. Alle 96 Evaluationsbatches meldeten null Fehler. Der
+Planner erzeugte genau ein Scratch-Control mit dem deterministisch rotierten
+Seed 2167265058; Manifest, Engine-Config und persistierter Plan stimmen
+überein. `LATEST`, State-DB und Child-Bericht melden denselben kontrollierten
+Stopp `MAX_WAVES_REACHED`. Der Dienst lief 56:42 Minuten bei etwa 1,5 GiB
+Peak-RAM und 31 MiB Gesamtartefakten ohne Restart oder Journalfehler.
+
+Der Canary ist recoverable archiviert. Das neue minimale Wochenprofil
+`automation_island_week_v2` erbt alle geprüften Search-, Evaluation-,
+Promotion-, Ressourcen- und No-Trading-Verträge unverändert. Es setzt nur
+Seed 6001 und 400 Waves. Das globale Attemptlimit steigt versioniert auf 400:
+bei gemessenen rund 28 Minuten und 15,5 MiB pro Attempt bleibt der
+7-Tage-Guard erreichbar, während nur etwa 6,2 GiB Artefakte projiziert sind.
+Parallelität eins, 40-GiB-Artefaktlimit, 20-GiB-Freireserve und
+2-GiB-RAM-Reserve bleiben unverändert.
+
 Einunddreißigster Slice (25.07.2026): Der erste reale Zwei-Wave-Canary mit
 Seed 5001 führte seinen Root `wave-root-5b304ca3495b79c82f21` technisch
 erfolgreich aus. Das Resultat ist hashverifiziert, alle 48

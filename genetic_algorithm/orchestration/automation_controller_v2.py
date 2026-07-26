@@ -316,10 +316,14 @@ def default_automation_policy(
         max_wallclock_seconds=48 * 60 * 60,
     )
     return AutomationPolicyV2(
-        automation_policy_version="guarded-island-search-v2.1",
+        automation_policy_version="guarded-island-search-v2.2",
         root_seeds=controller_config["root_seeds"],
         max_waves=controller_config["max_waves"],
-        max_total_attempts=148,
+        # The measured Generic-Island path needs roughly 28 minutes and
+        # 15.5 MiB per attempt. Four hundred attempts allow the seven-day
+        # wall-clock guard to remain the primary limit while staying far below
+        # the independent 40-GiB artifact cap.
+        max_total_attempts=400,
         max_consecutive_failed_waves=3,
         max_concurrent=1,
         max_runtime_seconds=7 * 24 * 60 * 60,

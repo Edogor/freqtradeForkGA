@@ -12,7 +12,7 @@ Regime- und Classic-Island-Pfade.
 
 ```bash
 .venv/bin/python -m genetic_algorithm config validate \
-  genetic_algorithm/config/presets/automation_island_v2.yaml --strict
+  genetic_algorithm/config/presets/automation_island_week_v2.yaml --strict
 ```
 
 Der mitgelieferte Datensatzvertrag erwartet aktuell BTC/SOL als Training und ETH/BNB als räumliche
@@ -29,7 +29,7 @@ Der read-only Produktions-Preflight prüft zusätzlich Venv, Daten-/Split-/Codeh
 Plattenplatz und verfügbaren RAM:
 
 ```bash
-.venv/bin/python -m genetic_algorithm automation preflight automation_island_v2
+.venv/bin/python -m genetic_algorithm automation preflight automation_island_week_v2
 ```
 
 Nur `ready: true` mit `PREFLIGHT_READY` ist startfähig. Ein vorhandener
@@ -40,7 +40,7 @@ aus den aktiven State-/Automation-Pfaden entfernt werden.
 ## Start oder Wiederanlauf
 
 ```bash
-.venv/bin/python -m genetic_algorithm automation start automation_island_v2
+.venv/bin/python -m genetic_algorithm automation start automation_island_week_v2
 ```
 
 Der Befehl läuft absichtlich im Vordergrund. Für eine Urlaubs-Ausführung sollte er durch einen
@@ -103,7 +103,9 @@ denselben Startbefehl erneut ausführen.
 - maximal 7 Tage Laufzeit
 - das aktuelle Diagnose-Preset stoppt nach genau einem Root-Wave; erst nach dessen Review darf
   `automation_controller.max_waves` bewusst erhöht werden
-- maximal 148 Attempts
+- maximal 400 Attempts; die Canary-Messung von rund 28 Minuten und 15,5 MiB
+  pro Attempt lässt damit den 7-Tage-Guard vor dem Attemptlimit greifen und
+  projiziert nur etwa 6,2 GiB Artefakte
 - maximal ein paralleler Attempt
 - maximal 40 GiB unter dem Automation-Root
 - mindestens 20 GiB müssen auf dem Dateisystem frei bleiben

@@ -7,7 +7,7 @@ Stand: 25.07.2026
 **NO-GO für den sofortigen Wochenstart.** Der Seed-3001-Lauf war technisch
 stabil, hat aber einen wesentlichen Search-/Replay-Semantikfehler sichtbar
 gemacht. Die Korrektur ist implementiert. Vor einem siebentägigen Lauf fehlen
-noch zwei reale Kurzlauf-Nachweise.
+noch die abschließende Betriebsprobe des Wochenprofils.
 
 Der Wochenlauf bleibt ein Search-only-Shadow-Lauf. Auch ein vollständig
 bestandener Wochenlauf autorisiert weder Paper- noch Live-Trading und ist kein
@@ -41,6 +41,10 @@ Ersatz für ein bisher unberührtes finales Pair-x-Zeit-Panel.
   Root-zu-Child-Verträge sind automatisiert getestet. Der Mini-E2E führt
   inzwischen beide Waves einschließlich Bootstrap-Neustart und kontrolliertem
   `MAX_WAVES_REACHED` tatsächlich aus.
+- Der reale Seed-5002-Canary führte Root und Child in 56:42 Minuten aus.
+  Beide Attempts waren hashverifiziert `SUCCEEDED`, alle 96
+  Evaluationsbatches hatten null Fehler, der Child-Seed 2167265058 entsprach
+  dem Plan und der Controller stoppte ohne Restart mit `MAX_WAVES_REACHED`.
 
 ## Muss vor dem Wochenlauf erledigt werden
 
@@ -106,15 +110,14 @@ Go-Kriterien:
   fertigen Zustand;
 - `LATEST.md`, State-DB und immutable Resultate berichten denselben Ausgang.
 
-Der vollständige Mini-E2E belegt diese Mechanik einschließlich Neustart und
-Child-Ausführung. Ein vollständiger realer Generic-Island-Child wurde im
-Produktionspfad noch nicht abgeschlossen. Der Seed-5002-Wiederholungslauf ist
-deshalb der wichtigste verbleibende Automationsnachweis.
+Der vollständige Mini-E2E und der reale Seed-5002-Lauf erfüllen alle
+Go-Kriterien. Der Zwei-Wave-Canary ist recoverable archiviert.
 
 ### 3. Wochenprofil und Betriebsprobe separat freigeben
 
-Das Diagnose-Preset wird nicht direkt zum Wochenprofil umgebaut. Nach den
-beiden Canaries wird ein separates, strikt validiertes Wochenpreset angelegt.
+Das Diagnose-Preset wird nicht direkt zum Wochenprofil umgebaut. Das separate
+`automation_island_week_v2` erbt den geprüften Vertrag unverändert und setzt
+nur den frischen Root-Seed 6001 sowie `max_waves: 400`.
 Bewusst festzulegen sind:
 
 - frischer Root-Seed, der noch zu keiner immutable Wave gehört;
@@ -123,6 +126,15 @@ Bewusst festzulegen sind:
 - maximaler Worker- und Executor-Timeout;
 - Verhalten nach technischen Totalausfällen;
 - Aufbewahrung und kompakte Berichte ohne Strategie-/Trade-/Logdaten im Git.
+
+Gemessene Kalibrierung:
+
+- 56:42 Minuten und 31 MiB für zwei vollständige Waves;
+- etwa 1,5 GiB Peak-RAM bei genau einem parallelen Attempt;
+- maximal 400 Attempts und 400 Waves, sodass der 7-Tage-Wallclock-Guard im
+  üblichen Ein-Control-Pfad vor dem Attemptlimit greift;
+- circa 6,2 GiB projizierte Artefakte bei unverändertem 40-GiB-Limit und
+  20-GiB-Freireserve.
 
 Unmittelbar vor dem Start:
 
