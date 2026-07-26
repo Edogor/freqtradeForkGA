@@ -8,6 +8,7 @@ from genetic_algorithm.orchestration.automation_report_v2 import (
 
 
 def _report(wave: str, when: str, phenotype: str, alignment: float):
+    experiment_id = f"experiment-{wave}"
     return {
         "root_wave_id": "wave-root",
         "wave_id": wave,
@@ -16,15 +17,45 @@ def _report(wave: str, when: str, phenotype: str, alignment: float):
         "controller_outcome": "CONTINUE_SEARCH",
         "controller_reason_codes": ["PLAN_COMPLETE"],
         "analysis_reason_codes": ["NO_ELIGIBLE_CANDIDATES"],
+        "experiments": [
+            {
+                "experiment_id": experiment_id,
+                "arm_type": "EXPLORE",
+            }
+        ],
+        "plan_summary": {
+            "parent_wave_id": "parent-wave",
+            "plan_hash": "f" * 64,
+            "plan_reason_codes": ["PLAN_COMPLETE"],
+            "experiments": [
+                {
+                    "experiment_id": experiment_id,
+                    "arm_id": "explore",
+                    "arm_type": "EXPLORE",
+                    "seeds": [1],
+                    "factor_delta": {"mutation_rate": 0.05},
+                    "source_mode": "SELECTED_CANDIDATE",
+                    "parent_experiment_id": "parent-experiment",
+                    "parent_config_hash": "c" * 64,
+                    "selected_candidate_key": "candidate-key",
+                    "phenotype_hash": "p" * 64,
+                }
+            ],
+        },
         "candidate_analyses": [
             {
-                "experiment_id": f"experiment-{wave}",
+                "experiment_id": experiment_id,
                 "phenotype_hash": phenotype,
                 "eligibility_status": "INELIGIBLE",
                 "median_gate_alignment_score": alignment,
                 "median_robust_score": -0.1,
                 "min_scenario_net_return": 0.01,
+                "profitable_scenario_ratio": 1.0,
+                "worst_annualized_return_lcb": -0.02,
+                "worst_net_expectancy_lcb": -0.001,
                 "worst_max_drawdown_ucb": 0.2,
+                "worst_daily_es5_ucb": 0.02,
+                "min_effective_sample_size": 40,
                 "min_trades_per_active_month": 3.0,
                 "max_drawdown_duration_days": 200,
                 "failed_gate_reason_codes": ["TRADE_RATE_TOO_LOW"],
@@ -32,6 +63,7 @@ def _report(wave: str, when: str, phenotype: str, alignment: float):
         ],
         "attempts": [
             {
+                "experiment_id": experiment_id,
                 "result_status": "SUCCEEDED",
                 "duration_seconds": 120,
                 "artifact_bytes": 1024,
@@ -49,6 +81,7 @@ def test_campaign_summary_is_order_independent_and_warns_on_repeated_phenotype()
     reversed_input = build_campaign_summary_v2([second, first])
 
     assert forward == reversed_input
+    assert forward["schema_version"] == "1.1"
     assert forward["wave_count"] == 2
     assert forward["attempt_count"] == 2
     assert forward["successful_attempt_count"] == 2
@@ -60,6 +93,25 @@ def test_campaign_summary_is_order_independent_and_warns_on_repeated_phenotype()
     assert (
         forward["waves"][1]["best_candidate"]["median_gate_alignment_score"]
         == 0.8
+    )
+    assert forward["waves"][1]["best_candidate"]["arm_id"] == "explore"
+    assert forward["waves"][1]["best_candidate"]["arm_type"] == "EXPLORE"
+    assert forward["waves"][1]["arms"][0]["candidate_count"] == 1
+    assert forward["waves"][1]["arms"][0]["successful_attempt_count"] == 1
+    assert forward["waves"][1]["parent_wave_id"] == "parent-wave"
+    assert forward["waves"][1]["plan_hash"] == "f" * 64
+    assert forward["waves"][1]["arms"][0]["planned_seeds"] == [1]
+    assert forward["waves"][1]["arms"][0]["factor_delta"] == {
+        "mutation_rate": 0.05
+    }
+    assert (
+        forward["waves"][1]["arms"][0]["selected_parent_phenotype_hash"]
+        == "p" * 64
+    )
+    assert forward["waves"][1]["selected_parent_phenotype_hashes"] == ["p" * 64]
+    assert (
+        forward["waves"][1]["best_candidate"]["worst_net_expectancy_lcb"]
+        == -0.001
     )
 
 

@@ -18,11 +18,14 @@ import yaml
 
 from genetic_algorithm.orchestration.artifact_store_v2 import V2ArtifactStore
 from genetic_algorithm.orchestration.wave_analyzer_v2 import WaveAnalysisV2
+from genetic_algorithm.orchestration.wave_materializer_v2 import (
+    ChildWaveMaterializationV2,
+)
 from genetic_algorithm.orchestration.wave_state_v2 import WaveStateStoreV2
 
 
-REPORT_SCHEMA_VERSION = "2.0"
-CAMPAIGN_SUMMARY_SCHEMA_VERSION = "1.0"
+REPORT_SCHEMA_VERSION = "2.1"
+CAMPAIGN_SUMMARY_SCHEMA_VERSION = "1.1"
 
 
 def _atomic_replace(path: Path, payload: bytes) -> None:
@@ -205,6 +208,80 @@ def _attempt_summaries(
     return summaries
 
 
+def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, float, str]:
+    return (
+        (
+            0.0
+            if item.get("median_gate_alignment_score") is None
+            else float(item["median_gate_alignment_score"])
+        ),
+        (
+            float("-inf")
+            if item.get("median_robust_score") is None
+            else float(item["median_robust_score"])
+        ),
+        str(item.get("phenotype_hash", "")),
+    )
+
+
+def _sanitized_candidate_summary(
+    candidate: dict[str, Any] | None,
+    *,
+    arm_type: str | None,
+    arm_id: str | None,
+) -> dict[str, Any] | None:
+    if candidate is None:
+        return None
+    return {
+        "experiment_id": candidate["experiment_id"],
+        "arm_type": arm_type,
+        "arm_id": arm_id,
+        "phenotype_hash": candidate["phenotype_hash"],
+        "eligibility_status": candidate["eligibility_status"],
+        "median_gate_alignment_score": candidate.get(
+            "median_gate_alignment_score"
+        ),
+        "median_robust_score": candidate.get("median_robust_score"),
+        "min_scenario_net_return": candidate.get("min_scenario_net_return"),
+        "profitable_scenario_ratio": candidate.get(
+            "profitable_scenario_ratio"
+        ),
+        "worst_annualized_return_lcb": candidate.get(
+            "worst_annualized_return_lcb"
+        ),
+        "worst_net_expectancy_lcb": candidate.get(
+            "worst_net_expectancy_lcb"
+        ),
+        "worst_max_drawdown_ucb": candidate.get("worst_max_drawdown_ucb"),
+        "worst_daily_es5_ucb": candidate.get("worst_daily_es5_ucb"),
+        "min_effective_sample_size": candidate.get(
+            "min_effective_sample_size"
+        ),
+        "min_trades_per_active_month": candidate.get(
+            "min_trades_per_active_month"
+        ),
+        "max_drawdown_duration_days": candidate.get(
+            "max_drawdown_duration_days"
+        ),
+        "failed_gate_reason_codes": candidate.get(
+            "failed_gate_reason_codes", []
+        ),
+    }
+
+
+def _arm_metadata(
+    experiment_id: str,
+    plan_experiments: dict[str, dict[str, Any]],
+    experiment_analyses: dict[str, dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    planned = plan_experiments.get(experiment_id, {})
+    analyzed = experiment_analyses.get(experiment_id, {})
+    return (
+        planned.get("arm_type") or analyzed.get("arm_type"),
+        planned.get("arm_id"),
+    )
+
+
 def build_campaign_summary_v2(
     reports: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -225,6 +302,27 @@ def build_campaign_summary_v2(
     entries: list[dict[str, Any]] = []
     for report in ordered:
         candidates = report.get("candidate_analyses", [])
+        attempts = report.get("attempts", [])
+        plan_summary = report.get("plan_summary") or {}
+        plan_experiments = {
+            str(item["experiment_id"]): item
+            for item in plan_summary.get("experiments", [])
+        }
+        experiment_analyses = {
+            str(item["experiment_id"]): item
+            for item in report.get("experiments", [])
+        }
+        experiment_ids = sorted(
+            set(experiment_analyses)
+            | set(plan_experiments)
+            | {str(item["experiment_id"]) for item in candidates}
+            | {
+                str(item["experiment_id"])
+                for item in attempts
+                if item.get("experiment_id")
+            }
+        )
+
         phenotype_hashes = sorted(
             {
                 str(item["phenotype_hash"])
@@ -234,27 +332,78 @@ def build_campaign_summary_v2(
         )
         repeated = sorted(set(phenotype_hashes).intersection(seen_phenotypes))
         seen_phenotypes.update(phenotype_hashes)
-        best = max(
-            candidates,
-            key=lambda item: (
-                (
-                    0.0
-                    if item.get("median_gate_alignment_score") is None
-                    else float(item["median_gate_alignment_score"])
-                ),
-                (
-                    float("-inf")
-                    if item.get("median_robust_score") is None
-                    else float(item["median_robust_score"])
-                ),
-                str(item.get("phenotype_hash", "")),
-            ),
-            default=None,
+        best = max(candidates, key=_candidate_rank_key, default=None)
+        best_arm_type, best_arm_id = _arm_metadata(
+            str(best["experiment_id"]) if best is not None else "",
+            plan_experiments,
+            experiment_analyses,
         )
-        attempts = report.get("attempts", [])
+        arm_summaries: list[dict[str, Any]] = []
+        for experiment_id in experiment_ids:
+            experiment_candidates = [
+                item
+                for item in candidates
+                if item.get("experiment_id") == experiment_id
+            ]
+            experiment_attempts = [
+                item
+                for item in attempts
+                if item.get("experiment_id") == experiment_id
+            ]
+            arm_best = max(
+                experiment_candidates,
+                key=_candidate_rank_key,
+                default=None,
+            )
+            arm_type, arm_id = _arm_metadata(
+                experiment_id,
+                plan_experiments,
+                experiment_analyses,
+            )
+            planned = plan_experiments.get(experiment_id, {})
+            arm_summaries.append(
+                {
+                    "experiment_id": experiment_id,
+                    "arm_type": arm_type,
+                    "arm_id": arm_id,
+                    "planned_seeds": planned.get("seeds", []),
+                    "factor_delta": planned.get("factor_delta", {}),
+                    "source_mode": planned.get("source_mode"),
+                    "parent_experiment_id": planned.get(
+                        "parent_experiment_id"
+                    ),
+                    "parent_config_hash": planned.get("parent_config_hash"),
+                    "selected_candidate_key": planned.get(
+                        "selected_candidate_key"
+                    ),
+                    "selected_parent_phenotype_hash": planned.get(
+                        "phenotype_hash"
+                    ),
+                    "attempt_count": len(experiment_attempts),
+                    "successful_attempt_count": sum(
+                        item.get("result_status") == "SUCCEEDED"
+                        for item in experiment_attempts
+                    ),
+                    "candidate_count": len(experiment_candidates),
+                    "promotion_eligible_candidate_count": sum(
+                        item.get("eligibility_status") == "ELIGIBLE"
+                        for item in experiment_candidates
+                    ),
+                    "best_candidate": _sanitized_candidate_summary(
+                        arm_best,
+                        arm_type=arm_type,
+                        arm_id=arm_id,
+                    ),
+                }
+            )
         entries.append(
             {
                 "wave_id": report["wave_id"],
+                "parent_wave_id": plan_summary.get("parent_wave_id"),
+                "plan_hash": plan_summary.get("plan_hash"),
+                "plan_reason_codes": plan_summary.get(
+                    "plan_reason_codes", []
+                ),
                 "analyzed_at": report["analyzed_at"],
                 "controller_outcome": report["controller_outcome"],
                 "controller_reason_codes": report["controller_reason_codes"],
@@ -291,33 +440,18 @@ def build_campaign_summary_v2(
                         for reason in item.get("failed_gate_reason_codes", [])
                     }
                 ),
-                "best_candidate": (
-                    None
-                    if best is None
-                    else {
-                        "experiment_id": best["experiment_id"],
-                        "phenotype_hash": best["phenotype_hash"],
-                        "eligibility_status": best["eligibility_status"],
-                        "median_gate_alignment_score": best.get(
-                            "median_gate_alignment_score"
-                        ),
-                        "median_robust_score": best.get("median_robust_score"),
-                        "min_scenario_net_return": best.get(
-                            "min_scenario_net_return"
-                        ),
-                        "worst_max_drawdown_ucb": best.get(
-                            "worst_max_drawdown_ucb"
-                        ),
-                        "min_trades_per_active_month": best.get(
-                            "min_trades_per_active_month"
-                        ),
-                        "max_drawdown_duration_days": best.get(
-                            "max_drawdown_duration_days"
-                        ),
-                        "failed_gate_reason_codes": best.get(
-                            "failed_gate_reason_codes", []
-                        ),
+                "selected_parent_phenotype_hashes": sorted(
+                    {
+                        str(item["phenotype_hash"])
+                        for item in plan_experiments.values()
+                        if item.get("phenotype_hash")
                     }
+                ),
+                "arms": arm_summaries,
+                "best_candidate": _sanitized_candidate_summary(
+                    best,
+                    arm_type=best_arm_type,
+                    arm_id=best_arm_id,
                 ),
             }
         )
@@ -357,9 +491,11 @@ def _campaign_markdown(summary: dict[str, Any]) -> str:
         f"- Repeated phenotype observations: "
         f"`{summary['repeated_phenotype_observation_count']}`",
         "",
-        "| Wave | Outcome | Attempts | Candidates | Eligible | Gate alignment | "
-        "Worst return | DD UCB | Trades/month | DD days | Repeats |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Wave | Best arm | Outcome | Attempts | Candidates | Eligible | "
+        "Gate alignment | Min net return | Return LCB | Expectancy LCB | "
+        "DD UCB | ES UCB | Trades/month | DD days | Repeats |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "---:|---:|---:|",
     ]
     for item in summary["waves"]:
         best = item["best_candidate"] or {}
@@ -369,13 +505,17 @@ def _campaign_markdown(summary: dict[str, Any]) -> str:
             + " | ".join(
                 [
                     f"`{item['wave_id']}`",
+                    str(best.get("arm_id") or best.get("arm_type") or "—"),
                     str(item["controller_outcome"]),
                     str(item["attempt_count"]),
                     str(item["candidate_count"]),
                     str(item["promotion_eligible_candidate_count"]),
                     _summary_metric(best, "median_gate_alignment_score"),
                     _summary_metric(best, "min_scenario_net_return"),
+                    _summary_metric(best, "worst_annualized_return_lcb"),
+                    _summary_metric(best, "worst_net_expectancy_lcb"),
                     _summary_metric(best, "worst_max_drawdown_ucb"),
+                    _summary_metric(best, "worst_daily_es5_ucb"),
                     _summary_metric(best, "min_trades_per_active_month"),
                     _summary_metric(best, "max_drawdown_duration_days"),
                     str(item["repeated_phenotype_count"]),
@@ -404,6 +544,11 @@ def _persist_campaign_summary(
             continue
         if report.get("root_wave_id") != root_wave_id:
             continue
+        if report.get("plan_summary") is None:
+            report["plan_summary"] = _materialized_plan_summary(
+                reports_root.parent,
+                str(report["wave_id"]),
+            )
         by_wave.setdefault(str(report["wave_id"]), []).append((path, report))
     outcome_priority = {
         "CONTINUE_SEARCH": 1,
@@ -440,6 +585,38 @@ def _persist_campaign_summary(
     return json_path, markdown_path
 
 
+def _materialized_plan_summary(
+    automation_root: Path,
+    wave_id: str,
+) -> dict[str, Any] | None:
+    receipt_path = automation_root / "waves" / wave_id / "materialization.json"
+    if not receipt_path.is_file():
+        return None
+    receipt = ChildWaveMaterializationV2.model_validate_json(
+        receipt_path.read_bytes()
+    )
+    return {
+        "parent_wave_id": receipt.plan.parent_wave_id,
+        "plan_hash": receipt.plan_hash,
+        "plan_reason_codes": receipt.plan.reason_codes,
+        "experiments": [
+            {
+                "experiment_id": item.experiment_id,
+                "arm_id": item.arm_id,
+                "arm_type": item.arm_type.value,
+                "seeds": item.seeds,
+                "factor_delta": item.factor_delta,
+                "source_mode": item.source.source_mode.value,
+                "parent_experiment_id": item.source.parent_experiment_id,
+                "parent_config_hash": item.source.parent_config_hash,
+                "selected_candidate_key": item.source.selected_candidate_key,
+                "phenotype_hash": item.source.phenotype_hash,
+            }
+            for item in receipt.plan.experiments
+        ],
+    }
+
+
 def build_automation_analysis_report(
     store: WaveStateStoreV2,
     *,
@@ -447,6 +624,7 @@ def build_automation_analysis_report(
     root_wave_id: str,
     controller_outcome: str,
     controller_reason_codes: list[str],
+    plan_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a sanitized report from hash-verified attempt results."""
 
@@ -463,6 +641,7 @@ def build_automation_analysis_report(
         "planning_allowed": analysis.planning_allowed,
         "has_eligible_candidates": analysis.has_eligible_candidates,
         "analysis_reason_codes": analysis.reason_codes,
+        "plan_summary": plan_summary,
         "experiments": [
             item.model_dump(mode="json") for item in analysis.experiments
         ],
@@ -548,12 +727,17 @@ def persist_automation_analysis_report(
 ) -> tuple[Path, Path]:
     """Persist immutable JSON/Markdown plus convenient latest copies."""
 
+    resolved_automation_root = Path(automation_root).resolve()
     report = build_automation_analysis_report(
         store,
         analysis=analysis,
         root_wave_id=root_wave_id,
         controller_outcome=controller_outcome,
         controller_reason_codes=controller_reason_codes,
+        plan_summary=_materialized_plan_summary(
+            resolved_automation_root,
+            analysis.wave_id,
+        ),
     )
     json_payload = (
         json.dumps(
@@ -567,12 +751,12 @@ def persist_automation_analysis_report(
     ).encode()
     markdown_payload = _markdown(report).encode()
     report_hash = hashlib.sha256(json_payload).hexdigest()
-    report_dir = Path(automation_root).resolve() / "reports" / analysis.wave_id
+    report_dir = resolved_automation_root / "reports" / analysis.wave_id
     json_path = report_dir / f"{report_hash}.json"
     markdown_path = report_dir / f"{report_hash}.md"
     _write_immutable(json_path, json_payload)
     _write_immutable(markdown_path, markdown_payload)
-    latest_dir = Path(automation_root).resolve() / "reports"
+    latest_dir = resolved_automation_root / "reports"
     _atomic_replace(latest_dir / "LATEST.json", json_payload)
     _atomic_replace(latest_dir / "LATEST.md", markdown_payload)
     _persist_campaign_summary(latest_dir, root_wave_id=root_wave_id)

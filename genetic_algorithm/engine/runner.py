@@ -133,6 +133,10 @@ class RunEngine:
 
     def _setup(self, resume_from):
         """Pre-loop initialisation: diagnostics, monitor, population, pareto."""
+        # RunEngine owns the standard evolution lifecycle. Initialising this
+        # tracker in GeneticAlgorithm.__init__ produced one misleading STARTED
+        # event for every manually driven Generic-Island sub-GA.
+        self.ga._tracker.initialise()
         self.ga.diagnostics.start_run(self.ga.config)
         self.ga.monitor.start(self.ga.config)
 

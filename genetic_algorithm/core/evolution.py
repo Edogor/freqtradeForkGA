@@ -256,7 +256,6 @@ class GeneticAlgorithm:
         from genetic_algorithm.core.experiment_tracker import ExperimentTracker
 
         self._tracker = ExperimentTracker(self.config)
-        self._tracker.initialise()
 
         # --- Generation step delegate ---
         self._generation_step = GenerationStep(

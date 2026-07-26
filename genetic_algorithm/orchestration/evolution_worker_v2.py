@@ -862,6 +862,10 @@ def run_evolution_worker(
         config_path = store.write_engine_config(engine_config)
         if config_path.resolve() != Path(loaded.spec.output_layout.engine_config_path).resolve():
             raise EvolutionWorkerError("engine config path differs from output layout")
+        # Keep the attempt-local filesystem contract independent of tracker
+        # implementation details. Generic-island sub-GAs are coordinated
+        # directly and therefore must not initialise standalone run trackers.
+        Path(loaded.spec.output_layout.runs_dir).mkdir(parents=True, exist_ok=True)
         with attempt_output_scope(loaded.spec.output_layout, phase="evolution"):
             results = _usable_results(evolution_runner(config_path, strict_seeds))
         if not results:

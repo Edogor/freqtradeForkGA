@@ -908,6 +908,16 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   Phänotyp darf höchstens drei Child-Waves speisen; danach fällt der Planner auf ein frisches
   Control zurück. Wird derselbe Phänotyp später vollständig promotionsfähig, greift diese
   Continuation-Sperre nicht.
+- [x] **ORCH-032 – Continuation-Arme real nachweisen und lesbar berichten.** Der Seed-7001-
+  Canary führte Root sowie gepaarte Control-/Replication-/Explore-Arme vollständig und
+  hashverifiziert aus. Der Campaign-Report bindet jetzt Plan-/Parent-Provenienz, Armnamen,
+  per-Arm-Ergebnisse sowie vollständige konservative Return-/Expectancy-/DD-/ES-Metriken ein,
+  ohne Strategie, Genom, Trades oder Logs zu kopieren.
+- [x] **ORCH-033 – Falsche Generic-Island-Trackerstarts entfernen.** Die manuell vom
+  Generic-Island-Koordinator gesteuerten Sub-GAs erzeugten je einen identischen `STARTED`-Event,
+  obwohl sie nie den normalen `RunEngine`-Lifecycle durchliefen. Tracker-Initialisierung gehört
+  nun dem `RunEngine`; Standardläufe behalten Start-, Generation- und Abschlussereignisse,
+  während Generic-Island-Sub-GAs keine irreführenden leeren Eventlogs mehr anlegen.
 
 ## P0: Config-Vertrag
 

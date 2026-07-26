@@ -4,8 +4,8 @@ Stand: 26.07.2026
 
 ## Entscheidung
 
-**GO für den neuen Continuation-Canary; Wochenlauf danach erneut freigeben.**
-Search-/Replay-Semantik,
+**GO nach finalem Commit, Push und erneutem Preflight; Wochenstart bleibt eine
+bewusste Freigabe.** Search-/Replay-Semantik,
 Root-zu-Child-Handoff, Restart-Verhalten, Wochenbudgets und die reale
 Kill-Switch-/systemd-Betriebsprobe sind nachgewiesen. Der vorbereitete Dienst
 bleibt bis zur bewussten Freigabe deaktiviert und inaktiv.
@@ -46,6 +46,15 @@ Ersatz für ein bisher unberührtes finales Pair-x-Zeit-Panel.
   Beide Attempts waren hashverifiziert `SUCCEEDED`, alle 96
   Evaluationsbatches hatten null Fehler, der Child-Seed 2167265058 entsprach
   dem Plan und der Controller stoppte ohne Restart mit `MAX_WAVES_REACHED`.
+- Der reale Seed-7001-Canary führte einen Root und anschließend tatsächlich
+  Control, Replication und Explore aus. Alle vier Attempts waren
+  hashverifiziert `SUCCEEDED`; 80 Szenariorecords waren gültig, Parent-Resultat,
+  Frozen Candidate und Evolution Seed bestanden alle sechs Datei-Hashprüfungen.
+  Explore verbesserte gegenüber dem frischen Child-Control Mindest-Nettorendite
+  (10,13 % statt 3,68 %), Expectancy-LCB (-0,39 % statt -1,42 %) und
+  Mindest-Trades/Monat (2,41 statt 1,97), blieb aber wegen negativer
+  Annual-Return-/Expectancy-LCBs, Drawdown-Dauer und Tradefrequenz korrekt
+  nicht promotionsfähig. Der Dienst stoppte sauber mit `MAX_WAVES_REACHED`.
 
 ## Muss vor dem Wochenlauf erledigt werden
 
@@ -160,9 +169,7 @@ Entfernen des Markers meldete der Preflight erneut ausschließlich
 
 ## Empfohlene Reihenfolge
 
-Die bisherige Wochenlauf-Bereitschaft bleibt nachgewiesen. Vor dem Start mit
-der neuen Policyversion muss aber ein kurzer Seed-7001-Canary zusätzlich
-belegen:
+Der Seed-7001-Canary hat alle vier zusätzlichen Kriterien erfüllt:
 
 1. sichere, noch nicht promotionsfähige Evidenz erzeugt tatsächlich
    Control/Replication/Explore statt endloser Scratch-Controls;
@@ -170,6 +177,7 @@ belegen:
 3. `CAMPAIGN_SUMMARY` stimmt mit immutable Wave-Berichten und State-DB überein;
 4. der Dienst stoppt weiterhin sauber an `MAX_WAVES_REACHED`.
 
-Danach werden der frische Wochen-Bootstrap und die systemd-Unit aus dem
-getesteten Commit neu erzeugt. Der Seed-6001-Bootstrap der vorherigen
-Policyversion wurde recoverable archiviert und wird nicht wiederverwendet.
+Vor dem Wochenstart werden der frische Wochen-Bootstrap und die systemd-Unit
+aus dem final getesteten Commit neu erzeugt. Der Seed-6001-Bootstrap der
+vorherigen Policyversion wurde recoverable archiviert und wird nicht
+wiederverwendet.

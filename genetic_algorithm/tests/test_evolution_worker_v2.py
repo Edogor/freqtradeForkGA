@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -613,7 +614,14 @@ def test_real_mini_evolution_keeps_all_outputs_inside_attempt(
     assert _filesystem_snapshot(legacy_roots) == before
     root = Path(context.prepared.spec.artifact_root)
     assert (root / "evolution" / "diagnostics" / "generation_stats.csv").is_file()
-    assert (root / "evolution" / "runs").is_dir()
+    event_files = list((root / "evolution" / "runs").rglob("events.jsonl"))
+    assert len(event_files) == 1
+    events = [
+        json.loads(line)
+        for line in event_files[0].read_text().splitlines()
+        if line.strip()
+    ]
+    assert sum(item.get("type") == "STARTED" for item in events) == 1
     assert (root / "evolution" / "hall_of_fame").is_dir()
     assert (root / "evolution" / "generated_strategies").is_dir()
     assert (root / "evolution" / "backtest_results").is_dir()
@@ -637,7 +645,9 @@ def test_real_mini_generic_island_evolution_uses_canonical_worker(
     assert list(
         (root / "evolution" / "checkpoints").glob("island_checkpoint_gen*.json")
     )
-    assert (root / "evolution" / "runs").is_dir()
+    runs_dir = root / "evolution" / "runs"
+    assert runs_dir.is_dir()
+    assert not list(runs_dir.rglob("events.jsonl"))
     assert result.candidate_evaluations
     assert all(
         evaluation.status == EvaluationStatus.FAIL

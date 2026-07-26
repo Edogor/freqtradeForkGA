@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from genetic_algorithm.engine.runner import GenerationResult, RunEngine
 
 
@@ -28,6 +26,9 @@ class _FakePopulation:
 
     def get_best(self, n):
         return self.individuals[:n]
+
+    def get_best_measured(self, n):
+        return self.get_best(n)
 
     def sort_by_fitness(self, reverse=False):
         self.individuals.sort(
@@ -104,6 +105,12 @@ class _FakeMonitor:
 
 
 class _FakeTracker:
+    def __init__(self):
+        self.initialise_calls = 0
+
+    def initialise(self):
+        self.initialise_calls += 1
+
     def save_generation(self, gen, stats, pop):
         pass
 
@@ -240,6 +247,7 @@ class TestSetup:
         assert start_gen == 0
         assert pareto_archive is None
         ga.initialize_population.assert_called_once()
+        assert ga._tracker.initialise_calls == 1
 
     def test_resume(self):
         pop = _FakePopulation(individuals=[_FakeIndividual()])

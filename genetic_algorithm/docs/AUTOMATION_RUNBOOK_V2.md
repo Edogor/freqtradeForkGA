@@ -86,6 +86,11 @@ Standardpfade:
 - kampagnenweiter, sanitizierter Verlauf:
   `genetic_algorithm/data/v2/automation/reports/CAMPAIGN_SUMMARY.md`
 
+Der Campaign-Report weist den besten Arm und jeden Control-/Replication-/
+Explore-Arm getrennt aus. Er enthält Planhash, ausgewählten Parent-Phänotyphash,
+Seeds und konservative Return-/Expectancy-/DD-/ES-Metriken, aber weiterhin
+keinen Strategiecode, kein Genom, keine Einzeltrades und keine Workerlogs.
+
 Eigene Pfade können mit `--state-db` und `--automation-root` gesetzt werden. Beide Optionen müssen
 bei Start und Status konsistent verwendet werden.
 
