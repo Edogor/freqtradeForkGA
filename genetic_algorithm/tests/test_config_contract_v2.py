@@ -165,6 +165,45 @@ def test_automation_island_v2_preset_is_a_valid_shadow_search_contract():
     }
     assert config["generic_island_model"]["enabled"] is True
     assert config["pair_validation"]["validate_top_n_only"] == 0
+    assert config["fitness_penalties"]["target_trades_per_pair"] == 0
+    assert config["fitness_penalties"]["target_trades_per_active_month"] == 5.0
+    assert config["fitness_weights"]["drawdown_duration"] == 0.08
+    assert sum(config["fitness_weights"].values()) == pytest.approx(1.0)
+    assert config["output"]["top_n"] == 10
+
+
+def test_new_search_alignment_fields_remain_optional_for_frozen_v2_configs():
+    config = load_config(
+        "genetic_algorithm/config/presets/automation_island_v2.yaml"
+    )
+    del config["genetic_algorithm"]["search_seed_salt"]
+    del config["fitness_weights"]["drawdown_duration"]
+    del config["fitness_weights"]["consecutive_losses"]
+    del config["fitness_penalties"]["target_trades_per_active_month"]
+
+    validate_resolved_config_v2_or_raise(config)
+
+
+@pytest.mark.parametrize("invalid_value", [0, -1, False, float("nan")])
+def test_active_month_trade_target_requires_a_positive_finite_number(
+    tmp_path,
+    invalid_value,
+):
+    path = _write(
+        tmp_path,
+        {
+            "preset": "automation_island_v2",
+            "fitness_penalties": {
+                "target_trades_per_active_month": invalid_value,
+            },
+        },
+    )
+
+    assert any(
+        "fitness_penalties.target_trades_per_active_month must be a finite "
+        "number > 0" in error
+        for error in resolve_config(path).errors
+    )
 
 
 @pytest.mark.parametrize(

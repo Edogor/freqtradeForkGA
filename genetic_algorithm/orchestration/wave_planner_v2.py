@@ -50,6 +50,32 @@ class WavePlanMode(StrEnum):
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
+_REPAIR_ARM_GATE_REASONS: dict[str, frozenset[str]] = {
+    "repair-frequency": frozenset(
+        {
+            "ACTIVE_MONTHS_TOO_LOW",
+            "EFFECTIVE_SAMPLE_SIZE_TOO_LOW",
+            "TRADE_RATE_TOO_LOW",
+        }
+    ),
+    "repair-duration-risk": frozenset(
+        {
+            "DAILY_ES5_UCB_TOO_HIGH",
+            "DRAWDOWN_DURATION_TOO_HIGH",
+            "LOSS_STREAK_TOO_HIGH",
+            "MAX_DRAWDOWN_UCB_TOO_HIGH",
+            "WORST_SCENARIO_RETURN_TOO_LOW",
+        }
+    ),
+    "repair-edge": frozenset(
+        {
+            "ANNUAL_RETURN_LCB_TOO_LOW",
+            "EXPECTANCY_LCB_TOO_LOW",
+            "PROFITABLE_SCENARIO_RATIO_TOO_LOW",
+        }
+    ),
+}
+
 
 class WaveArmTemplateV2(StrictV2Model):
     arm_id: str = Field(min_length=1)
@@ -397,8 +423,13 @@ def _planned_experiment(
     source: PlannedSourceV2,
     base_config: Mapping[str, Any],
 ) -> PlannedExperimentV2:
+    baseline_hash = canonical_config_hash(base_config)
     resolved_config = _resolved_variant(base_config, template.factor_delta)
     resolved_hash = canonical_config_hash(resolved_config)
+    if template.factor_delta and resolved_hash == baseline_hash:
+        raise WavePlanningError(
+            f"factor delta is a no-op against the baseline config: {template.arm_id}"
+        )
     experiment_hash = canonical_config_hash(
         {
             "wave_id": child_wave_id,
@@ -523,12 +554,25 @@ def _materialize_experiments(
     for template in templates:
         sources = _template_sources(template, control, selected, experiment_map)
         for source in sources:
-            base_config = resolved_configs.get(source.parent_config_hash)
+            # The selected genome keeps its exact producer provenance, while
+            # every evolution arm starts from the parent CONTROL search
+            # contract. This prevents an experimental delta from silently
+            # becoming the next wave's baseline. Replay-validation plans have
+            # no CONTROL arm and therefore continue to use the source config.
+            baseline_config_hash = (
+                control.resolved_config_hash
+                if (
+                    control is not None
+                    and source.source_mode == PlannerSourceMode.SELECTED_CANDIDATES
+                )
+                else source.parent_config_hash
+            )
+            base_config = resolved_configs.get(baseline_config_hash)
             if base_config is None:
                 raise WavePlanningError(
-                    f"missing resolved parent config: {source.parent_config_hash}"
+                    f"missing resolved parent config: {baseline_config_hash}"
                 )
-            if canonical_config_hash(base_config) != source.parent_config_hash:
+            if canonical_config_hash(base_config) != baseline_config_hash:
                 raise WavePlanningError("resolved parent config hash differs from content")
             planned.append(
                 _planned_experiment(
@@ -539,6 +583,60 @@ def _materialize_experiments(
                 )
             )
     return sorted(planned, key=lambda item: item.experiment_id)
+
+
+def _select_gate_repair_template(
+    templates: list[WaveArmTemplateV2],
+    *,
+    selected: list[CandidateAnalysisV2],
+    parent_wave_id: str,
+) -> list[WaveArmTemplateV2]:
+    """Keep at most one applicable convention-named gate-repair arm."""
+
+    repair_templates = {
+        template.arm_id: template
+        for template in templates
+        if template.arm_id in _REPAIR_ARM_GATE_REASONS
+    }
+    if not repair_templates:
+        return templates
+    for template in repair_templates.values():
+        if (
+            template.source_mode != PlannerSourceMode.SELECTED_CANDIDATES
+            or template.arm_type
+            not in {ExperimentArmType.EXPLOIT, ExperimentArmType.EXPLORE}
+        ):
+            raise WavePlanningError(
+                f"gate-repair arm has incompatible source or type: {template.arm_id}"
+            )
+
+    failed_reasons = {
+        reason
+        for candidate in selected
+        for reason in candidate.failed_gate_reason_codes
+    }
+    applicable = sorted(
+        arm_id
+        for arm_id in repair_templates
+        if failed_reasons.intersection(_REPAIR_ARM_GATE_REASONS[arm_id])
+    )
+    chosen: str | None = None
+    if applicable:
+        rotation = int(
+            canonical_config_hash(
+                {
+                    "contract": "GATE_REPAIR_ARM_ROTATION_V1",
+                    "parent_wave_id": parent_wave_id,
+                }
+            )[:8],
+            16,
+        )
+        chosen = applicable[rotation % len(applicable)]
+    return [
+        template
+        for template in templates
+        if template.arm_id not in repair_templates or template.arm_id == chosen
+    ]
 
 
 def _rotate_template_seeds(
@@ -655,6 +753,11 @@ def plan_child_wave(
         ]
         if use_control_only
         else policy.arm_templates
+    )
+    templates = _select_gate_repair_template(
+        templates,
+        selected=selected,
+        parent_wave_id=analysis.wave_id,
     )
     templates = _rotate_template_seeds(
         templates,

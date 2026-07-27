@@ -646,12 +646,41 @@ def load_evolution_worker(
 def derive_engine_config(
     loaded: LoadedEvolutionWorkerV2,
 ) -> dict[str, Any]:
-    """Change only seed/concurrency and operational paths under this attempt."""
+    """Change only seed/concurrency and operational paths under this attempt.
+
+    ``manifest.seeds`` remains the paired evaluation/bootstrap seed consumed
+    by strict V2 replay.  A non-zero ``search_seed_salt`` deliberately gives a
+    repair/explore arm a different deterministic evolutionary RNG stream
+    without sacrificing paired replay comparability.
+    """
 
     config = copy.deepcopy(loaded.resolved_config)
-    attempt_seed = int(loaded.manifest.seeds[0]) % (2**32)
+    paired_evaluation_seed = int(loaded.manifest.seeds[0]) % (2**32)
     ga = config.setdefault("genetic_algorithm", {})
-    ga["random_seed"] = attempt_seed
+    search_seed_salt = ga.get("search_seed_salt", 0)
+    if (
+        not isinstance(search_seed_salt, int)
+        or isinstance(search_seed_salt, bool)
+        or search_seed_salt < 0
+    ):
+        raise EvolutionWorkerError(
+            "genetic_algorithm.search_seed_salt must be an integer >= 0"
+        )
+    search_seed = (
+        paired_evaluation_seed
+        if search_seed_salt == 0
+        else int(
+            canonical_config_hash(
+                {
+                    "contract": "ARM_SEARCH_SEED_V1",
+                    "paired_evaluation_seed": paired_evaluation_seed,
+                    "search_seed_salt": search_seed_salt,
+                }
+            )[:8],
+            16,
+        )
+    )
+    ga["random_seed"] = search_seed
     parallel = config.setdefault("parallel_evaluation", {})
     parallel["enabled"] = loaded.manifest.worker_count > 1
     parallel["num_workers"] = loaded.manifest.worker_count
@@ -692,7 +721,7 @@ def derive_engine_config(
         for ordinal, island in enumerate(
             config["generic_island_model"].get("islands", [])
         ):
-            island["seed"] = (attempt_seed + ordinal) % (2**32)
+            island["seed"] = (search_seed + ordinal) % (2**32)
     island_names = (
         [
             str(item["name"])

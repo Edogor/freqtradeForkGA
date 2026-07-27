@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 import yaml
 
 from freqtrade.misc import pair_to_filename
@@ -90,9 +91,44 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources(
     assert policy.selection_policy.continuation_min_profitable_scenario_ratio == 0.75
     assert policy.selection_policy.continuation_max_drawdown_duration_days == 365.0
     assert report.config_hash
-    assert load_config(
+    resolved = load_config(
         repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml"
-    )["pair_validation"]["evaluation_mode"] == "independent_pairs"
+    )
+    assert resolved["pair_validation"]["evaluation_mode"] == "independent_pairs"
+    assert resolved["fitness_penalties"]["target_trades_per_pair"] == 0
+    assert (
+        resolved["fitness_penalties"]["target_trades_per_active_month"]
+        == 5.0
+    )
+    assert resolved["fitness_weights"]["trade_frequency"] == 0.12
+    assert resolved["fitness_weights"]["drawdown_duration"] == 0.08
+    assert resolved["genetic_algorithm"]["search_seed_salt"] == 0
+    assert resolved["output"]["top_n"] == 10
+    assert sum(resolved["fitness_weights"].values()) == pytest.approx(1.0)
+    repair_arms = {
+        template.arm_id: template
+        for template in policy.planner_policy.arm_templates
+        if template.arm_id.startswith("repair-")
+    }
+    assert set(repair_arms) == {
+        "repair-duration-risk",
+        "repair-edge",
+        "repair-frequency",
+    }
+    assert {
+        template.factor_delta["genetic_algorithm.search_seed_salt"]
+        for template in repair_arms.values()
+    } == {1, 2, 3}
+    for template in repair_arms.values():
+        arm_weights = dict(resolved["fitness_weights"])
+        for path, value in template.factor_delta.items():
+            if path.startswith("fitness_weights."):
+                arm_weights[path.removeprefix("fitness_weights.")] = value
+        assert sum(arm_weights.values()) == pytest.approx(1.0)
+        assert (
+            template.factor_delta["genetic_algorithm.mutation_rate"]
+            <= resolved["genetic_algorithm"]["max_mutation_rate"]
+        )
 
 
 def test_preflight_blocks_an_existing_campaign_with_different_contract(
@@ -203,6 +239,27 @@ def test_continuation_canary_changes_only_campaign_identity_and_budget():
         "root_seeds": [7001],
         "max_waves": 2,
     }
+
+
+def test_gate_repair_canary_changes_only_campaign_identity_and_budget():
+    repo_root = Path(__file__).resolve().parents[2]
+    baseline = load_config(
+        repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml"
+    )
+    canary = load_config(
+        repo_root
+        / (
+            "genetic_algorithm/config/presets/"
+            "automation_island_gate_repair_canary_v2.yaml"
+        )
+    )
+
+    expected = dict(baseline)
+    expected["automation_controller"] = {
+        "root_seeds": [7001],
+        "max_waves": 3,
+    }
+    assert canary == expected
     assert {
         key: value
         for key, value in canary.items()

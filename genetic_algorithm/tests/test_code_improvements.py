@@ -189,6 +189,34 @@ class TestTradeFrequencyGaussian:
 
 
 # ============================================================================
+# Gate-aligned drawdown-duration gradient
+# ============================================================================
+
+
+class TestDrawdownDurationGradient:
+    def setup_method(self):
+        self.evaluator = _make_fitness_evaluator(
+            {
+                "promotion_v2": {"max_drawdown_duration_days": 120.0},
+            }
+        )
+
+    def test_boundary_is_midpoint_and_long_durations_keep_gradient(self):
+        assert self.evaluator._normalize_drawdown_duration(0) == 1.0
+        assert self.evaluator._normalize_drawdown_duration(120) == 0.5
+        assert (
+            self.evaluator._normalize_drawdown_duration(254)
+            > self.evaluator._normalize_drawdown_duration(823)
+            > 0.0
+        )
+
+    def test_missing_or_invalid_duration_fails_closed(self):
+        assert self.evaluator._normalize_drawdown_duration(None) == 0.0
+        assert self.evaluator._normalize_drawdown_duration(-1) == 0.0
+        assert self.evaluator._normalize_drawdown_duration(float("nan")) == 0.0
+
+
+# ============================================================================
 # Test 2: Fitness Smoothing — Min Trades Logistic Ramp
 # ============================================================================
 

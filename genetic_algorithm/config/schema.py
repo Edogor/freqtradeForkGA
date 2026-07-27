@@ -289,6 +289,18 @@ DEFAULTS: Dict[str, Any] = {
 # operational paths can change legacy ``dict.get(..., default)`` behaviour, so
 # they belong to the validation shape without being merged into every config.
 _V2_SHAPE_EXTRAS: Dict[str, Any] = {
+    "genetic_algorithm": {
+        # Optional deterministic salt used to separate an arm's evolutionary
+        # search RNG from the paired V2 evaluation/bootstrap seed.
+        "search_seed_salt": 0,
+    },
+    "fitness_weights": {
+        "drawdown_duration": 0.0,
+        "consecutive_losses": 0.0,
+    },
+    "fitness_penalties": {
+        "target_trades_per_active_month": 5.0,
+    },
     "safety_profile": {
         "name": "safe_v2",
         "enforce": True,

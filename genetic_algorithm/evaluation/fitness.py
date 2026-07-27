@@ -107,6 +107,15 @@ class FitnessEvaluator:
         self.sortino_max = fitness_bounds.get('sortino_max', 12)
         self.profit_factor_max = fitness_bounds.get('profit_factor_max', 10)
         self.profit_factor_norm = fitness_bounds.get('profit_factor_normalization', 3.0)
+        promotion = config.get('promotion_v2', {})
+        self.drawdown_duration_target_days = float(
+            promotion.get('max_drawdown_duration_days', 90.0)
+        )
+        if (
+            not math.isfinite(self.drawdown_duration_target_days)
+            or self.drawdown_duration_target_days <= 0
+        ):
+            self.drawdown_duration_target_days = 90.0
         
         # Trade frequency thresholds
         tf_config = config.get('trade_frequency_thresholds', {})
@@ -510,6 +519,14 @@ class FitnessEvaluator:
                     'train_per_pair_trades': train_metrics.get(
                         'per_pair_trades', {}
                     ),
+                    'train_per_pair_trades_per_active_month': train_metrics.get(
+                        'per_pair_trades_per_active_month', {}
+                    ),
+                    'train_worst_pair_trades_per_active_month': (
+                        train_metrics.get(
+                            'worst_pair_trades_per_active_month'
+                        )
+                    ),
                     'train_worst_pair_trades': train_metrics.get(
                         'worst_pair_trades'
                     ),
@@ -597,6 +614,12 @@ class FitnessEvaluator:
                 'train_per_pair_trades': train_metrics.get(
                     'per_pair_trades', {}
                 ),
+                'train_per_pair_trades_per_active_month': train_metrics.get(
+                    'per_pair_trades_per_active_month', {}
+                ),
+                'train_worst_pair_trades_per_active_month': train_metrics.get(
+                    'worst_pair_trades_per_active_month'
+                ),
                 'train_worst_pair_trades': train_metrics.get(
                     'worst_pair_trades'
                 ),
@@ -608,6 +631,12 @@ class FitnessEvaluator:
                 ),
                 'val_per_pair_profit': val_metrics.get('per_pair_profit', {}),
                 'val_per_pair_trades': val_metrics.get('per_pair_trades', {}),
+                'val_per_pair_trades_per_active_month': val_metrics.get(
+                    'per_pair_trades_per_active_month', {}
+                ),
+                'val_worst_pair_trades_per_active_month': val_metrics.get(
+                    'worst_pair_trades_per_active_month'
+                ),
                 'val_worst_pair_trades': val_metrics.get('worst_pair_trades'),
                 'val_active_pair_ratio': val_metrics.get('active_pair_ratio'),
                 'val_pair_trade_coverage_multiplier': val_metrics.get(
@@ -693,6 +722,10 @@ class FitnessEvaluator:
             pair: int(metrics.get("num_trades", 0))
             for pair, metrics in pair_metrics.items()
         }
+        per_pair_trades_per_active_month = {
+            pair: float(metrics.get("trades_per_active_month", 0.0))
+            for pair, metrics in pair_metrics.items()
+        }
         profits = list(per_pair_profit.values())
         mean_profit = sum(profits) / len(profits) if profits else 0.0
         pair_profit_std = (
@@ -720,10 +753,16 @@ class FitnessEvaluator:
             "num_trades": total_trades,
             "per_pair_profit": per_pair_profit,
             "per_pair_trades": per_pair_trades,
+            "per_pair_trades_per_active_month": per_pair_trades_per_active_month,
             "pair_profit_std": pair_profit_std,
             "worst_pair_profit": min(profits) if profits else 0.0,
             "worst_pair_trades": (
                 min(per_pair_trades.values()) if per_pair_trades else 0
+            ),
+            "worst_pair_trades_per_active_month": (
+                min(per_pair_trades_per_active_month.values())
+                if per_pair_trades_per_active_month
+                else 0.0
             ),
             "active_pair_ratio": (
                 sum(trades > 0 for trades in per_pair_trades.values())
@@ -749,7 +788,18 @@ class FitnessEvaluator:
                 pair: {
                     "profit": metrics.get("profit", 0.0),
                     "num_trades": metrics.get("num_trades", 0),
+                    "active_months": metrics.get("active_months", 0),
+                    "trades_per_active_month": metrics.get(
+                        "trades_per_active_month",
+                        0.0,
+                    ),
                     "max_drawdown": metrics.get("max_drawdown", 0.0),
+                    "max_drawdown_duration_days": metrics.get(
+                        "max_drawdown_duration_days"
+                    ),
+                    "max_consecutive_losses": metrics.get(
+                        "max_consecutive_losses"
+                    ),
                     "sharpe_ratio": metrics.get("sharpe_ratio", 0.0),
                     "profit_factor": metrics.get("profit_factor", 0.0),
                     "profit_factor_censored": metrics.get(
@@ -933,6 +983,12 @@ class FitnessEvaluator:
                     "validation_pairs": ",".join(validation_pairs),
                     "train_per_pair_profit": train_metrics["per_pair_profit"],
                     "train_per_pair_trades": train_metrics["per_pair_trades"],
+                    "train_per_pair_trades_per_active_month": train_metrics[
+                        "per_pair_trades_per_active_month"
+                    ],
+                    "train_worst_pair_trades_per_active_month": train_metrics[
+                        "worst_pair_trades_per_active_month"
+                    ],
                     "train_worst_pair_trades": train_metrics[
                         "worst_pair_trades"
                     ],
@@ -989,6 +1045,24 @@ class FitnessEvaluator:
             if min_val_fitness > 0.0 and val_fitness < min_val_fitness:
                 composite *= max(0.0, val_fitness / min_val_fitness)
 
+            split_drawdown_durations = [
+                float(value)
+                for value in (
+                    train_metrics.get("max_drawdown_duration_days"),
+                    val_metrics.get("max_drawdown_duration_days"),
+                )
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ]
+            split_loss_streaks = [
+                int(value)
+                for value in (
+                    train_metrics.get("max_consecutive_losses"),
+                    val_metrics.get("max_consecutive_losses"),
+                )
+                if isinstance(value, int) and not isinstance(value, bool)
+            ]
             metrics: Dict[str, Any] = {
                 "profit": train_metrics["profit"],
                 "sharpe_ratio": train_metrics["sharpe_ratio"],
@@ -998,6 +1072,14 @@ class FitnessEvaluator:
                 "num_trades": train_metrics["num_trades"],
                 "profit_factor": train_metrics["profit_factor"],
                 "complexity": train_metrics["complexity"],
+                "max_drawdown_duration_days": (
+                    max(split_drawdown_durations)
+                    if split_drawdown_durations
+                    else None
+                ),
+                "max_consecutive_losses": (
+                    max(split_loss_streaks) if split_loss_streaks else None
+                ),
                 "train_fitness": train_fitness,
                 "val_fitness": val_fitness,
                 "pair_generalization_ratio": val_fitness
@@ -1011,16 +1093,34 @@ class FitnessEvaluator:
                 "validation_pairs": ",".join(validation_pairs),
                 "train_per_pair_profit": train_metrics["per_pair_profit"],
                 "train_per_pair_trades": train_metrics["per_pair_trades"],
+                "train_per_pair_trades_per_active_month": train_metrics[
+                    "per_pair_trades_per_active_month"
+                ],
+                "train_worst_pair_trades_per_active_month": train_metrics[
+                    "worst_pair_trades_per_active_month"
+                ],
                 "train_worst_pair_trades": train_metrics[
                     "worst_pair_trades"
                 ],
                 "train_active_pair_ratio": train_metrics["active_pair_ratio"],
                 "train_pair_trade_coverage_multiplier": train_coverage,
+                "train_max_drawdown_duration_days": train_metrics.get(
+                    "max_drawdown_duration_days"
+                ),
                 "val_per_pair_profit": val_metrics["per_pair_profit"],
                 "val_per_pair_trades": val_metrics["per_pair_trades"],
+                "val_per_pair_trades_per_active_month": val_metrics[
+                    "per_pair_trades_per_active_month"
+                ],
+                "val_worst_pair_trades_per_active_month": val_metrics[
+                    "worst_pair_trades_per_active_month"
+                ],
                 "val_worst_pair_trades": val_metrics["worst_pair_trades"],
                 "val_active_pair_ratio": val_metrics["active_pair_ratio"],
                 "val_pair_trade_coverage_multiplier": val_coverage,
+                "val_max_drawdown_duration_days": val_metrics.get(
+                    "max_drawdown_duration_days"
+                ),
                 "pair_split_trade_coverage_multiplier": pair_coverage,
                 "pair_split_profitable_pair_ratio": profitable_pair_ratio,
                 "pair_split_profitable_pair_multiplier": (
@@ -1593,6 +1693,20 @@ class FitnessEvaluator:
         
         return avg_metrics
     
+    @staticmethod
+    def _active_months_from_result(result: BacktestResult) -> int:
+        months: set[str] = set()
+        for row in result.daily_profit_abs or []:
+            if not isinstance(row, (list, tuple)) or len(row) != 2:
+                continue
+            day, pnl = row
+            try:
+                if float(pnl) != 0.0:
+                    months.add(str(day)[:7])
+            except (TypeError, ValueError):
+                continue
+        return len(months)
+
     def _backtest_result_to_metrics(self, result: BacktestResult) -> Dict[str, float]:
         """
         Convert BacktestResult to metrics dictionary for fitness calculation.
@@ -1603,12 +1717,17 @@ class FitnessEvaluator:
         Returns:
             Dictionary of metrics
         """
+        active_months = self._active_months_from_result(result)
         metrics = {
             'profit': result.profit_percent,
             'sharpe_ratio': max(-10.0, min(50.0, result.sharpe_ratio)),  # Clamp to sane display range
             'max_drawdown': result.max_drawdown,
             'win_rate': result.win_rate,
             'num_trades': result.total_trades,
+            'active_months': active_months,
+            'trades_per_active_month': (
+                result.total_trades / active_months if active_months else 0.0
+            ),
             'profit_factor': result.profit_factor,
             'profit_factor_censored': result.profit_factor_censored,
             'profit_factor_contract_version': (
@@ -1761,7 +1880,36 @@ class FitnessEvaluator:
         norm_profit_factor = min(1.0, profit_factor / self.profit_factor_norm)  # configurable via fitness_bounds.profit_factor_normalization
         norm_drawdown = 1 - drawdown  # Lower drawdown is better
         norm_win_rate = win_rate  # Already 0-1
-        norm_trades = self._normalize_trade_frequency(trades)
+        strict_trade_rate = metrics.get("worst_pair_trades_per_active_month")
+        target_trade_rate = self.fitness_penalties.get(
+            "target_trades_per_active_month",
+            0.0,
+        )
+        rate_target_enabled = (
+            isinstance(target_trade_rate, (int, float))
+            and not isinstance(target_trade_rate, bool)
+            and math.isfinite(float(target_trade_rate))
+            and float(target_trade_rate) > 0
+        )
+        if rate_target_enabled:
+            if (
+                isinstance(strict_trade_rate, (int, float))
+                and not isinstance(strict_trade_rate, bool)
+                and math.isfinite(float(strict_trade_rate))
+            ):
+                norm_trades = max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(strict_trade_rate) / float(target_trade_rate),
+                    ),
+                )
+            else:
+                # A rate target cannot be established from an aggregate count.
+                # Missing independent-pair evidence therefore fails closed.
+                norm_trades = 0.0
+        else:
+            norm_trades = self._normalize_trade_frequency(trades)
         
         # Clamp normalized values
         norm_profit = max(0, min(norm_profit, 1))
@@ -1791,12 +1939,11 @@ class FitnessEvaluator:
         w_consec_losses = w.get('consecutive_losses', 0.0)
         
         # === Tail-risk scores ===
-        # Drawdown duration: 0 days = 1.0, 90+ days = 0.0 (linear)
+        # Drawdown duration keeps a useful gradient even beyond the promotion
+        # boundary. The previous linear 90-day clip scored every observed
+        # 254-823 day candidate as the same zero and could not guide evolution.
         dd_duration = metrics.get('max_drawdown_duration_days')
-        norm_dd_duration = (
-            max(0.0, 1.0 - dd_duration / 90.0)
-            if dd_duration is not None else 0.0
-        )
+        norm_dd_duration = self._normalize_drawdown_duration(dd_duration)
         # Consecutive losses: 0 = 1.0, 10+ = 0.0 (linear)
         consec_losses = metrics.get('max_consecutive_losses')
         norm_consec_losses = (
@@ -2007,12 +2154,52 @@ class FitnessEvaluator:
             score = math.exp(-z * z / 2.0)
         
         return max(0.15, min(1.0, score))
+
+    def _normalize_drawdown_duration(
+        self,
+        duration_days: Optional[float],
+    ) -> float:
+        """Return a smooth score around the configured promotion boundary."""
+
+        if duration_days is None:
+            return 0.0
+        try:
+            duration = float(duration_days)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(duration) or duration < 0:
+            return 0.0
+        target = self.drawdown_duration_target_days
+        return target / (target + duration)
     
     def _pair_trade_coverage_multiplier(
         self,
         metrics: Dict[str, Any],
     ) -> float:
         penalties = self.fitness_penalties
+        target_rate = penalties.get('target_trades_per_active_month', 0.0)
+        worst_rate = metrics.get('worst_pair_trades_per_active_month')
+        rate_target_enabled = (
+            isinstance(target_rate, (int, float))
+            and not isinstance(target_rate, bool)
+            and math.isfinite(float(target_rate))
+            and float(target_rate) > 0
+        )
+        if rate_target_enabled:
+            coverage_floor = penalties.get('pair_trade_penalty_floor', 0.01)
+            coverage_floor = max(0.0, min(float(coverage_floor), 1.0))
+            if (
+                isinstance(worst_rate, (int, float))
+                and not isinstance(worst_rate, bool)
+                and math.isfinite(float(worst_rate))
+            ):
+                coverage_ratio = max(
+                    0.0,
+                    min(1.0, float(worst_rate) / float(target_rate)),
+                )
+            else:
+                coverage_ratio = 0.0
+            return coverage_floor + (1.0 - coverage_floor) * coverage_ratio
         per_pair_target = penalties.get('target_trades_per_pair', 0)
         per_pair_trades = metrics.get('per_pair_trades')
         if per_pair_target <= 0 or not per_pair_trades:

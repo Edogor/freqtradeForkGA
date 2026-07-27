@@ -178,9 +178,11 @@ class TestFitnessMetricContractV2:
 
     def test_mapper_keeps_penalty_inputs(self):
         from genetic_algorithm.evaluation.fitness import FitnessEvaluator
+        from genetic_algorithm.orchestration.result_adapter import _active_months
 
         evaluator = object.__new__(FitnessEvaluator)
-        metrics = evaluator._backtest_result_to_metrics(_complete_backtest_result())
+        result = _complete_backtest_result()
+        metrics = evaluator._backtest_result_to_metrics(result)
 
         assert metrics["avg_profit"] == 0.004
         assert metrics["avg_duration"] == "0 days 04:00:00"
@@ -188,6 +190,57 @@ class TestFitnessMetricContractV2:
         assert metrics["per_pair_trades"] == {"BTC/USDT": 2, "ETH/USDT": 1}
         assert metrics["worst_pair_trades"] == 1
         assert metrics["active_pair_ratio"] == 1.0
+        assert metrics["active_months"] == _active_months(result) == 1
+        assert metrics["trades_per_active_month"] == 3.0
+
+    def test_active_month_trade_rate_uses_the_worst_independent_pair(self):
+        evaluator = self._penalty_evaluator(
+            target_trades_per_active_month=5.0,
+            pair_trade_penalty_floor=0.01,
+        )
+        evaluator.pair_validation_config = {"worst_pair_weight": 0.5}
+
+        summary = evaluator._aggregate_independent_pair_metrics(
+            {
+                "BTC/USDT": {
+                    "profit": 1.0,
+                    "num_trades": 20,
+                    "active_months": 2,
+                    "trades_per_active_month": 10.0,
+                },
+                "SOL/USDT": {
+                    "profit": 1.0,
+                    "num_trades": 10,
+                    "active_months": 4,
+                    "trades_per_active_month": 2.5,
+                },
+            }
+        )
+
+        assert summary["per_pair_trades_per_active_month"] == {
+            "BTC/USDT": 10.0,
+            "SOL/USDT": 2.5,
+        }
+        assert summary["worst_pair_trades_per_active_month"] == 2.5
+        assert evaluator._pair_trade_coverage_multiplier(summary) == pytest.approx(
+            0.505
+        )
+
+    def test_active_month_trade_rate_passes_at_target_and_missing_evidence_fails_closed(
+        self,
+    ):
+        evaluator = self._penalty_evaluator(
+            target_trades_per_active_month=5.0,
+            target_trades_per_pair=0,
+            pair_trade_penalty_floor=0.01,
+        )
+
+        assert evaluator._pair_trade_coverage_multiplier(
+            {"worst_pair_trades_per_active_month": 5.0}
+        ) == pytest.approx(1.0)
+        assert evaluator._pair_trade_coverage_multiplier({}) == pytest.approx(
+            0.01
+        )
 
     def test_pair_trade_coverage_penalizes_the_worst_pair_smoothly(self):
         evaluator = self._penalty_evaluator(

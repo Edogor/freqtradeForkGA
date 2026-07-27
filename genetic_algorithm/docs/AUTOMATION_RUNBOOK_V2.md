@@ -1,6 +1,6 @@
 # Betriebs-Runbook: Guarded Generic-Island-Automation V2
 
-Stand: 25.07.2026
+Stand: 27.07.2026
 
 Dieser Pfad automatisiert ausschließlich die **Strategie-Suche im Shadow-Modus**. Er deployt keine
 Strategie und autorisiert kein Live-/Paper-Trading. Das Profil
@@ -22,6 +22,9 @@ eine veränderte Config blockieren vor Ausführung.
 Im Profil `automation_island_v2` wird jedes Pair bereits während der Suche
 isoliert backgetestet. Gemeinsame Multi-Pair-Portfolios sind untersagt, weil
 Slotkonkurrenz bei kleinem `max_open_trades` verlierende Pairs verdecken kann.
+Die Such-Fitness verwendet dieselbe Aktivitätseinheit wie das Gate: mindestens
+5 Trades pro aktivem Monat auf dem schwächsten Pair. Drawdown-Dauer behält
+auch jenseits der Gategrenze einen monotonen Suchgradienten.
 Vor einem unbeaufsichtigten Wochenlauf müssen zusätzlich alle Punkte in
 [WEEK_RUN_READINESS_V2.md](WEEK_RUN_READINESS_V2.md) erfüllt sein.
 
@@ -86,10 +89,20 @@ Standardpfade:
 - kampagnenweiter, sanitizierter Verlauf:
   `genetic_algorithm/data/v2/automation/reports/CAMPAIGN_SUMMARY.md`
 
-Der Campaign-Report weist den besten Arm und jeden Control-/Replication-/
-Explore-Arm getrennt aus. Er enthält Planhash, ausgewählten Parent-Phänotyphash,
-Seeds und konservative Return-/Expectancy-/DD-/ES-Metriken, aber weiterhin
-keinen Strategiecode, kein Genom, keine Einzeltrades und keine Workerlogs.
+Der Campaign-Report trennt zwei unterschiedliche Aussagen ausdrücklich:
+
+- `diagnostic_top_candidate` ist nur eine Reporting-Rangfolge nach
+  Gate-Alignment und anschließend Robust-Score. Er ist **nicht** die
+  Planner-Auswahl.
+- `planner_selection_events` und `planner_selected_input_parents` weisen den
+  tatsächlich vom Pareto-basierten Planner gewählten Parent und die damit
+  erzeugten Child-Arme aus.
+
+Zusätzlich werden Gate-Abstände als signierte Schwellenmargen berichtet:
+positive Werte liegen auf der bestandenen Seite, negative Werte zeigen den
+noch fehlenden Abstand zur Schwelle. Der Report enthält weiterhin Planhash,
+Seeds und konservative Return-/Expectancy-/DD-/ES-Metriken, aber keinen
+Strategiecode, kein Genom, keine Einzeltrades und keine Workerlogs.
 
 Eigene Pfade können mit `--state-db` und `--automation-root` gesetzt werden. Beide Optionen müssen
 bei Start und Status konsistent verwendet werden.
@@ -123,16 +136,29 @@ denselben Startbefehl erneut ausführen.
 - maximal drei vollständig fehlgeschlagene Waves werden als Scratch-Control recovered; danach
   blockiert der Controller
 - derselbe nur bedingt geeignete Continuation-Phänotyp darf höchstens drei Child-Waves speisen
-- pro Child-Wave höchstens drei Attempts: Control, Replication, Explore
-- erlaubtes Config-Delta: nur `genetic_algorithm.mutation_rate`
+- pro Child-Wave höchstens drei Attempts: Control, Replication und genau ein
+  anwendbarer Frequency-, Duration/Risk- oder Edge-Repair-Arm
+- Repair darf ausschließlich die explizit freigegebenen Fitnessgewichte,
+  `genetic_algorithm.mutation_rate` und
+  `genetic_algorithm.search_seed_salt` verändern
 
 Wenn ein robuster Kandidat alle Gates besteht, wird er Pareto-basiert anhand konservativer
-Return-/Expectancy-LCBs und DD-/ES-UCBs ausgewählt. Replication und Explore erhalten sein
+Return-/Expectancy-LCBs und DD-/ES-UCBs ausgewählt. Replication und Repair erhalten sein
 hashverifiziertes Genom. Ein Kandidat, der noch nicht promotionsfähig ist, darf ausschließlich
 zur Fortsetzung der Suche dienen, wenn kein Szenario eine negative Nettorendite hat, mindestens
 75 % der Szenarien profitabel sind, Evidenz und Stichprobe vollständig sind, DD-/ES- sowie eine
 365-Tage-Drawdown-Dauergrenze eingehalten werden und nur ausdrücklich erlaubte Gategründe
 fehlschlagen. Diese Continuation bleibt Search-only und ist auf drei Parent-Waves begrenzt.
+
+Genome-Provenienz und Child-Search-Config sind bewusst getrennt: Das Genom
+bleibt an seinen echten Producer gebunden, aber jede Folge-Wave baut ihre
+Replication-/Repair-Config erneut auf der unveränderten Parent-Control-
+Baseline auf. Ein Delta, das dort keine Änderung bewirkt, blockiert
+fail-closed. Der Manifest-Seed bleibt für Replay und Bootstrap gepaart;
+nur der evolutionäre Repair-Suchstream erhält einen deterministischen Salt.
+
+Vor dem nächsten langen Lauf wird dieser Vertrag mit dem begrenzten Profil
+`automation_island_gate_repair_canary_v2` über maximal drei Waves geprüft.
 Existiert kein solcher Kandidat, läuft nur eine neue Scratch-Control weiter. Technische
 Fehlerquoten, unvollständige Evidenz, unbekannte Deltas, unsichere Configs, Budgetgrenzen oder
 Hashabweichungen blockieren fail-closed.

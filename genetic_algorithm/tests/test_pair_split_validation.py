@@ -464,12 +464,20 @@ class TestPairSplitFitness:
         })
         evaluator = FitnessEvaluator(cfg)
         evaluator.backtester = MagicMock()
-        evaluator.backtester.backtest_strategy.side_effect = [
+        pair_results = [
             _make_backtest_result(profit_percent=8.0, total_trades=60),
             _make_backtest_result(profit_percent=-4.0, total_trades=70),
             _make_backtest_result(profit_percent=3.0, total_trades=80),
             _make_backtest_result(profit_percent=2.0, total_trades=90),
         ]
+        for index, result in enumerate(pair_results, start=1):
+            result.daily_profit_abs = [
+                [f"2025-0{month}-01", 1.0]
+                for month in range(1, index + 1)
+            ]
+            result.max_drawdown_duration_days = float(index * 10)
+            result.max_consecutive_losses = index
+        evaluator.backtester.backtest_strategy.side_effect = pair_results
         evaluator.strategy_generator = MagicMock()
         evaluator.strategy_generator.generate_strategy_code.return_value = (
             "class TestStrat: pass"
@@ -493,6 +501,18 @@ class TestPairSplitFitness:
             'ETH/USDT': 80,
             'BNB/USDT': 90,
         }
+        assert metrics['train_per_pair_trades_per_active_month'] == {
+            'BTC/USDT': 60.0,
+            'SOL/USDT': 35.0,
+        }
+        assert metrics['val_per_pair_trades_per_active_month'] == {
+            'ETH/USDT': pytest.approx(80 / 3),
+            'BNB/USDT': 22.5,
+        }
+        assert metrics['max_drawdown_duration_days'] == 40.0
+        assert metrics['train_max_drawdown_duration_days'] == 20.0
+        assert metrics['val_max_drawdown_duration_days'] == 40.0
+        assert metrics['max_consecutive_losses'] == 4
         assert metrics['pair_split_profitable_pair_ratio'] == pytest.approx(0.75)
         assert metrics['pair_split_profitable_pair_multiplier'] == pytest.approx(1.0)
         assert metrics['pair_split_worst_pair_loss_multiplier'] == pytest.approx(1.0)

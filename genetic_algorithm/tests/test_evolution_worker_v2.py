@@ -101,6 +101,7 @@ def evolution_context_factory(tmp_path: Path):
         seeds: list[FrozenEvolutionSeedV2] | None = None,
         generations: int = 1,
         generic_island: bool = False,
+        search_seed_salt: int = 0,
     ) -> _Context:
         nonlocal sequence
         sequence += 1
@@ -156,6 +157,7 @@ def evolution_context_factory(tmp_path: Path):
                 "elite_size": 1,
                 "tournament_size": 2,
                 "random_immigrants": 1,
+                "search_seed_salt": search_seed_salt,
             }
         )
         config["parallel_evaluation"].update({"enabled": False, "num_workers": 1})
@@ -829,3 +831,21 @@ def test_derived_engine_config_uses_manifest_seed_and_worker_count(
         "island_names": [],
     }
     assert context.config["genetic_algorithm"]["random_seed"] == 42
+
+
+def test_nonzero_search_seed_salt_separates_search_from_paired_replay_seed(
+    evolution_context_factory,
+):
+    context = evolution_context_factory(search_seed_salt=7)
+    loaded = load_evolution_worker(
+        context.prepared.spec_path,
+        expected_spec_sha256=context.prepared.spec_file_sha256,
+    )
+    paired_seed = loaded.manifest.seeds[0]
+
+    first = derive_engine_config(loaded)
+    second = derive_engine_config(loaded)
+
+    assert first == second
+    assert first["genetic_algorithm"]["random_seed"] != paired_seed
+    assert loaded.manifest.seeds == [paired_seed]

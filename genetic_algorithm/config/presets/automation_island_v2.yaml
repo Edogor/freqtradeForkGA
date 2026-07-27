@@ -37,6 +37,9 @@ backtesting:
 
 genetic_algorithm:
   random_seed: 42
+  # The worker combines this salt with the paired attempt seed only for the
+  # evolutionary search RNG. Strict V2 replay keeps the paired attempt seed.
+  search_seed_salt: 0
   # Graceful cap checked after every completed generation. Per-backtest
   # timeouts still bound an individual evaluation within a generation.
   max_runtime_minutes: 600
@@ -128,11 +131,25 @@ pair_validation:
   worst_pair_loss_penalty_floor: 0.1
 
 # Keep the cheap search objective directionally aligned with the strict replay
-# panel. Sixty trades per pair corresponds to the promotion floor of twelve
-# active months × five trades per active month. This remains a smooth penalty,
-# not a hard cliff, so sparse initial populations can evolve toward coverage.
+# panel. The strict promotion contract measures activity per actually active
+# month and pair, so the search uses the same rate instead of a campaign-length
+# approximation. This remains a smooth penalty, not a hard cliff.
+fitness_weights:
+  profit: 0.25
+  sharpe_ratio: 0.12
+  sortino_ratio: 0.10
+  profit_factor: 0.10
+  drawdown: 0.14
+  win_rate: 0.02
+  trade_frequency: 0.12
+  monthly_stability: 0.03
+  cross_pair: 0.04
+  drawdown_duration: 0.08
+  consecutive_losses: 0.00
+
 fitness_penalties:
-  target_trades_per_pair: 60
+  target_trades_per_pair: 0
+  target_trades_per_active_month: 5.0
   pair_trade_penalty_floor: 0.01
 
 promotion_v2:
@@ -211,4 +228,6 @@ multi_timeframe:
   enabled: false
 
 output:
-  top_n: 5
+  # Replay a wider shortlist through the exact V2 metrics before the
+  # next-wave Pareto selector chooses a parent.
+  top_n: 10

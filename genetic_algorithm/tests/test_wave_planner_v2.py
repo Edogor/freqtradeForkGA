@@ -46,6 +46,11 @@ BASE_CONFIG = {
     "features": {"sis_enabled": False},
 }
 BASE_CONFIG_HASH = canonical_config_hash(BASE_CONFIG)
+DRIFT_CONFIG = {
+    "ga": {"population_size": 100, "mutation_rate": 0.30},
+    "features": {"sis_enabled": False},
+}
+DRIFT_CONFIG_HASH = canonical_config_hash(DRIFT_CONFIG)
 
 
 def _candidate() -> CandidateAnalysisV2:
@@ -228,6 +233,128 @@ def _plan(*, policy: WavePlannerPolicyV2 | None = None):
     )
 
 
+def _continuation_analysis(
+    failed_gate_reason_codes: list[str],
+    *,
+    wave_id: str = WAVE_ID,
+) -> WaveAnalysisV2:
+    reasons = sorted(set(failed_gate_reason_codes))
+    candidate_payload = _candidate().model_dump(mode="python")
+    candidate_payload.update(
+        {
+            "eligibility_status": CandidateEligibilityStatus.INELIGIBLE,
+            "reason_codes": reasons,
+            "failed_gate_reason_codes": reasons,
+            "failed_gate_count": len(reasons),
+        }
+    )
+    analysis_payload = _analysis().model_dump(mode="python")
+    analysis_payload.update(
+        {
+            "wave_id": wave_id,
+            "candidates": [CandidateAnalysisV2.model_validate(candidate_payload)],
+            "has_eligible_candidates": False,
+        }
+    )
+    return WaveAnalysisV2.model_validate(analysis_payload)
+
+
+def _continuation_selection(
+    analysis: WaveAnalysisV2,
+    failed_gate_reason_codes: list[str],
+):
+    return select_wave_candidates(
+        analysis,
+        CandidateSelectionPolicyV2(
+            selection_policy_version="selection-repair-planner-test",
+            max_selected=1,
+            min_selected=1,
+            max_per_experiment=1,
+            min_normalized_objective_distance=0,
+            allow_continuation_candidates=True,
+            continuation_allowed_failed_gate_reason_codes=sorted(
+                set(failed_gate_reason_codes)
+            ),
+        ),
+    )
+
+
+def _repair_policy() -> WavePlannerPolicyV2:
+    return WavePlannerPolicyV2(
+        planner_policy_version="planner-repair-test",
+        child_result_policy_version="result-planner-test",
+        child_search_space_version="search-space-repair-test",
+        budget=WaveBudgetV2(
+            max_attempts=3,
+            max_parallel=1,
+            max_wallclock_seconds=7200,
+        ),
+        arm_templates=[
+            WaveArmTemplateV2(
+                arm_id="control",
+                arm_type=ExperimentArmType.CONTROL,
+                source_mode=PlannerSourceMode.BASELINE_CONTROL,
+                hypothesis="Fresh paired control.",
+                primary_metric="annualized_net_return_lcb",
+                seeds=[101],
+            ),
+            WaveArmTemplateV2(
+                arm_id="replication",
+                arm_type=ExperimentArmType.REPLICATION,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Continue the selected genome on the baseline.",
+                primary_metric="annualized_net_return_lcb",
+                seeds=[101],
+            ),
+            WaveArmTemplateV2(
+                arm_id="repair-frequency",
+                arm_type=ExperimentArmType.EXPLORE,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Repair insufficient activity.",
+                primary_metric="trades_per_active_month",
+                factor_delta={"ga.mutation_rate": 0.21},
+                seeds=[101],
+            ),
+            WaveArmTemplateV2(
+                arm_id="repair-duration-risk",
+                arm_type=ExperimentArmType.EXPLORE,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Repair drawdown duration and tail risk.",
+                primary_metric="max_drawdown_duration_days",
+                factor_delta={"ga.mutation_rate": 0.22},
+                seeds=[101],
+            ),
+            WaveArmTemplateV2(
+                arm_id="repair-edge",
+                arm_type=ExperimentArmType.EXPLORE,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Repair conservative return and expectancy.",
+                primary_metric="worst_annualized_return_lcb",
+                factor_delta={"ga.mutation_rate": 0.23},
+                seeds=[101],
+            ),
+        ],
+    )
+
+
+def _repair_plan(
+    failed_gate_reason_codes: list[str],
+    *,
+    wave_id: str = WAVE_ID,
+):
+    analysis = _continuation_analysis(
+        failed_gate_reason_codes,
+        wave_id=wave_id,
+    )
+    return plan_child_wave(
+        analysis,
+        _continuation_selection(analysis, failed_gate_reason_codes),
+        [_parent_experiment().model_copy(update={"wave_id": wave_id})],
+        {BASE_CONFIG_HASH: BASE_CONFIG},
+        _repair_policy(),
+    )
+
+
 def test_plan_is_deterministic_and_uses_paired_seed_attempts():
     first = _plan()
     second = _plan()
@@ -256,6 +383,149 @@ def test_control_is_unchanged_and_selected_arm_has_exact_declared_delta():
     assert by_arm["exploit"].source.phenotype_hash == "f" * 64
     assert by_arm["exploit"].source.observation_ref is not None
     assert by_arm["exploit"].source.observation_ref.seed == 11
+
+
+def test_selected_genome_keeps_provenance_but_evolution_resets_to_control_baseline():
+    selected_experiment_id = "explore-planner-parent"
+    selected_candidate = _candidate().model_copy(
+        update={"experiment_id": selected_experiment_id}
+    )
+    control_analysis = _analysis().experiments[0].model_copy(
+        update={"candidate_observation_count": 0}
+    )
+    explore_analysis = control_analysis.model_copy(
+        update={
+            "experiment_id": selected_experiment_id,
+            "arm_type": ExperimentArmType.EXPLORE,
+            "candidate_observation_count": 2,
+        }
+    )
+    analysis = _analysis().model_copy(
+        update={
+            "experiments": [control_analysis, explore_analysis],
+            "candidates": [selected_candidate],
+        }
+    )
+    selected_parent = _parent_experiment().model_copy(
+        update={
+            "experiment_id": selected_experiment_id,
+            "arm_type": ExperimentArmType.EXPLORE,
+            "resolved_config_hash": DRIFT_CONFIG_HASH,
+        }
+    )
+    policy = WavePlannerPolicyV2(
+        planner_policy_version="planner-baseline-reset-test",
+        child_result_policy_version="result-planner-test",
+        child_search_space_version="search-space-baseline-reset-test",
+        budget=WaveBudgetV2(
+            max_attempts=3,
+            max_parallel=1,
+            max_wallclock_seconds=7200,
+        ),
+        arm_templates=[
+            WaveArmTemplateV2(
+                arm_id="control",
+                arm_type=ExperimentArmType.CONTROL,
+                source_mode=PlannerSourceMode.BASELINE_CONTROL,
+                hypothesis="Fresh paired control.",
+                primary_metric="annualized_net_return_lcb",
+                seeds=[101],
+            ),
+            WaveArmTemplateV2(
+                arm_id="replication",
+                arm_type=ExperimentArmType.REPLICATION,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Reset search factors around the selected genome.",
+                primary_metric="annualized_net_return_lcb",
+                seeds=[101],
+            ),
+            WaveArmTemplateV2(
+                arm_id="explore",
+                arm_type=ExperimentArmType.EXPLORE,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Apply one fresh delta to the control baseline.",
+                primary_metric="annualized_net_return_lcb",
+                factor_delta={"ga.mutation_rate": 0.30},
+                seeds=[101],
+            ),
+        ],
+    )
+
+    plan = plan_child_wave(
+        analysis,
+        _selection(analysis),
+        [_parent_experiment(), selected_parent],
+        {
+            BASE_CONFIG_HASH: BASE_CONFIG,
+            DRIFT_CONFIG_HASH: DRIFT_CONFIG,
+        },
+        policy,
+    )
+    by_arm = {item.arm_id: item for item in plan.experiments}
+
+    assert by_arm["replication"].resolved_config == BASE_CONFIG
+    assert by_arm["explore"].resolved_config == DRIFT_CONFIG
+    for arm_id in ("replication", "explore"):
+        assert by_arm[arm_id].source.parent_experiment_id == selected_experiment_id
+        assert by_arm[arm_id].source.parent_config_hash == DRIFT_CONFIG_HASH
+
+
+def test_replay_validation_keeps_selected_source_config_as_its_baseline():
+    selected_experiment_id = "explore-replay-parent"
+    selected_candidate = _candidate().model_copy(
+        update={"experiment_id": selected_experiment_id}
+    )
+    selected_analysis = _analysis().experiments[0].model_copy(
+        update={
+            "experiment_id": selected_experiment_id,
+            "arm_type": ExperimentArmType.EXPLORE,
+        }
+    )
+    analysis = _analysis().model_copy(
+        update={
+            "experiments": [selected_analysis],
+            "candidates": [selected_candidate],
+        }
+    )
+    selected_parent = _parent_experiment().model_copy(
+        update={
+            "experiment_id": selected_experiment_id,
+            "arm_type": ExperimentArmType.EXPLORE,
+            "resolved_config_hash": DRIFT_CONFIG_HASH,
+        }
+    )
+    policy = WavePlannerPolicyV2(
+        planner_policy_version="planner-replay-source-config-test",
+        child_result_policy_version="result-planner-test",
+        child_search_space_version="replay-source-config-test",
+        plan_mode=WavePlanMode.REPLAY_VALIDATION,
+        budget=WaveBudgetV2(
+            max_attempts=1,
+            max_parallel=1,
+            max_wallclock_seconds=3600,
+        ),
+        arm_templates=[
+            WaveArmTemplateV2(
+                arm_id="validation",
+                arm_type=ExperimentArmType.VALIDATION,
+                source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                hypothesis="Replay the selected source without search rebasing.",
+                primary_metric="annualized_net_return_lcb",
+                seeds=[201],
+            )
+        ],
+    )
+
+    plan = plan_child_wave(
+        analysis,
+        _selection(analysis),
+        [selected_parent],
+        {DRIFT_CONFIG_HASH: DRIFT_CONFIG},
+        policy,
+    )
+
+    assert plan.experiments[0].resolved_config == DRIFT_CONFIG
+    assert plan.experiments[0].source.parent_config_hash == DRIFT_CONFIG_HASH
 
 
 def test_continuation_candidate_creates_control_replication_and_explore_arms():
@@ -355,6 +625,84 @@ def test_unknown_or_type_changing_factor_delta_is_rejected():
 
     with pytest.raises(WavePlanningError, match="changes field type"):
         _plan(policy=_planner_policy(replication_delta={"ga.mutation_rate": "high"}))
+
+
+def test_non_empty_factor_delta_that_does_not_change_baseline_is_rejected():
+    with pytest.raises(WavePlanningError, match="factor delta is a no-op"):
+        _plan(
+            policy=_planner_policy(
+                replication_delta={"ga.mutation_rate": 0.20}
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("failed_reason", "expected_arm_id"),
+    [
+        ("TRADE_RATE_TOO_LOW", "repair-frequency"),
+        ("DRAWDOWN_DURATION_TOO_HIGH", "repair-duration-risk"),
+        ("EXPECTANCY_LCB_TOO_LOW", "repair-edge"),
+    ],
+)
+def test_gate_failure_selects_exactly_one_applicable_repair_arm(
+    failed_reason: str,
+    expected_arm_id: str,
+):
+    plan = _repair_plan([failed_reason])
+    repair_arm_ids = {
+        item.arm_id for item in plan.experiments if item.arm_id.startswith("repair-")
+    }
+
+    assert repair_arm_ids == {expected_arm_id}
+    assert {item.arm_id for item in plan.experiments} == {
+        "control",
+        "replication",
+        expected_arm_id,
+    }
+
+
+def test_tied_gate_repairs_rotate_deterministically_from_parent_wave():
+    failed = [
+        "DRAWDOWN_DURATION_TOO_HIGH",
+        "EXPECTANCY_LCB_TOO_LOW",
+        "TRADE_RATE_TOO_LOW",
+    ]
+    applicable = sorted(
+        {
+            "repair-duration-risk",
+            "repair-edge",
+            "repair-frequency",
+        }
+    )
+    observed: dict[str, str] = {}
+    for index in range(12):
+        wave_id = f"wave-repair-rotation-{index}"
+        first = _repair_plan(failed, wave_id=wave_id)
+        repeated = _repair_plan(failed, wave_id=wave_id)
+        first_repairs = [
+            item.arm_id
+            for item in first.experiments
+            if item.arm_id.startswith("repair-")
+        ]
+        repeated_repairs = [
+            item.arm_id
+            for item in repeated.experiments
+            if item.arm_id.startswith("repair-")
+        ]
+        rotation = int(
+            canonical_config_hash(
+                {
+                    "contract": "GATE_REPAIR_ARM_ROTATION_V1",
+                    "parent_wave_id": wave_id,
+                }
+            )[:8],
+            16,
+        )
+        expected = applicable[rotation % len(applicable)]
+        assert first_repairs == repeated_repairs == [expected]
+        observed[wave_id] = expected
+
+    assert set(observed.values()) == set(applicable)
 
 
 def test_missing_or_tampered_parent_config_is_rejected():

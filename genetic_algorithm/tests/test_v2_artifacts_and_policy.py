@@ -261,6 +261,9 @@ def _record_for_manifest(
     manifest: AttemptManifestV2,
     scenario_id: str,
     role: str,
+    *,
+    candidate_id: str = "candidate-001",
+    phenotype_hash: str = "phenotype-hash-001",
 ) -> BacktestRecordV2:
     payload = _record(scenario_id, role).model_dump(mode="python")
     for field in (
@@ -275,6 +278,8 @@ def _record_for_manifest(
     ):
         payload[field] = getattr(manifest, field)
     payload["seed"] = manifest.seeds[0]
+    payload["candidate_id"] = candidate_id
+    payload["phenotype_hash"] = phenotype_hash
     return BacktestRecordV2.model_validate(payload)
 
 
@@ -417,6 +422,160 @@ def test_shadow_attempt_recorder_commits_real_records_and_is_idempotent(tmp_path
         recorder.add_backtest(
             _record_for_manifest(manifest, "inner-btc", "INNER_VALIDATION")
         )
+
+
+def test_shadow_attempt_deduplicates_exact_valid_behavior_after_full_replay(
+    tmp_path: Path,
+):
+    root = tmp_path / "attempt-exact-dedup"
+    config = {"config_schema_version": 2, "evaluation_v2": {"enabled": True}}
+    manifest = _manifest(root, config).model_copy(
+        update={
+            "attempt_id": "attempt-exact-dedup",
+            "artifact_root": str(root),
+            "resolved_config_path": str(root / "resolved_config.yaml"),
+        }
+    )
+    recorder = ShadowAttemptRecorderV2(manifest, config, _policy())
+    candidates = (
+        ("evo-test-rank-002", "phenotype-hash-rank-002"),
+        ("evo-test-rank-001", "phenotype-hash-rank-001"),
+    )
+    for candidate_id, phenotype_hash in candidates:
+        recorder.add_backtest(
+            _record_for_manifest(
+                manifest,
+                "final-btc",
+                "FINAL_TEST",
+                candidate_id=candidate_id,
+                phenotype_hash=phenotype_hash,
+            )
+        )
+        inner_payload = _record_for_manifest(
+            manifest,
+            "inner-btc",
+            "INNER_VALIDATION",
+            candidate_id=candidate_id,
+            phenotype_hash=phenotype_hash,
+        ).model_dump(mode="python")
+        if candidate_id == "evo-test-rank-002":
+            # Aggregate/bootstrap outputs are deliberately excluded from the
+            # behavior identity; only the complete raw replay evidence counts.
+            inner_payload["metrics"]["max_drawdown_ucb"] = 0.16
+        recorder.add_backtest(BacktestRecordV2.model_validate(inner_payload))
+
+    result = recorder.finalize(finished_at=datetime(2026, 7, 21, 12, 2, tzinfo=timezone.utc))
+
+    assert [candidate.candidate_id for candidate in result.candidate_evaluations] == [
+        "evo-test-rank-001"
+    ]
+    assert (root / "candidates/evo-test-rank-002/candidate.json").exists(), (
+        "deduplication must not delete replay artifacts"
+    )
+    assert V2ArtifactStore(root).read_verified_result() == result
+
+
+@pytest.mark.parametrize("changed_evidence", ["trade", "return", "equity"])
+def test_shadow_attempt_keeps_any_exact_behavior_difference(
+    tmp_path: Path,
+    changed_evidence: str,
+):
+    root = tmp_path / f"attempt-distinct-{changed_evidence}"
+    config = {"config_schema_version": 2, "evaluation_v2": {"enabled": True}}
+    manifest = _manifest(root, config).model_copy(
+        update={
+            "attempt_id": f"attempt-distinct-{changed_evidence}",
+            "artifact_root": str(root),
+            "resolved_config_path": str(root / "resolved_config.yaml"),
+        }
+    )
+    recorder = ShadowAttemptRecorderV2(manifest, config, _policy())
+    for scenario_id, role in (
+        ("inner-btc", "INNER_VALIDATION"),
+        ("final-btc", "FINAL_TEST"),
+    ):
+        recorder.add_backtest(
+            _record_for_manifest(
+                manifest,
+                scenario_id,
+                role,
+                candidate_id="evo-test-rank-001",
+                phenotype_hash="phenotype-hash-rank-001",
+            )
+        )
+        second_payload = _record_for_manifest(
+            manifest,
+            scenario_id,
+            role,
+            candidate_id="evo-test-rank-002",
+            phenotype_hash="phenotype-hash-rank-002",
+        ).model_dump(mode="python")
+        if scenario_id == "inner-btc":
+            if changed_evidence == "trade":
+                second_payload["trades"][0]["profit_ratio"] += 1e-9
+            elif changed_evidence == "return":
+                second_payload["daily_net_returns"][0] += 1e-9
+            else:
+                second_payload["equity_curve"][-1] += 1e-9
+        recorder.add_backtest(BacktestRecordV2.model_validate(second_payload))
+
+    result = recorder.finalize(finished_at=datetime(2026, 7, 21, 12, 2, tzinfo=timezone.utc))
+
+    assert [candidate.candidate_id for candidate in result.candidate_evaluations] == [
+        "evo-test-rank-001",
+        "evo-test-rank-002",
+    ]
+
+
+@pytest.mark.parametrize("scenario_status", ["INVALID", "INCONCLUSIVE"])
+def test_shadow_attempt_never_deduplicates_non_valid_candidates(
+    tmp_path: Path,
+    scenario_status: str,
+):
+    root = tmp_path / f"attempt-non-valid-{scenario_status.lower()}"
+    config = {"config_schema_version": 2, "evaluation_v2": {"enabled": True}}
+    manifest = _manifest(root, config).model_copy(
+        update={
+            "attempt_id": f"attempt-non-valid-{scenario_status.lower()}",
+            "artifact_root": str(root),
+            "resolved_config_path": str(root / "resolved_config.yaml"),
+        }
+    )
+    recorder = ShadowAttemptRecorderV2(manifest, config, _policy())
+    for rank in (1, 2):
+        candidate_id = f"evo-test-rank-{rank:03d}"
+        phenotype_hash = f"phenotype-hash-rank-{rank:03d}"
+        for scenario_id, role in (
+            ("inner-btc", "INNER_VALIDATION"),
+            ("final-btc", "FINAL_TEST"),
+        ):
+            payload = _record_for_manifest(
+                manifest,
+                scenario_id,
+                role,
+                candidate_id=candidate_id,
+                phenotype_hash=phenotype_hash,
+            ).model_dump(mode="python")
+            if scenario_id == "inner-btc":
+                payload["metrics"].update(
+                    {
+                        "status": scenario_status,
+                        "success": False,
+                        "error_code": "TEST_NON_VALID_SCENARIO",
+                        "error_detail": "deliberate non-valid evidence",
+                    }
+                )
+            recorder.add_backtest(BacktestRecordV2.model_validate(payload))
+
+    result = recorder.finalize(finished_at=datetime(2026, 7, 21, 12, 2, tzinfo=timezone.utc))
+
+    assert [candidate.candidate_id for candidate in result.candidate_evaluations] == [
+        "evo-test-rank-001",
+        "evo-test-rank-002",
+    ]
+    assert {candidate.status.value for candidate in result.candidate_evaluations} == {
+        scenario_status
+    }
 
 
 def test_shadow_attempt_without_records_commits_invalid_terminal_result(tmp_path: Path):

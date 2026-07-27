@@ -1,7 +1,41 @@
 # GA TODO und Befundregister
 
-Stand: 26.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
+Stand: 27.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
+
+Dreiunddreißigster Slice (27.07.2026): Die Analyse der ersten rund 28 Stunden
+des Seed-6001-Wochenlaufs bestätigt einen technisch stabilen Controller-,
+Worker- und Replay-Pfad, aber eine fachliche Such-Plateauphase. 24 vollständige
+Waves und 61 verifizierte Attempts blieben ohne technischen Resultatfehler.
+Continuation schlug das jeweilige frische Control in 18 von 18 vergleichbaren
+Waves, dennoch bestand unter 305 Finalisten keiner die Expectancy-LCB-, Annual-
+Return-LCB- oder Drawdown-Dauer-Gates; nur ein Kandidat bestand die
+Tradefrequenz. 140 Beobachtungen hatten bereits exakt wiederholtes Verhalten.
+
+Die Ursachen lagen teilweise im Suchvertrag. Die Tradefrequenz zielte auf
+einen absoluten Pair-Count statt auf die Promotionseinheit Trades pro aktivem
+Monat. Drawdown-Dauer erhielt kein Gewicht; selbst mit Gewicht hätte die alte
+90-Tage-Clippingfunktion alle beobachteten 254–823 Tage gleich mit null
+bewertet. Der Search-Score nutzt nun exakt die schlechteste unabhängige
+Pair-Rate relativ zu 5 Trades pro aktivem Monat und einen glatten
+`target / (target + duration)`-Gradienten. Zehn statt fünf Finalisten werden
+durch den strikten V2-Replay bewertet.
+
+Außerdem waren Replication und Explore in 19 von 20 Drei-Arm-Waves gleich
+konfiguriert: Ein ausgewählter Explore-Parent vererbte bereits
+`mutation_rate=0.30`, sodass dasselbe absolute Explore-Delta in der Folge-Wave
+wirkungslos wurde. Child-Genome behalten nun ihre Producer-Provenienz, aber
+jede Evolution-Config startet wieder von der Parent-Control-Baseline.
+Wirkungslose Deltas blockieren fail-closed. Statt eines statischen Explore
+wählt der Planner genau einen zum fehlgeschlagenen Gate passenden Frequency-,
+Duration/Risk- oder Edge-Repair-Arm. Dessen Such-RNG ist über einen Salt vom
+weiterhin gepaarten Replay-/Bootstrap-Seed getrennt.
+
+Der alte Lauf wurde vor weiteren gemischten Source-Versionen mit einem
+Kill-Switch versehen. Nach sauberem Abschluss des bereits gestarteten Attempts
+wird er recoverable archiviert. Danach prüft ein eigener Drei-Wave-Canary mit
+Seed 7001 den neuen Fitness-, Repair-, Diversity- und Reporting-Vertrag, bevor
+ein weiterer langer Lauf freigegeben wird.
 
 Zweiunddreißigster Slice (26.07.2026): Der korrigierte reale Zwei-Wave-Canary
 mit Seed 5002 erfüllte den vollständigen Root-zu-Child-Vertrag. Root
@@ -638,6 +672,12 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   keinen verlierenden Pair mehr durch Slotkonkurrenz verstecken. Mittel-/Worst-Pair-Aggregation
   sowie nicht kompensierbare profitable-Pair-, Worst-Loss- und Trade-Coverage-Faktoren sind
   konfiguriert, strikt validiert und durch echte Seed-3001-Finalisten-Replays belegt.
+- [x] **EVAL-014 – Search-Fitness an Aktivitäts- und DD-Dauer-Gates ausrichten.**
+  Tradefrequenz verwendet im neuen Profil die identische V2-Einheit
+  `worst_pair_trades / active_months` mit Ziel 5 statt eines statischen Counts. Fehlende
+  unabhängige Pair-Evidenz erhält nur den fail-closed Floor. Drawdown-Dauer nutzt den
+  Promotion-Grenzwert und einen jenseits der Grenze weiterhin monotonen Gradient. Die optionalen
+  neuen Felder bleiben in alten eingefrorenen V2-Configs rückwärtskompatibel.
 
 ## P0: Validierung und Evolutionslogik
 
@@ -918,6 +958,26 @@ Keine Next-Wave-Vollautomation vor `GATE-MEASURE`, `GATE-VALIDATE` und `GATE-RUN
   obwohl sie nie den normalen `RunEngine`-Lifecycle durchliefen. Tracker-Initialisierung gehört
   nun dem `RunEngine`; Standardläufe behalten Start-, Generation- und Abschlussereignisse,
   während Generic-Island-Sub-GAs keine irreführenden leeren Eventlogs mehr anlegen.
+- [x] **ORCH-034 – Folge-Waves auf Baseline resetten und Gate-Repair steuern.**
+  Der ausgewählte Genome behält seine exakte Producer-Provenienz, während Replication und Repair
+  jede Evolution-Config erneut von der Parent-Control-Baseline ableiten. Dadurch akkumulieren
+  Factor-Deltas nicht und ein bereits gesetzter Wert macht den Explore-Arm nicht mehr zum No-op.
+  Wirkungslose Deltas blockieren. Der Planner wählt aus Frequency, Duration/Risk und Edge
+  deterministisch genau den Repair-Arm, dessen Gatefamilie beim Parent fehlgeschlagen ist.
+  Such-RNG-Salts diversifizieren Repair, ohne den gepaarten Replay-Seed zu verändern.
+- [x] **ORCH-035 – Reporting-Ranking von tatsächlicher Parentwahl trennen.**
+  `diagnostic_top_candidate` bezeichnet ausschließlich die diagnostische Gate-Alignment-
+  Rangfolge. `planner_selected_input_parents` und kampagnenweite
+  `planner_selection_events` rekonstruieren dagegen die echte Source-zu-Child-Wahl.
+  Signierte Gate-Margen zeigen Richtung und Größe jedes Schwellenabstands. Reports bleiben
+  sanitisiert und enthalten weder Genome noch Strategien, Trades oder Logs.
+- [x] **ORCH-036 – Wiederholtes Verhalten nur anhand vollständiger Rohdaten deduplizieren.**
+  Aggregierte Profit-/Trade-/DD-Werte sind ausdrücklich keine Verhaltenssignatur. Erst nach dem
+  vollständigen V2-Replay werden ausschließlich vollständig valide Kandidaten innerhalb desselben
+  Attempts über sortierte Szenarioidentität, alle Daily Returns, die vollständige Equity Curve,
+  Equity-Methode und sämtliche Trades verglichen. Schon eine Rohdatenabweichung erhält beide
+  Kandidaten; invalid/inconclusive Evidenz wird nie dedupliziert. Alle immutable Roh-/Frozen-/
+  Candidate-/Decision-Artefakte bleiben für Audits erhalten.
 
 ## P0: Config-Vertrag
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from genetic_algorithm.orchestration.artifact_store_v2 import (
     ArtifactIntegrityError,
     V2ArtifactStore,
+    canonical_config_hash,
 )
 from genetic_algorithm.orchestration.promotion_policy_v2 import (
     ShadowGatePolicyV2,
@@ -21,7 +22,74 @@ from genetic_algorithm.orchestration.result_contract import (
     AttemptManifestV2,
     AttemptResultV2,
     BacktestRecordV2,
+    CandidateEvaluationV2,
+    EvaluationStatus,
 )
+
+
+def _scenario_behavior_sort_key(record: BacktestRecordV2) -> tuple[object, ...]:
+    """Return the predeclared scenario identity, independent of candidate."""
+
+    metrics = record.metrics
+    return (
+        metrics.scenario_id,
+        metrics.pair,
+        metrics.timeframe,
+        metrics.role.value,
+        metrics.period_start.isoformat(),
+        metrics.period_end.isoformat(),
+        metrics.cost_multiplier,
+    )
+
+
+def _exact_behavior_signature(candidate: CandidateEvaluationV2) -> str:
+    """Hash complete replay behavior without using aggregate score proxies."""
+
+    scenarios = []
+    for record in sorted(candidate.scenarios, key=_scenario_behavior_sort_key):
+        metrics = record.metrics
+        scenarios.append(
+            {
+                "scenario_identity": {
+                    "scenario_id": metrics.scenario_id,
+                    "pair": metrics.pair,
+                    "timeframe": metrics.timeframe,
+                    "role": metrics.role.value,
+                    "period_start": metrics.period_start.isoformat(),
+                    "period_end": metrics.period_end.isoformat(),
+                    "cost_multiplier": metrics.cost_multiplier,
+                },
+                "daily_net_returns": record.daily_net_returns,
+                "equity_curve": record.equity_curve,
+                "equity_method": record.equity_method,
+                "trades": record.trades,
+            }
+        )
+    return canonical_config_hash(
+        {
+            "contract": "EXACT_V2_REPLAY_BEHAVIOR_V1",
+            "scenarios": scenarios,
+        }
+    )
+
+
+def _deduplicate_valid_behaviors(
+    candidates: list[CandidateEvaluationV2],
+) -> list[CandidateEvaluationV2]:
+    """Keep the lexicographically first candidate for each exact VALID behavior."""
+
+    selected: list[CandidateEvaluationV2] = []
+    valid_signatures: set[str] = set()
+    for candidate in sorted(candidates, key=lambda item: item.candidate_id):
+        if candidate.status != EvaluationStatus.VALID:
+            selected.append(candidate)
+            continue
+        signature = _exact_behavior_signature(candidate)
+        if signature in valid_signatures:
+            continue
+        valid_signatures.add(signature)
+        selected.append(candidate)
+    return selected
 
 
 class ShadowAttemptRecorderV2:
@@ -105,7 +173,7 @@ class ShadowAttemptRecorderV2:
         if finished_at < self.manifest.created_at:
             raise ArtifactIntegrityError("finished_at precedes manifest creation")
 
-        candidates = []
+        evaluated_candidates = []
         for candidate_id in sorted(self._records):
             records = [
                 self._records[candidate_id][scenario_id]
@@ -120,8 +188,9 @@ class ShadowAttemptRecorderV2:
             )
             self.store.write_candidate(candidate)
             self.store.write_decision(decision)
-            candidates.append(candidate)
+            evaluated_candidates.append(candidate)
 
+        candidates = _deduplicate_valid_behaviors(evaluated_candidates)
         if candidates:
             status = "SUCCEEDED"
             error_code = None

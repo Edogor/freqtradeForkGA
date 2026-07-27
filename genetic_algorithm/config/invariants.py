@@ -112,6 +112,12 @@ def _validate_ga(
     errors: list[str],
     warnings: list[str],
 ) -> None:
+    if "search_seed_salt" in ga:
+        search_seed_salt = ga["search_seed_salt"]
+        if not _is_int(search_seed_salt) or search_seed_salt < 0:
+            errors.append(
+                "genetic_algorithm.search_seed_salt must be an integer >= 0"
+            )
     population = _require_int(
         ga,
         "population_size",
@@ -353,6 +359,24 @@ def _validate_fitness_weights(
         errors.append("fitness_weights must contain at least one positive weight")
 
 
+def _validate_fitness_penalties(
+    config: Mapping[str, Any],
+    errors: list[str],
+) -> None:
+    penalties = _mapping(config, "fitness_penalties")
+    if penalties is None:
+        errors.append("fitness_penalties must be a mapping")
+        return
+    if "target_trades_per_active_month" not in penalties:
+        return
+    target = penalties["target_trades_per_active_month"]
+    if not _is_finite_number(target) or float(target) <= 0.0:
+        errors.append(
+            "fitness_penalties.target_trades_per_active_month must be a "
+            "finite number > 0"
+        )
+
+
 def _validate_pair_validation(config: Mapping[str, Any], errors: list[str]) -> None:
     pair_validation = _mapping(config, "pair_validation")
     if pair_validation is None or not pair_validation.get("enabled", False):
@@ -494,6 +518,7 @@ def validate_runtime_invariants(
         _validate_backtesting(backtesting, errors, warnings)
 
     _validate_fitness_weights(config, errors, warnings)
+    _validate_fitness_penalties(config, errors)
     _validate_pair_validation(config, errors)
     _validate_parallel(config, errors)
     _validate_islands(config, errors)

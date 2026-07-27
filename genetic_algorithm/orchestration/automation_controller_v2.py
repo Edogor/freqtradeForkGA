@@ -320,7 +320,7 @@ def default_automation_policy(
         max_wallclock_seconds=48 * 60 * 60,
     )
     return AutomationPolicyV2(
-        automation_policy_version="guarded-island-search-v2.3",
+        automation_policy_version="guarded-island-search-v2.4-gate-repair",
         root_seeds=controller_config["root_seeds"],
         max_waves=controller_config["max_waves"],
         # The measured Generic-Island path needs roughly 28 minutes and
@@ -338,7 +338,15 @@ def default_automation_policy(
         min_available_memory_bytes=2 * 1024**3,
         poll_interval_seconds=5.0,
         kill_switch_path=str(Path(automation_root).resolve() / "STOP_AUTOMATION"),
-        allowed_factor_paths=["genetic_algorithm.mutation_rate"],
+        allowed_factor_paths=[
+            "fitness_weights.drawdown",
+            "fitness_weights.drawdown_duration",
+            "fitness_weights.profit",
+            "fitness_weights.profit_factor",
+            "fitness_weights.trade_frequency",
+            "genetic_algorithm.mutation_rate",
+            "genetic_algorithm.search_seed_salt",
+        ],
         analyzer_policy=WaveAnalyzerPolicyV2(
             analysis_policy_version="guarded-island-analysis-v2.0",
             required_result_policy_version=result_policy,
@@ -372,7 +380,7 @@ def default_automation_policy(
             continuation_max_drawdown_duration_days=365.0,
         ),
         planner_policy=WavePlannerPolicyV2(
-            planner_policy_version="guarded-island-next-wave-v2.1",
+            planner_policy_version="guarded-island-next-wave-v2.2-gate-repair",
             child_result_policy_version=result_policy,
             child_search_space_version="automation-island-v2",
             plan_mode=WavePlanMode.EVOLUTION_EXPERIMENT,
@@ -398,12 +406,60 @@ def default_automation_policy(
                     seeds=[1001],
                 ),
                 WaveArmTemplateV2(
-                    arm_id="explore",
+                    arm_id="repair-frequency",
                     arm_type=ExperimentArmType.EXPLORE,
                     source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
-                    hypothesis="Increase mutation around the selected robust genome.",
-                    primary_metric="worst_annualized_return_lcb",
-                    factor_delta={"genetic_algorithm.mutation_rate": 0.30},
+                    hypothesis=(
+                        "Increase paired-independent trade frequency around "
+                        "the selected genome."
+                    ),
+                    primary_metric="min_trades_per_active_month",
+                    factor_delta={
+                        "fitness_weights.profit": 0.15,
+                        "fitness_weights.trade_frequency": 0.22,
+                        "genetic_algorithm.mutation_rate": 0.35,
+                        "genetic_algorithm.search_seed_salt": 1,
+                    },
+                    factorial=True,
+                    seeds=[1001],
+                ),
+                WaveArmTemplateV2(
+                    arm_id="repair-duration-risk",
+                    arm_type=ExperimentArmType.EXPLORE,
+                    source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                    hypothesis=(
+                        "Reduce drawdown magnitude and duration around the "
+                        "selected genome."
+                    ),
+                    primary_metric="max_drawdown_duration_days",
+                    factor_delta={
+                        "fitness_weights.drawdown": 0.19,
+                        "fitness_weights.drawdown_duration": 0.13,
+                        "fitness_weights.profit": 0.15,
+                        "genetic_algorithm.mutation_rate": 0.35,
+                        "genetic_algorithm.search_seed_salt": 2,
+                    },
+                    factorial=True,
+                    seeds=[1001],
+                ),
+                WaveArmTemplateV2(
+                    arm_id="repair-edge",
+                    arm_type=ExperimentArmType.EXPLORE,
+                    source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+                    hypothesis=(
+                        "Increase conservative return and expectancy around "
+                        "the selected genome."
+                    ),
+                    primary_metric="worst_net_expectancy_lcb",
+                    factor_delta={
+                        "fitness_weights.drawdown_duration": 0.03,
+                        "fitness_weights.profit": 0.30,
+                        "fitness_weights.profit_factor": 0.15,
+                        "fitness_weights.trade_frequency": 0.07,
+                        "genetic_algorithm.mutation_rate": 0.35,
+                        "genetic_algorithm.search_seed_salt": 3,
+                    },
+                    factorial=True,
                     seeds=[1001],
                 ),
             ],
