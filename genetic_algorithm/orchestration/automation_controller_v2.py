@@ -377,7 +377,10 @@ def default_automation_policy(
             continuation_max_daily_es5_ucb=0.05,
             continuation_min_effective_sample_size=30.0,
             continuation_min_profitable_scenario_ratio=0.75,
-            continuation_max_drawdown_duration_days=365.0,
+            # Search-only continuation must be able to reach the duration
+            # repair arm. Promotion remains fixed at 120 days, while DD/ES,
+            # scenario-return and sample-size guards still bound the parent.
+            continuation_max_drawdown_duration_days=720.0,
         ),
         planner_policy=WavePlannerPolicyV2(
             planner_policy_version="guarded-island-next-wave-v2.2-gate-repair",

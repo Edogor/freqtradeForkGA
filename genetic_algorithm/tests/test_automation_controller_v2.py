@@ -89,7 +89,7 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources(
     assert policy.selection_policy.allow_continuation_candidates is True
     assert policy.selection_policy.continuation_min_scenario_net_return == 0.0
     assert policy.selection_policy.continuation_min_profitable_scenario_ratio == 0.75
-    assert policy.selection_policy.continuation_max_drawdown_duration_days == 365.0
+    assert policy.selection_policy.continuation_max_drawdown_duration_days == 720.0
     assert report.config_hash
     resolved = load_config(
         repo_root / "genetic_algorithm/config/presets/automation_island_v2.yaml"

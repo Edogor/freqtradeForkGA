@@ -147,7 +147,7 @@ Return-/Expectancy-LCBs und DD-/ES-UCBs ausgewählt. Replication und Repair erha
 hashverifiziertes Genom. Ein Kandidat, der noch nicht promotionsfähig ist, darf ausschließlich
 zur Fortsetzung der Suche dienen, wenn kein Szenario eine negative Nettorendite hat, mindestens
 75 % der Szenarien profitabel sind, Evidenz und Stichprobe vollständig sind, DD-/ES- sowie eine
-365-Tage-Drawdown-Dauergrenze eingehalten werden und nur ausdrücklich erlaubte Gategründe
+720-Tage-Drawdown-Dauergrenze eingehalten werden und nur ausdrücklich erlaubte Gategründe
 fehlschlagen. Diese Continuation bleibt Search-only und ist auf drei Parent-Waves begrenzt.
 
 Genome-Provenienz und Child-Search-Config sind bewusst getrennt: Das Genom
