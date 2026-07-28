@@ -321,7 +321,7 @@ def test_week_profile_changes_only_campaign_identity_and_budget():
     )
 
     assert week["automation_controller"] == {
-        "root_seeds": [6001],
+        "root_seeds": [8001],
         "max_waves": 400,
     }
     assert {

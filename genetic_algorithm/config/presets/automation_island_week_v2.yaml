@@ -8,5 +8,5 @@ config_schema_version: 2
 preset: automation_island_v2
 
 automation_controller:
-  root_seeds: [6001]
+  root_seeds: [8001]
   max_waves: 400
