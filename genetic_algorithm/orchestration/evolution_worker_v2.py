@@ -643,6 +643,45 @@ def load_evolution_worker(
     )
 
 
+def derive_search_seed(
+    paired_evaluation_seed: int,
+    search_seed_salt: int,
+) -> int:
+    """Derive the deterministic evolutionary RNG seed for one search arm.
+
+    Replay keeps using ``paired_evaluation_seed`` so arms remain comparable.
+    A non-zero salt selects a separate, deterministic search stream.  Keeping
+    this derivation in one function also lets reporting verify the exact same
+    contract instead of incorrectly comparing every arm to the replay seed.
+    """
+
+    if (
+        not isinstance(paired_evaluation_seed, int)
+        or isinstance(paired_evaluation_seed, bool)
+    ):
+        raise EvolutionWorkerError("paired evaluation seed must be an integer")
+    if (
+        not isinstance(search_seed_salt, int)
+        or isinstance(search_seed_salt, bool)
+        or search_seed_salt < 0
+    ):
+        raise EvolutionWorkerError("search seed salt must be an integer >= 0")
+
+    paired_seed = paired_evaluation_seed % (2**32)
+    if search_seed_salt == 0:
+        return paired_seed
+    return int(
+        canonical_config_hash(
+            {
+                "contract": "ARM_SEARCH_SEED_V1",
+                "paired_evaluation_seed": paired_seed,
+                "search_seed_salt": search_seed_salt,
+            }
+        )[:8],
+        16,
+    )
+
+
 def derive_engine_config(
     loaded: LoadedEvolutionWorkerV2,
 ) -> dict[str, Any]:
@@ -666,19 +705,9 @@ def derive_engine_config(
         raise EvolutionWorkerError(
             "genetic_algorithm.search_seed_salt must be an integer >= 0"
         )
-    search_seed = (
-        paired_evaluation_seed
-        if search_seed_salt == 0
-        else int(
-            canonical_config_hash(
-                {
-                    "contract": "ARM_SEARCH_SEED_V1",
-                    "paired_evaluation_seed": paired_evaluation_seed,
-                    "search_seed_salt": search_seed_salt,
-                }
-            )[:8],
-            16,
-        )
+    search_seed = derive_search_seed(
+        paired_evaluation_seed,
+        search_seed_salt,
     )
     ga["random_seed"] = search_seed
     parallel = config.setdefault("parallel_evaluation", {})

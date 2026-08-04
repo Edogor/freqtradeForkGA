@@ -18,6 +18,7 @@ from typing import Any
 import yaml
 
 from genetic_algorithm.orchestration.artifact_store_v2 import V2ArtifactStore
+from genetic_algorithm.orchestration.evolution_worker_v2 import derive_search_seed
 from genetic_algorithm.orchestration.wave_analyzer_v2 import WaveAnalysisV2
 from genetic_algorithm.orchestration.wave_materializer_v2 import (
     ChildWaveMaterializationV2,
@@ -25,7 +26,7 @@ from genetic_algorithm.orchestration.wave_materializer_v2 import (
 from genetic_algorithm.orchestration.wave_state_v2 import WaveStateStoreV2
 
 
-REPORT_SCHEMA_VERSION = "2.2"
+REPORT_SCHEMA_VERSION = "2.3"
 CAMPAIGN_SUMMARY_SCHEMA_VERSION = "1.2"
 DIAGNOSTIC_CANDIDATE_RANKING_BASIS = "GATE_ALIGNMENT_THEN_ROBUST_SCORE"
 
@@ -144,6 +145,45 @@ def _gate_summary(gate: Any) -> dict[str, Any]:
     }
 
 
+def _engine_seed_evidence(
+    manifest_seed: int,
+    engine_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify search and island seeds against the worker's salted contract."""
+
+    ga_config = engine_config.get("genetic_algorithm", {})
+    search_seed_salt = ga_config.get("search_seed_salt", 0)
+    expected_ga_seed = derive_search_seed(manifest_seed, search_seed_salt)
+    ga_seed = ga_config.get("random_seed")
+    island_seeds = [
+        {
+            "name": item.get("name"),
+            "seed": item.get("seed"),
+        }
+        for item in engine_config.get("generic_island_model", {}).get(
+            "islands", []
+        )
+        if isinstance(item, dict)
+    ]
+    expected_island_seeds = [
+        (expected_ga_seed + ordinal) % (2**32)
+        for ordinal in range(len(island_seeds))
+    ]
+    return {
+        "manifest_seed": manifest_seed,
+        "search_seed_salt": search_seed_salt,
+        "expected_ga_seed": expected_ga_seed,
+        "ga_seed": ga_seed,
+        "island_seeds": island_seeds,
+        "expected_island_seeds": expected_island_seeds,
+        "contract_matches": (
+            ga_seed == expected_ga_seed
+            and [item["seed"] for item in island_seeds]
+            == expected_island_seeds
+        ),
+    }
+
+
 def _attempt_summaries(
     store: WaveStateStoreV2,
     analysis: WaveAnalysisV2,
@@ -188,34 +228,10 @@ def _attempt_summaries(
                 engine_config = yaml.safe_load(engine_config_path.read_text())
                 if isinstance(engine_config, dict):
                     manifest_seed = result.manifest.seeds[0]
-                    ga_seed = engine_config.get("genetic_algorithm", {}).get(
-                        "random_seed"
+                    engine_seed_evidence = _engine_seed_evidence(
+                        manifest_seed,
+                        engine_config,
                     )
-                    island_seeds = [
-                        {
-                            "name": item.get("name"),
-                            "seed": item.get("seed"),
-                        }
-                        for item in engine_config.get("generic_island_model", {}).get(
-                            "islands", []
-                        )
-                        if isinstance(item, dict)
-                    ]
-                    expected_island_seeds = [
-                        (manifest_seed + ordinal) % (2**32)
-                        for ordinal in range(len(island_seeds))
-                    ]
-                    engine_seed_evidence = {
-                        "manifest_seed": manifest_seed,
-                        "ga_seed": ga_seed,
-                        "island_seeds": island_seeds,
-                        "expected_island_seeds": expected_island_seeds,
-                        "contract_matches": (
-                            ga_seed == manifest_seed
-                            and [item["seed"] for item in island_seeds]
-                            == expected_island_seeds
-                        ),
-                    }
             summary.update(
                 {
                     "result_status": result.status.value,

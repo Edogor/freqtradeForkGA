@@ -647,6 +647,39 @@ class StrategyGenerator:
         # Re-assign after ensuring indicators exist so any added indicator and
         # its formerly unresolved condition receive the same canonical ID.
         strategy_gene.assign_instance_ids()
+
+        # Repair the executable condition minimum before fingerprinting.  The
+        # generator cache is keyed by the genome, so mutating a gene after the
+        # cache lookup can return repaired code for an unrepaired genome on a
+        # later cache hit.  Keeping repair on this side of the fingerprint
+        # binds the cached phenotype to the exact StrategyGene that produced it.
+        min_entry = self.indicator_config.get('min_entry_conditions', 2)
+        min_exit = self.indicator_config.get('min_exit_conditions', 1)
+
+        valid_entry_count = sum(
+            1 for c in strategy_gene.entry_conditions
+            if self._condition_has_valid_indicator(c, strategy_gene.indicators)
+        )
+        valid_exit_count = sum(
+            1 for c in strategy_gene.exit_conditions
+            if self._condition_has_valid_indicator(c, strategy_gene.indicators)
+        )
+
+        if valid_entry_count < min_entry:
+            needed = min_entry - valid_entry_count
+            logger.info(f"Pre-code-gen fix: only {valid_entry_count} valid entry conditions, "
+                       f"adding {needed} to reach min {min_entry}")
+            self._add_replacement_conditions(strategy_gene, needed, is_entry=True)
+
+        if valid_exit_count < min_exit:
+            needed = min_exit - valid_exit_count
+            logger.info(f"Pre-code-gen fix: only {valid_exit_count} valid exit conditions, "
+                       f"adding {needed} to reach min {min_exit}")
+            self._add_replacement_conditions(strategy_gene, needed, is_entry=False)
+
+        # Top-ups are producer mutations and must be canonical before their
+        # fingerprint is used for cache lookup or persisted by V2 export.
+        strategy_gene.assign_instance_ids()
         
         strategy_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
 
@@ -672,34 +705,6 @@ class StrategyGenerator:
         informative_indicator_code = self._generate_informative_indicator_code(
             informative_indicators, strategy_gene.timeframe
         )
-        
-        # Pre-validate: count conditions that will survive the indicator-existence filter.
-        # If too few survive, add replacement conditions from available indicators to meet minimums.
-        min_entry = self.indicator_config.get('min_entry_conditions', 2)
-        min_exit = self.indicator_config.get('min_exit_conditions', 1)
-        
-        valid_entry_count = sum(
-            1 for c in strategy_gene.entry_conditions
-            if self._condition_has_valid_indicator(c, strategy_gene.indicators)
-        )
-        valid_exit_count = sum(
-            1 for c in strategy_gene.exit_conditions
-            if self._condition_has_valid_indicator(c, strategy_gene.indicators)
-        )
-        
-        # Top up entry conditions if too few will survive filtering
-        if valid_entry_count < min_entry:
-            needed = min_entry - valid_entry_count
-            logger.info(f"Pre-code-gen fix: only {valid_entry_count} valid entry conditions, "
-                       f"adding {needed} to reach min {min_entry}")
-            self._add_replacement_conditions(strategy_gene, needed, is_entry=True)
-        
-        # Top up exit conditions if too few will survive filtering
-        if valid_exit_count < min_exit:
-            needed = min_exit - valid_exit_count
-            logger.info(f"Pre-code-gen fix: only {valid_exit_count} valid exit conditions, "
-                       f"adding {needed} to reach min {min_exit}")
-            self._add_replacement_conditions(strategy_gene, needed, is_entry=False)
         
         # Generate entry condition code
         entry_code = self._generate_condition_code(
@@ -1418,6 +1423,12 @@ class {name}(IStrategy):
             ind = random.choice(strategy_gene.indicators)
             cond = self._generate_condition_for_indicator(ind, is_entry)
             if cond:
+                # Condition factories intentionally operate on indicator types.
+                # At this producer boundary, however, the gene already has
+                # canonical instance IDs.  Persist that exact reference so a
+                # code-generation top-up cannot leave a bare type such as
+                # ``OBV`` in an otherwise canonical V2 genome.
+                cond.indicator = ind.instance_id or ind.type
                 key = (cond.indicator, cond.operator, str(cond.threshold))
                 if key not in existing_keys:
                     cond.logic = 'AND'
@@ -1490,6 +1501,17 @@ class {name}(IStrategy):
                 or_exprs.append(expr)
             else:
                 and_exprs.append(expr)
+
+        # Different genes can compile to the same boolean term.  SuperTrend,
+        # for example, does not use ConditionGene.threshold for direction
+        # operators, so threshold drift used to emit the same expression more
+        # than once.  Remove duplicate terms without changing boolean meaning.
+        # If an AND term is also present in the OR group, the complete OR group
+        # is redundant: ``X & (X | Y) == X``.
+        and_exprs = list(dict.fromkeys(and_exprs))
+        or_exprs = list(dict.fromkeys(or_exprs))
+        if set(and_exprs).intersection(or_exprs):
+            or_exprs = []
         
         # Build the final combined expression
         parts = []

@@ -7,6 +7,7 @@ from datetime import date, datetime
 
 from pydantic import Field
 
+from genetic_algorithm.evaluation.activity_metrics import count_active_trade_months
 from genetic_algorithm.evaluation.confidence_metrics_v2 import (
     InsufficientTradeEvidenceError,
     clustered_trade_expectancy_lcb,
@@ -56,17 +57,10 @@ class BacktestContextV2(StrictV2Model):
 
 
 def _active_months(result: BacktestResult) -> int:
-    months: set[str] = set()
-    for row in result.daily_profit_abs or []:
-        if not isinstance(row, (list, tuple)) or len(row) != 2:
-            continue
-        day, pnl = row
-        try:
-            if float(pnl) != 0.0:
-                months.add(str(day)[:7])
-        except (TypeError, ValueError):
-            continue
-    return len(months)
+    return count_active_trade_months(
+        result.trades,
+        daily_profit_abs=result.daily_profit_abs,
+    )
 
 
 def _result_period(result: BacktestResult) -> tuple[date, date] | None:

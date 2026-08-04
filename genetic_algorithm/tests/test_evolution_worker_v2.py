@@ -39,6 +39,7 @@ from genetic_algorithm.orchestration.evolution_worker_v2 import (
     LoadedEvolutionWorkerV2,
     PreparedEvolutionWorkerV2,
     derive_engine_config,
+    derive_search_seed,
     freeze_evolution_seed,
     load_evolution_worker,
     prepare_evolution_worker,
@@ -847,5 +848,9 @@ def test_nonzero_search_seed_salt_separates_search_from_paired_replay_seed(
     second = derive_engine_config(loaded)
 
     assert first == second
+    assert first["genetic_algorithm"]["random_seed"] == derive_search_seed(
+        paired_seed,
+        7,
+    )
     assert first["genetic_algorithm"]["random_seed"] != paired_seed
     assert loaded.manifest.seeds == [paired_seed]

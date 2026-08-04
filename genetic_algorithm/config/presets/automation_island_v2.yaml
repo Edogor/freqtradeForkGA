@@ -35,6 +35,16 @@ backtesting:
   auto_download_data: false
   enable_cache: true
 
+# Independent single-pair search/replay cannot observe portfolio concurrency:
+# Freqtrade allows only one open trade per pair.  Fix this neutral gene to the
+# declared campaign execution limit instead of spending mutations on it.  The
+# stop range remains broad, but excludes the week run's repeatedly selected
+# 18-20% single-trade loss tail.
+strategy_constraints:
+  timeframes: [1h]
+  stoploss_range: [-0.12, -0.03]
+  max_open_trades_range: [3, 3]
+
 genetic_algorithm:
   random_seed: 42
   # The worker combines this salt with the paired attempt seed only for the
@@ -116,8 +126,10 @@ pair_validation:
   evaluation_mode: independent_pairs
   training_pairs: [BTC/USDT, SOL/USDT]
   validation_pairs: [ETH/USDT, BNB/USDT]
-  weight_train: 0.6
-  weight_val: 0.4
+  # Both two-pair groups are visible during every evaluation; neither is a
+  # hidden holdout. Give the four scenarios equal survival influence.
+  weight_train: 0.5
+  weight_val: 0.5
   min_val_fitness: 0.0
   # Zero means every evaluated candidate receives pair validation. Deferred
   # top-N validation is intentionally forbidden in the unattended profile.
@@ -125,6 +137,9 @@ pair_validation:
   # Blend each split's mean evidence with its worst pair, then apply smooth
   # non-compensable penalties aligned with the strict promotion gates.
   worst_pair_weight: 0.5
+  # Preserve a gradient while limiting compensation between a strong and a
+  # weak pair group. This is a soft blend, not a validation gate.
+  worst_split_weight: 0.25
   min_profitable_pair_ratio: 0.75
   profitable_pair_penalty_floor: 0.1
   max_pair_loss_pct: 5.0
@@ -135,17 +150,29 @@ pair_validation:
 # month and pair, so the search uses the same rate instead of a campaign-length
 # approximation. This remains a smooth penalty, not a hard cliff.
 fitness_weights:
-  profit: 0.25
-  sharpe_ratio: 0.12
-  sortino_ratio: 0.10
-  profit_factor: 0.10
-  drawdown: 0.14
-  win_rate: 0.02
-  trade_frequency: 0.12
-  monthly_stability: 0.03
-  cross_pair: 0.04
-  drawdown_duration: 0.08
+  profit: 0.30
+  sharpe_ratio: 0.10
+  sortino_ratio: 0.03
+  profit_factor: 0.16
+  drawdown: 0.15
+  # Week-run winners often combined a very high win rate with rare, large
+  # losses. Profit factor and drawdown therefore carry the quality signal;
+  # win rate remains informative but cannot dominate it.
+  win_rate: 0.01
+  trade_frequency: 0.10
+  monthly_stability: 0.01
+  cross_pair: 0.03
+  drawdown_duration: 0.11
   consecutive_losses: 0.00
+
+# The old +10% clamp removed all profit selection pressure above ten percent.
+# These audited bounds cover every pessimistic split summary observed in the
+# week run while giving break-even little free fitness. Drawdown uses a smooth
+# scale around the existing 25% promotion policy, never a pass/fail cliff.
+fitness_bounds:
+  profit_min: -5.0
+  profit_max: 20.0
+  drawdown_normalization_target: 0.25
 
 fitness_penalties:
   target_trades_per_pair: 0
@@ -154,7 +181,9 @@ fitness_penalties:
 
 promotion_v2:
   enabled: true
-  policy_version: automation-island-v2.0-shadow
+  # v2.1 records trade activity from actual UTC close months and carries the
+  # audited soft search alignment; do not pool it silently with v2.0 results.
+  policy_version: automation-island-v2.1-shadow
   required_scenarios:
     - scenario_id: train-btc
       pair: BTC/USDT

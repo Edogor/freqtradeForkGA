@@ -470,6 +470,62 @@ def test_selected_genome_keeps_provenance_but_evolution_resets_to_control_baseli
         assert by_arm[arm_id].source.parent_config_hash == DRIFT_CONFIG_HASH
 
 
+def test_retained_survivor_keeps_historical_provenance_and_current_baseline():
+    retained_experiment_id = "explore-historical-survivor"
+    retained = _candidate().model_copy(
+        update={"experiment_id": retained_experiment_id}
+    )
+    regressed = _candidate().model_copy(
+        update={
+            "phenotype_hash": "e" * 64,
+            "worst_annualized_return_lcb": 0.01,
+            "worst_net_expectancy_lcb": 0.0001,
+            "worst_max_drawdown_ucb": 0.20,
+            "worst_daily_es5_ucb": 0.03,
+        }
+    )
+    analysis = _analysis().model_copy(update={"candidates": [regressed]})
+    selection = select_wave_candidates(
+        analysis,
+        CandidateSelectionPolicyV2(
+            selection_policy_version="selection-retained-planner-test",
+            max_selected=1,
+            min_selected=1,
+            max_per_experiment=1,
+            min_normalized_objective_distance=0,
+        ),
+        retained_candidates=[retained],
+    )
+    retained_experiment = _parent_experiment().model_copy(
+        update={
+            "experiment_id": retained_experiment_id,
+            "wave_id": "wave-historical",
+            "arm_type": ExperimentArmType.EXPLORE,
+            "resolved_config_hash": DRIFT_CONFIG_HASH,
+        }
+    )
+
+    plan = plan_child_wave(
+        analysis,
+        selection,
+        [_parent_experiment()],
+        {
+            BASE_CONFIG_HASH: BASE_CONFIG,
+            DRIFT_CONFIG_HASH: DRIFT_CONFIG,
+        },
+        _planner_policy(),
+        retained_candidates=[retained],
+        retained_experiments=[retained_experiment],
+    )
+    exploit = next(item for item in plan.experiments if item.arm_id == "exploit")
+
+    assert exploit.source.parent_experiment_id == retained_experiment_id
+    assert exploit.source.phenotype_hash == retained.phenotype_hash
+    assert exploit.source.parent_config_hash == DRIFT_CONFIG_HASH
+    assert exploit.resolved_config["ga"]["population_size"] == 100
+    assert exploit.resolved_config["ga"]["mutation_rate"] == 0.25
+
+
 def test_replay_validation_keeps_selected_source_config_as_its_baseline():
     selected_experiment_id = "explore-replay-parent"
     selected_candidate = _candidate().model_copy(

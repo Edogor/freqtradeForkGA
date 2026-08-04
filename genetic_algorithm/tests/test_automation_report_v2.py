@@ -5,11 +5,13 @@ import pytest
 from genetic_algorithm.orchestration.automation_report_v2 import (
     _candidate_gate_distances,
     _campaign_markdown,
+    _engine_seed_evidence,
     _markdown,
     _planner_selected_input_parents,
     _signed_threshold_margin,
     build_campaign_summary_v2,
 )
+from genetic_algorithm.orchestration.evolution_worker_v2 import derive_search_seed
 
 
 def _report(
@@ -164,6 +166,39 @@ def test_campaign_summary_contains_no_strategy_or_trade_payloads():
     assert "strategy_code" not in serialized
     assert "genome" not in serialized
     assert "trades" not in summary["waves"][0]["diagnostic_top_candidate"]
+
+
+def test_engine_seed_evidence_uses_salted_search_seed_contract():
+    manifest_seed = 8001
+    salt = 3
+    expected_search_seed = derive_search_seed(manifest_seed, salt)
+    assert expected_search_seed != manifest_seed
+    engine_config = {
+        "genetic_algorithm": {
+            "random_seed": expected_search_seed,
+            "search_seed_salt": salt,
+        },
+        "generic_island_model": {
+            "islands": [
+                {"name": "momentum", "seed": expected_search_seed},
+                {"name": "trend", "seed": (expected_search_seed + 1) % (2**32)},
+            ]
+        },
+    }
+
+    evidence = _engine_seed_evidence(manifest_seed, engine_config)
+
+    assert evidence["manifest_seed"] == manifest_seed
+    assert evidence["search_seed_salt"] == salt
+    assert evidence["expected_ga_seed"] == expected_search_seed
+    assert evidence["expected_island_seeds"] == [
+        expected_search_seed,
+        (expected_search_seed + 1) % (2**32),
+    ]
+    assert evidence["contract_matches"] is True
+
+    engine_config["generic_island_model"]["islands"][1]["seed"] = manifest_seed + 1
+    assert _engine_seed_evidence(manifest_seed, engine_config)["contract_matches"] is False
 
 
 def test_campaign_summary_rejects_mixed_root_lineages():

@@ -9,6 +9,7 @@ import pytest
 from genetic_algorithm.orchestration.candidate_selector_v2 import (
     CandidateSelectionPolicyV2,
     ParetoObjective,
+    build_candidate_archive,
     select_wave_candidates,
 )
 from genetic_algorithm.orchestration.wave_analyzer_v2 import (
@@ -239,6 +240,120 @@ def test_selection_is_byte_deterministic():
 
     assert first == second
     assert first.selection_hash == second.selection_hash
+
+
+def test_bounded_archive_uses_the_live_pareto_contract_deterministically():
+    safe = _candidate(
+        "a",
+        experiment_id="history-safe",
+        annual_return_lcb=0.10,
+        expectancy_lcb=0.003,
+        drawdown_ucb=0.10,
+        es_ucb=0.01,
+    )
+    dominated = _candidate(
+        "b",
+        experiment_id="history-dominated",
+        annual_return_lcb=0.08,
+        expectancy_lcb=0.002,
+        drawdown_ucb=0.15,
+        es_ucb=0.02,
+    )
+    aggressive = _candidate(
+        "c",
+        experiment_id="history-aggressive",
+        annual_return_lcb=0.16,
+        expectancy_lcb=0.005,
+        drawdown_ucb=0.20,
+        es_ucb=0.03,
+    )
+    policy = _policy(max_selected=1)
+
+    first = build_candidate_archive(
+        [dominated, aggressive, safe],
+        policy,
+        max_candidates=2,
+        comparison_panel_hashes={PANEL},
+    )
+    repeated = build_candidate_archive(
+        [safe, dominated, aggressive],
+        policy,
+        max_candidates=2,
+        comparison_panel_hashes={PANEL},
+    )
+
+    assert first == repeated
+    assert [item.phenotype_hash for item in first] == [
+        safe.phenotype_hash,
+        aggressive.phenotype_hash,
+    ]
+
+
+def test_archive_phenotype_representative_is_outcome_and_input_order_independent():
+    stable_identity = _candidate(
+        "a",
+        experiment_id="history-a",
+        annual_return_lcb=0.01,
+        expectancy_lcb=0.0001,
+        drawdown_ucb=0.20,
+        es_ucb=0.03,
+    )
+    lucky_seed_outcome = _candidate(
+        "a",
+        experiment_id="history-z",
+        annual_return_lcb=0.20,
+        expectancy_lcb=0.006,
+        drawdown_ucb=0.05,
+        es_ucb=0.005,
+    )
+
+    first = build_candidate_archive(
+        [lucky_seed_outcome, stable_identity],
+        _policy(),
+        max_candidates=8,
+        comparison_panel_hashes={PANEL},
+    )
+    reversed_input = build_candidate_archive(
+        [stable_identity, lucky_seed_outcome],
+        _policy(),
+        max_candidates=8,
+        comparison_panel_hashes={PANEL},
+    )
+
+    assert first == reversed_input
+    assert len(first) == 1
+    assert first[0].experiment_id == stable_identity.experiment_id
+    assert first[0].phenotype_hash == stable_identity.phenotype_hash
+
+
+def test_retained_pareto_survivor_can_beat_a_regressed_live_wave():
+    remembered = _candidate(
+        "a",
+        experiment_id="history",
+        annual_return_lcb=0.10,
+        expectancy_lcb=0.003,
+        drawdown_ucb=0.10,
+        es_ucb=0.01,
+    )
+    regressed = _candidate(
+        "b",
+        experiment_id="current",
+        annual_return_lcb=0.06,
+        expectancy_lcb=0.001,
+        drawdown_ucb=0.18,
+        es_ucb=0.03,
+    )
+
+    selection = select_wave_candidates(
+        _analysis([regressed]),
+        _policy(max_selected=1),
+        retained_candidates=[remembered],
+    )
+    selected = next(item for item in selection.assessments if item.selected)
+
+    assert selected.experiment_id == remembered.experiment_id
+    assert selected.phenotype_hash == remembered.phenotype_hash
+    assert selection.eligible_candidate_count == 2
 
 
 def test_candidates_from_different_comparison_panels_are_not_ranked_together():

@@ -13,6 +13,7 @@ from collections import OrderedDict
 from typing import Tuple, Dict, Any, List, Optional
 
 from genetic_algorithm.core.strategy_gene import StrategyGene
+from genetic_algorithm.evaluation.activity_metrics import count_active_trade_months
 from genetic_algorithm.evaluation.direct_backtester import DirectBacktester, BacktestResult
 from genetic_algorithm.evaluation.profit_factor_v2 import profit_factor_for_scoring
 from genetic_algorithm.strategies.generator import StrategyGenerator
@@ -107,6 +108,16 @@ class FitnessEvaluator:
         self.sortino_max = fitness_bounds.get('sortino_max', 12)
         self.profit_factor_max = fitness_bounds.get('profit_factor_max', 10)
         self.profit_factor_norm = fitness_bounds.get('profit_factor_normalization', 3.0)
+        self.drawdown_normalization_target = fitness_bounds.get(
+            'drawdown_normalization_target'
+        )
+        if not (
+            isinstance(self.drawdown_normalization_target, (int, float))
+            and not isinstance(self.drawdown_normalization_target, bool)
+            and math.isfinite(float(self.drawdown_normalization_target))
+            and float(self.drawdown_normalization_target) > 0.0
+        ):
+            self.drawdown_normalization_target = None
         promotion = config.get('promotion_v2', {})
         self.drawdown_duration_target_days = float(
             promotion.get('max_drawdown_duration_days', 90.0)
@@ -116,6 +127,12 @@ class FitnessEvaluator:
             or self.drawdown_duration_target_days <= 0
         ):
             self.drawdown_duration_target_days = 90.0
+        self.active_months_target = float(promotion.get('min_active_months', 0.0))
+        if (
+            not math.isfinite(self.active_months_target)
+            or self.active_months_target <= 0.0
+        ):
+            self.active_months_target = 0.0
         
         # Trade frequency thresholds
         tf_config = config.get('trade_frequency_thresholds', {})
@@ -726,6 +743,10 @@ class FitnessEvaluator:
             pair: float(metrics.get("trades_per_active_month", 0.0))
             for pair, metrics in pair_metrics.items()
         }
+        per_pair_active_months = {
+            pair: int(metrics.get("active_months", 0))
+            for pair, metrics in pair_metrics.items()
+        }
         profits = list(per_pair_profit.values())
         mean_profit = sum(profits) / len(profits) if profits else 0.0
         pair_profit_std = (
@@ -753,6 +774,7 @@ class FitnessEvaluator:
             "num_trades": total_trades,
             "per_pair_profit": per_pair_profit,
             "per_pair_trades": per_pair_trades,
+            "per_pair_active_months": per_pair_active_months,
             "per_pair_trades_per_active_month": per_pair_trades_per_active_month,
             "pair_profit_std": pair_profit_std,
             "worst_pair_profit": min(profits) if profits else 0.0,
@@ -763,6 +785,11 @@ class FitnessEvaluator:
                 min(per_pair_trades_per_active_month.values())
                 if per_pair_trades_per_active_month
                 else 0.0
+            ),
+            "worst_pair_active_months": (
+                min(per_pair_active_months.values())
+                if per_pair_active_months
+                else 0
             ),
             "active_pair_ratio": (
                 sum(trades > 0 for trades in per_pair_trades.values())
@@ -983,6 +1010,9 @@ class FitnessEvaluator:
                     "validation_pairs": ",".join(validation_pairs),
                     "train_per_pair_profit": train_metrics["per_pair_profit"],
                     "train_per_pair_trades": train_metrics["per_pair_trades"],
+                    "train_per_pair_active_months": train_metrics[
+                        "per_pair_active_months"
+                    ],
                     "train_per_pair_trades_per_active_month": train_metrics[
                         "per_pair_trades_per_active_month"
                     ],
@@ -1034,6 +1064,12 @@ class FitnessEvaluator:
             )
             composite = (
                 train_fitness * weight_train + val_fitness * weight_val
+            )
+            worst_split_weight = float(pv.get("worst_split_weight", 0.0))
+            worst_split_weight = max(0.0, min(worst_split_weight, 1.0))
+            composite = (
+                (1.0 - worst_split_weight) * composite
+                + worst_split_weight * min(train_fitness, val_fitness)
             )
             composite *= (
                 pair_coverage
@@ -1093,6 +1129,9 @@ class FitnessEvaluator:
                 "validation_pairs": ",".join(validation_pairs),
                 "train_per_pair_profit": train_metrics["per_pair_profit"],
                 "train_per_pair_trades": train_metrics["per_pair_trades"],
+                "train_per_pair_active_months": train_metrics[
+                    "per_pair_active_months"
+                ],
                 "train_per_pair_trades_per_active_month": train_metrics[
                     "per_pair_trades_per_active_month"
                 ],
@@ -1109,6 +1148,9 @@ class FitnessEvaluator:
                 ),
                 "val_per_pair_profit": val_metrics["per_pair_profit"],
                 "val_per_pair_trades": val_metrics["per_pair_trades"],
+                "val_per_pair_active_months": val_metrics[
+                    "per_pair_active_months"
+                ],
                 "val_per_pair_trades_per_active_month": val_metrics[
                     "per_pair_trades_per_active_month"
                 ],
@@ -1126,6 +1168,7 @@ class FitnessEvaluator:
                 "pair_split_profitable_pair_multiplier": (
                     profitable_pair_multiplier
                 ),
+                "pair_split_worst_split_weight": worst_split_weight,
                 "pair_split_worst_pair_profit": min(all_pair_profit.values()),
                 "pair_split_worst_pair_loss_multiplier": (
                     worst_pair_loss_multiplier
@@ -1695,17 +1738,10 @@ class FitnessEvaluator:
     
     @staticmethod
     def _active_months_from_result(result: BacktestResult) -> int:
-        months: set[str] = set()
-        for row in result.daily_profit_abs or []:
-            if not isinstance(row, (list, tuple)) or len(row) != 2:
-                continue
-            day, pnl = row
-            try:
-                if float(pnl) != 0.0:
-                    months.add(str(day)[:7])
-            except (TypeError, ValueError):
-                continue
-        return len(months)
+        return count_active_trade_months(
+            result.trades,
+            daily_profit_abs=result.daily_profit_abs,
+        )
 
     def _backtest_result_to_metrics(self, result: BacktestResult) -> Dict[str, float]:
         """
@@ -1878,7 +1914,7 @@ class FitnessEvaluator:
         sortino_range = self.sortino_max - self.sortino_min
         norm_sortino = (sortino - self.sortino_min) / sortino_range if sortino_range > 0 else 0
         norm_profit_factor = min(1.0, profit_factor / self.profit_factor_norm)  # configurable via fitness_bounds.profit_factor_normalization
-        norm_drawdown = 1 - drawdown  # Lower drawdown is better
+        norm_drawdown = self._normalize_drawdown(drawdown)
         norm_win_rate = win_rate  # Already 0-1
         strict_trade_rate = metrics.get("worst_pair_trades_per_active_month")
         target_trade_rate = self.fitness_penalties.get(
@@ -2171,6 +2207,20 @@ class FitnessEvaluator:
             return 0.0
         target = self.drawdown_duration_target_days
         return target / (target + duration)
+
+    def _normalize_drawdown(self, drawdown: float) -> float:
+        """Normalize drawdown with an optional, smooth policy-relative scale.
+
+        ``1 - drawdown`` compresses the realistic 4-15% range into 0.96-0.85.
+        A configured target keeps a materially useful gradient without adding
+        a pass/fail boundary.  Legacy configurations retain their old scale.
+        """
+
+        target = getattr(self, 'drawdown_normalization_target', None)
+        if target is None:
+            return 1.0 - drawdown
+        bounded_drawdown = max(0.0, float(drawdown))
+        return float(target) / (float(target) + bounded_drawdown)
     
     def _pair_trade_coverage_multiplier(
         self,
@@ -2199,6 +2249,28 @@ class FitnessEvaluator:
                 )
             else:
                 coverage_ratio = 0.0
+            # A concentrated burst can satisfy trades/active-month while being
+            # dormant for most of the campaign.  Fold calendar coverage into
+            # this same smooth multiplier (rather than stacking another
+            # penalty) and use the weaker observation as the search signal.
+            active_target = getattr(self, 'active_months_target', 0.0)
+            if active_target > 0.0:
+                active_months = metrics.get(
+                    'worst_pair_active_months',
+                    metrics.get('active_months'),
+                )
+                if (
+                    isinstance(active_months, (int, float))
+                    and not isinstance(active_months, bool)
+                    and math.isfinite(float(active_months))
+                ):
+                    active_ratio = max(
+                        0.0,
+                        min(1.0, float(active_months) / active_target),
+                    )
+                else:
+                    active_ratio = 0.0
+                coverage_ratio = min(coverage_ratio, active_ratio)
             return coverage_floor + (1.0 - coverage_floor) * coverage_ratio
         per_pair_target = penalties.get('target_trades_per_pair', 0)
         per_pair_trades = metrics.get('per_pair_trades')

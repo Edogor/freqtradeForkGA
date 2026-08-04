@@ -1,6 +1,6 @@
 # Betriebs-Runbook: Guarded Generic-Island-Automation V2
 
-Stand: 27.07.2026
+Stand: 04.08.2026
 
 Dieser Pfad automatisiert ausschließlich die **Strategie-Suche im Shadow-Modus**. Er deployt keine
 Strategie und autorisiert kein Live-/Paper-Trading. Das Profil
@@ -27,6 +27,22 @@ Die Such-Fitness verwendet dieselbe Aktivitätseinheit wie das Gate: mindestens
 auch jenseits der Gategrenze einen monotonen Suchgradienten.
 Vor einem unbeaufsichtigten Wochenlauf müssen zusätzlich alle Punkte in
 [WEEK_RUN_READINESS_V2.md](WEEK_RUN_READINESS_V2.md) erfüllt sein.
+
+### Getrennter v2.1-Reparatur-Canary
+
+Der pausierte Seed-6001-Wochenlauf gehört zum Fitness-/Genome-Vertrag v2.0 und
+darf nach den Reparaturen nicht in-place fortgesetzt werden. Sein bestehender
+Kill-Switch, seine State-DB und seine Artefakte bleiben unverändert. Der
+begrenzte Reparaturtest verwendet stattdessen
+`automation_island_improved_canary_v2.yaml`, Seed 9001 und maximal fünf Waves
+mit eigener State-DB, eigenem Automation-Root und eigener systemd-Unit.
+
+Der v2.1-Canary verändert keine Promotion-Grenze und fügt kein Quality-Gate
+hinzu. Er prüft den weich neu ausgerichteten Search-Score, das begrenzte
+Parent-Memory und die automatische Folge-Wave-Materialisierung. Ein
+erfolgreicher technischer Abschluss ist noch kein Nachweis profitablen
+Live-Tradings; er ist die Voraussetzung für die fachliche Kandidatenanalyse
+und einen späteren frischen Langlauf.
 
 Der read-only Produktions-Preflight prüft zusätzlich Venv, Daten-/Split-/Codehash, freien
 Plattenplatz und verfügbaren RAM:
@@ -121,8 +137,8 @@ denselben Startbefehl erneut ausführen.
 ## Default-Budgets und Entscheidung
 
 - maximal 7 Tage Laufzeit
-- das aktuelle Diagnose-Preset stoppt nach genau einem Root-Wave; erst nach dessen Review darf
-  `automation_controller.max_waves` bewusst erhöht werden
+- der aktuelle v2.1-Reparatur-Canary stoppt nach höchstens fünf Waves; ein
+  späterer Langlauf wird als frische Kampagne mit neuer State-DB gestartet
 - maximal 400 Attempts; die Canary-Messung von rund 28 Minuten und 15,5 MiB
   pro Attempt lässt damit den 7-Tage-Guard vor dem Attemptlimit greifen und
   projiziert nur etwa 6,2 GiB Artefakte

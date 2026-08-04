@@ -125,6 +125,20 @@ DEFAULTS: Dict[str, Any] = {
         "monthly_stability": 0.04,
         "cross_pair": 0.04,
     },
+    # === Fitness normalization bounds ===
+    "fitness_bounds": {
+        "profit_min": -10.0,
+        "profit_max": 10.0,
+        "sharpe_min": -5.0,
+        "sharpe_max": 10.0,
+        "sortino_min": -5.0,
+        "sortino_max": 12.0,
+        "profit_factor_max": 10.0,
+        "profit_factor_normalization": 3.0,
+        # Zero preserves the legacy 1-drawdown normalization. Audited profiles
+        # may opt into a smooth target-relative scale.
+        "drawdown_normalization_target": 0.0,
+    },
     # === Fitness penalties ===
     "fitness_penalties": {
         "min_trades": 12,
@@ -325,6 +339,7 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
         "min_val_fitness": 0.0,
         "validate_top_n_only": 0,
         "worst_pair_weight": 0.5,
+        "worst_split_weight": 0.0,
         "min_profitable_pair_ratio": 0.0,
         "profitable_pair_penalty_floor": 0.1,
         "max_pair_loss_pct": 0.0,
@@ -797,6 +812,7 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             )
         for key in (
             "worst_pair_weight",
+            "worst_split_weight",
             "min_profitable_pair_ratio",
             "profitable_pair_penalty_floor",
             "worst_pair_loss_penalty_floor",

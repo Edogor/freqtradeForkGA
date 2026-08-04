@@ -187,6 +187,20 @@ def _mutate_condition_threshold(
         condition.indicator.split("_")[0] if "_" in condition.indicator else condition.indicator
     )
 
+    # SuperTrend direction conditions compile from the boolean direction state;
+    # their numeric threshold is not executable.  Mutating it only creates
+    # genetically different copies of the same strategy and wastes search
+    # budget, so keep that neutral field canonical.
+    if base_indicator == "SUPERTREND" and condition.operator in {
+        "<",
+        ">",
+        "cross_above",
+        "cross_below",
+    }:
+        condition.threshold = 0
+        condition.threshold_upper = 0.0
+        return
+
     # Indicator-specific default ranges (buy / sell)
     _DEFAULT_RANGES = {
         "RSI": ([20, 40], [60, 80]),

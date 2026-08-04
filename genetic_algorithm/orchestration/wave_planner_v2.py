@@ -359,16 +359,22 @@ def _resolved_variant(
 def _selected_candidates(
     analysis: WaveAnalysisV2,
     selection: CandidateSelectionV2,
+    retained_candidates: list[CandidateAnalysisV2] | None = None,
 ) -> list[CandidateAnalysisV2]:
-    by_key = {
-        canonical_config_hash(
+    by_key: dict[str, CandidateAnalysisV2] = {}
+    for item in [*analysis.candidates, *(retained_candidates or [])]:
+        key = canonical_config_hash(
             {
                 "experiment_id": item.experiment_id,
                 "phenotype_hash": item.phenotype_hash,
             }
-        ): item
-        for item in analysis.candidates
-    }
+        )
+        previous = by_key.get(key)
+        if previous is not None and previous != item:
+            raise WavePlanningError(
+                "candidate pool contains conflicting evidence for one identity"
+            )
+        by_key[key] = item
     missing = [key for key in selection.selected_candidate_keys if key not in by_key]
     if missing:
         raise WavePlanningError(f"selection references unknown candidates: {missing}")
@@ -403,6 +409,8 @@ def _plan_input_hash(
     analysis: WaveAnalysisV2,
     selection: CandidateSelectionV2,
     experiments: list[ExperimentSpecV2],
+    retained_candidates: list[CandidateAnalysisV2],
+    retained_experiments: list[ExperimentSpecV2],
     policy: WavePlannerPolicyV2,
 ) -> str:
     return canonical_config_hash(
@@ -412,6 +420,19 @@ def _plan_input_hash(
             "selection_hash": selection.selection_hash,
             "planner_policy_hash": policy.policy_hash,
             "experiment_spec_hashes": [item.spec_hash for item in experiments],
+            "retained_candidate_hashes": [
+                canonical_config_hash(item.model_dump(mode="json"))
+                for item in sorted(
+                    retained_candidates,
+                    key=lambda candidate: (
+                        candidate.experiment_id,
+                        candidate.phenotype_hash,
+                    ),
+                )
+            ],
+            "retained_experiment_spec_hashes": [
+                item.spec_hash for item in retained_experiments
+            ],
         }
     )
 
@@ -476,6 +497,7 @@ def _parent_experiment_context(
     analysis: WaveAnalysisV2,
     selection: CandidateSelectionV2,
     parent_experiments: list[ExperimentSpecV2],
+    retained_experiments: list[ExperimentSpecV2],
     policy: WavePlannerPolicyV2,
 ) -> tuple[list[ExperimentSpecV2], dict[str, ExperimentSpecV2]]:
     if selection.analysis_hash != analysis.analysis_hash:
@@ -483,8 +505,10 @@ def _parent_experiment_context(
     if policy.child_result_policy_version != analysis.result_policy_version:
         raise WavePlanningError("child result policy differs from analyzed result policy")
     experiments = sorted(parent_experiments, key=lambda item: item.experiment_id)
-    experiment_map = {item.experiment_id: item for item in experiments}
-    if len(experiment_map) != len(experiments):
+    retained = sorted(retained_experiments, key=lambda item: item.experiment_id)
+    combined = [*experiments, *retained]
+    experiment_map = {item.experiment_id: item for item in combined}
+    if len(experiment_map) != len(combined):
         raise WavePlanningError("duplicate parent experiment")
     if any(item.wave_id != analysis.wave_id for item in experiments):
         raise WavePlanningError("parent experiment belongs to another wave")
@@ -680,13 +704,43 @@ def plan_child_wave(
     parent_experiments: list[ExperimentSpecV2],
     resolved_configs: Mapping[str, Mapping[str, Any]],
     policy: WavePlannerPolicyV2,
+    *,
+    retained_candidates: list[CandidateAnalysisV2] | None = None,
+    retained_experiments: list[ExperimentSpecV2] | None = None,
 ) -> ChildWavePlanV2:
     """Create a shadow plan; this function performs no filesystem or queue writes."""
 
-    experiments, experiment_map = _parent_experiment_context(
-        analysis, selection, parent_experiments, policy
+    remembered_candidates = retained_candidates or []
+    remembered_experiments = sorted(
+        retained_experiments or [], key=lambda item: item.experiment_id
     )
-    input_hash = _plan_input_hash(analysis, selection, experiments, policy)
+    experiments, experiment_map = _parent_experiment_context(
+        analysis,
+        selection,
+        parent_experiments,
+        remembered_experiments,
+        policy,
+    )
+    missing_source_experiments = sorted(
+        {
+            candidate.experiment_id
+            for candidate in remembered_candidates
+            if candidate.experiment_id not in experiment_map
+        }
+    )
+    if missing_source_experiments:
+        raise WavePlanningError(
+            "retained candidates reference unknown experiments: "
+            f"{missing_source_experiments}"
+        )
+    input_hash = _plan_input_hash(
+        analysis,
+        selection,
+        experiments,
+        remembered_candidates,
+        remembered_experiments,
+        policy,
+    )
     child_wave_id = f"wave-{input_hash[:24]}"
 
     fallback_reasons = {
@@ -744,7 +798,15 @@ def plan_child_wave(
             )
         control = controls[0]
     use_control_only = use_control_fallback or use_control_recovery
-    selected = [] if use_control_only else _selected_candidates(analysis, selection)
+    selected = (
+        []
+        if use_control_only
+        else _selected_candidates(
+            analysis,
+            selection,
+            retained_candidates=remembered_candidates,
+        )
+    )
     templates = (
         [
             template
@@ -809,6 +871,8 @@ def select_and_plan_child_wave(
     planner_policy: WavePlannerPolicyV2,
     *,
     excluded_continuation_phenotype_hashes: list[str] | None = None,
+    retained_candidates: list[CandidateAnalysisV2] | None = None,
+    retained_experiments: list[ExperimentSpecV2] | None = None,
 ) -> tuple[CandidateSelectionV2, ChildWavePlanV2]:
     selection = select_wave_candidates(
         analysis,
@@ -816,6 +880,7 @@ def select_and_plan_child_wave(
         excluded_continuation_phenotype_hashes=(
             excluded_continuation_phenotype_hashes
         ),
+        retained_candidates=retained_candidates,
     )
     plan = plan_child_wave(
         analysis,
@@ -823,5 +888,7 @@ def select_and_plan_child_wave(
         parent_experiments,
         resolved_configs,
         planner_policy,
+        retained_candidates=retained_candidates,
+        retained_experiments=retained_experiments,
     )
     return selection, plan

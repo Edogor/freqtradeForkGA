@@ -14,7 +14,6 @@ import shutil
 import sys
 import tempfile
 import time
-from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -37,7 +36,9 @@ from genetic_algorithm.orchestration.automation_report_v2 import (
     persist_automation_analysis_report,
 )
 from genetic_algorithm.orchestration.candidate_selector_v2 import (
+    CandidateSelectionError,
     CandidateSelectionPolicyV2,
+    build_candidate_archive,
 )
 from genetic_algorithm.orchestration.code_manifest_v2 import capture_code_manifest
 from genetic_algorithm.orchestration.data_manifest_v2 import (
@@ -63,6 +64,7 @@ from genetic_algorithm.orchestration.split_contract_v2 import (
     build_evaluation_split_plan,
 )
 from genetic_algorithm.orchestration.wave_analyzer_v2 import (
+    CandidateAnalysisV2,
     WaveAnalysisV2,
     WaveAnalyzerPolicyV2,
     WaveAnalyzerV2,
@@ -108,6 +110,7 @@ class AutomationPolicyV2(StrictV2Model):
     max_total_attempts: int = Field(ge=1)
     max_consecutive_failed_waves: int = Field(ge=1)
     max_continuation_parent_waves: int = Field(default=3, ge=1)
+    max_remembered_parent_candidates: int = Field(default=8, ge=1)
     max_concurrent: int = Field(ge=1)
     max_runtime_seconds: int = Field(ge=1)
     max_attempt_runtime_seconds: int = Field(ge=1)
@@ -320,7 +323,7 @@ def default_automation_policy(
         max_wallclock_seconds=48 * 60 * 60,
     )
     return AutomationPolicyV2(
-        automation_policy_version="guarded-island-search-v2.4-gate-repair",
+        automation_policy_version="guarded-island-search-v2.5-parent-memory",
         root_seeds=controller_config["root_seeds"],
         max_waves=controller_config["max_waves"],
         # The measured Generic-Island path needs roughly 28 minutes and
@@ -330,6 +333,7 @@ def default_automation_policy(
         max_total_attempts=400,
         max_consecutive_failed_waves=3,
         max_continuation_parent_waves=3,
+        max_remembered_parent_candidates=8,
         max_concurrent=1,
         max_runtime_seconds=7 * 24 * 60 * 60,
         max_attempt_runtime_seconds=12 * 60 * 60,
@@ -383,9 +387,9 @@ def default_automation_policy(
             continuation_max_drawdown_duration_days=720.0,
         ),
         planner_policy=WavePlannerPolicyV2(
-            planner_policy_version="guarded-island-next-wave-v2.2-gate-repair",
+            planner_policy_version="guarded-island-next-wave-v2.3-parent-memory",
             child_result_policy_version=result_policy,
-            child_search_space_version="automation-island-v2",
+            child_search_space_version="automation-island-v2.1",
             plan_mode=WavePlanMode.EVOLUTION_EXPERIMENT,
             budget=wave_budget,
             allow_control_fallback_when_no_candidates=True,
@@ -418,8 +422,8 @@ def default_automation_policy(
                     ),
                     primary_metric="min_trades_per_active_month",
                     factor_delta={
-                        "fitness_weights.profit": 0.15,
-                        "fitness_weights.trade_frequency": 0.22,
+                        "fitness_weights.profit": 0.20,
+                        "fitness_weights.trade_frequency": 0.20,
                         "genetic_algorithm.mutation_rate": 0.35,
                         "genetic_algorithm.search_seed_salt": 1,
                     },
@@ -436,9 +440,9 @@ def default_automation_policy(
                     ),
                     primary_metric="max_drawdown_duration_days",
                     factor_delta={
-                        "fitness_weights.drawdown": 0.19,
-                        "fitness_weights.drawdown_duration": 0.13,
-                        "fitness_weights.profit": 0.15,
+                        "fitness_weights.drawdown": 0.20,
+                        "fitness_weights.drawdown_duration": 0.16,
+                        "fitness_weights.profit": 0.20,
                         "genetic_algorithm.mutation_rate": 0.35,
                         "genetic_algorithm.search_seed_salt": 2,
                     },
@@ -455,10 +459,10 @@ def default_automation_policy(
                     ),
                     primary_metric="worst_net_expectancy_lcb",
                     factor_delta={
-                        "fitness_weights.drawdown_duration": 0.03,
-                        "fitness_weights.profit": 0.30,
-                        "fitness_weights.profit_factor": 0.15,
-                        "fitness_weights.trade_frequency": 0.07,
+                        "fitness_weights.drawdown_duration": 0.06,
+                        "fitness_weights.profit": 0.35,
+                        "fitness_weights.profit_factor": 0.21,
+                        "fitness_weights.trade_frequency": 0.05,
                         "genetic_algorithm.mutation_rate": 0.35,
                         "genetic_algorithm.search_seed_salt": 3,
                     },
@@ -939,27 +943,109 @@ class AutomationControllerV2:
 
     def _plan(self, wave: WaveStateV2) -> tuple[WaveAnalysisV2, ChildWavePlanV2]:
         analysis = self._analysis(wave)
+        lineage = self._lineage()
         experiments = self.store.experiments(wave.wave_id)
+        retained_candidates = self._remembered_parent_candidates(
+            lineage,
+            current_analysis=analysis,
+        )
+        retained_experiments = self._retained_parent_experiments(
+            lineage,
+            retained_candidates,
+        )
         _, plan = select_and_plan_child_wave(
             analysis,
             self.policy.selection_policy,
             experiments,
-            self._resolved_configs(experiments),
+            self._resolved_configs([*experiments, *retained_experiments]),
             self.policy.planner_policy,
             excluded_continuation_phenotype_hashes=(
-                self._saturated_continuation_parents()
+                self._saturated_continuation_parents(lineage)
             ),
+            retained_candidates=retained_candidates,
+            retained_experiments=retained_experiments,
         )
         return analysis, plan
 
-    def _saturated_continuation_parents(self) -> list[str]:
-        """Bound repeated continuation from the same phenotype across child waves."""
+    def _remembered_parent_candidates(
+        self,
+        lineage: list[WaveStateV2],
+        *,
+        current_analysis: WaveAnalysisV2,
+    ) -> list[CandidateAnalysisV2]:
+        """Derive a bounded Pareto archive from immutable lineage analyses."""
 
-        counts: Counter[str] = Counter()
-        materialization_root = self.automation_root / "waves"
-        if not materialization_root.exists():
+        historical_analyses = [self._analysis(wave) for wave in lineage[:-1]]
+        panel_hashes = {
+            str(candidate.comparison_panel_hash)
+            for candidate in current_analysis.candidates
+            if candidate.comparison_panel_hash is not None
+        }
+        if not panel_hashes:
+            for analysis in reversed(historical_analyses):
+                panel_hashes = {
+                    str(candidate.comparison_panel_hash)
+                    for candidate in analysis.candidates
+                    if candidate.comparison_panel_hash is not None
+                }
+                if panel_hashes:
+                    break
+        historical_candidates = [
+            candidate
+            for analysis in historical_analyses
+            for candidate in analysis.candidates
+        ]
+        try:
+            return build_candidate_archive(
+                historical_candidates,
+                self.policy.selection_policy,
+                max_candidates=self.policy.max_remembered_parent_candidates,
+                comparison_panel_hashes=panel_hashes,
+            )
+        except CandidateSelectionError as error:
+            raise AutomationControllerError(
+                "historical parent archive cannot be ranked safely"
+            ) from error
+
+    def _retained_parent_experiments(
+        self,
+        lineage: list[WaveStateV2],
+        candidates: list[CandidateAnalysisV2],
+    ) -> list[ExperimentSpecV2]:
+        experiment_ids = {candidate.experiment_id for candidate in candidates}
+        if not experiment_ids:
             return []
-        for receipt_path in sorted(materialization_root.glob("*/materialization.json")):
+        experiments = {
+            experiment.experiment_id: experiment
+            for wave in lineage[:-1]
+            for experiment in self.store.experiments(wave.wave_id)
+            if experiment.experiment_id in experiment_ids
+        }
+        missing = sorted(experiment_ids - set(experiments))
+        if missing:
+            raise AutomationControllerError(
+                f"remembered parents reference unknown experiments: {missing}"
+            )
+        return [experiments[key] for key in sorted(experiments)]
+
+    def _saturated_continuation_parents(
+        self,
+        lineage: list[WaveStateV2],
+    ) -> list[str]:
+        """Bound uninterrupted reuse without permanently banning a survivor."""
+
+        limit = self.policy.max_continuation_parent_waves
+        recent_children = lineage[1:][-limit:]
+        if len(recent_children) < limit:
+            return []
+        selected_sets: list[set[str]] = []
+        for wave in recent_children:
+            receipt_path = (
+                self.automation_root
+                / "waves"
+                / wave.wave_id
+                / "materialization.json"
+            )
             try:
                 receipt = ChildWaveMaterializationV2.model_validate_json(
                     receipt_path.read_bytes()
@@ -968,21 +1054,18 @@ class AutomationControllerV2:
                 raise AutomationControllerError(
                     f"invalid child materialization receipt: {receipt_path}"
                 ) from error
-            selected_in_wave = {
-                str(experiment.source.phenotype_hash)
-                for experiment in receipt.plan.experiments
-                if (
-                    experiment.source.source_mode
-                    == PlannerSourceMode.SELECTED_CANDIDATES
-                    and experiment.source.phenotype_hash is not None
-                )
-            }
-            counts.update(selected_in_wave)
-        return sorted(
-            phenotype_hash
-            for phenotype_hash, count in counts.items()
-            if count >= self.policy.max_continuation_parent_waves
-        )
+            selected_sets.append(
+                {
+                    str(experiment.source.phenotype_hash)
+                    for experiment in receipt.plan.experiments
+                    if (
+                        experiment.source.source_mode
+                        == PlannerSourceMode.SELECTED_CANDIDATES
+                        and experiment.source.phenotype_hash is not None
+                    )
+                }
+            )
+        return sorted(set.intersection(*selected_sets))
 
     def _guard_plan(
         self,

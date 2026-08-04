@@ -86,6 +86,8 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources(
     assert policy.max_artifact_bytes == 40 * 1024**3
     assert policy.max_concurrent == 1
     assert policy.max_continuation_parent_waves == 3
+    assert policy.max_remembered_parent_candidates == 8
+    assert policy.planner_policy.child_search_space_version == "automation-island-v2.1"
     assert policy.selection_policy.allow_continuation_candidates is True
     assert policy.selection_policy.continuation_min_scenario_net_return == 0.0
     assert policy.selection_policy.continuation_min_profitable_scenario_ratio == 0.75
@@ -100,8 +102,10 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources(
         resolved["fitness_penalties"]["target_trades_per_active_month"]
         == 5.0
     )
-    assert resolved["fitness_weights"]["trade_frequency"] == 0.12
-    assert resolved["fitness_weights"]["drawdown_duration"] == 0.08
+    assert resolved["fitness_weights"]["trade_frequency"] == 0.10
+    assert resolved["fitness_weights"]["drawdown_duration"] == 0.11
+    assert resolved["strategy_constraints"]["stoploss_range"] == [-0.12, -0.03]
+    assert resolved["strategy_constraints"]["max_open_trades_range"] == [3, 3]
     assert resolved["genetic_algorithm"]["search_seed_salt"] == 0
     assert resolved["output"]["top_n"] == 10
     assert sum(resolved["fitness_weights"].values()) == pytest.approx(1.0)
@@ -271,42 +275,63 @@ def test_gate_repair_canary_changes_only_campaign_identity_and_budget():
     }
 
 
-def test_continuation_parent_limit_counts_each_materialized_wave_once(
+def test_continuation_parent_limit_counts_trailing_waves_not_arms_or_lifetime(
     tmp_path: Path,
     monkeypatch,
 ):
     automation_root = tmp_path / "automation"
-    for marker in ("a", "b", "c"):
+    for marker in ("a", "b", "c", "d"):
         receipt_path = (
             automation_root / "waves" / f"wave-{marker}" / "materialization.json"
         )
         receipt_path.parent.mkdir(parents=True)
-        receipt_path.write_text("{}\n", encoding="utf-8")
+        receipt_path.write_text(marker, encoding="utf-8")
     phenotype_hash = "f" * 64
-    selected_source = SimpleNamespace(
-        source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
-        phenotype_hash=phenotype_hash,
-    )
+    alternative_hash = "e" * 64
+
+    def receipt(phenotype: str):
+        selected_source = SimpleNamespace(
+            source_mode=PlannerSourceMode.SELECTED_CANDIDATES,
+            phenotype_hash=phenotype,
+        )
+        return SimpleNamespace(
+            plan=SimpleNamespace(
+                experiments=[
+                    SimpleNamespace(source=selected_source),
+                    SimpleNamespace(source=selected_source),
+                ]
+            )
+        )
+
     # Replication and Explore point at the same parent but count as one reuse
     # because the bound applies per materialized child wave, not per arm.
-    receipt = SimpleNamespace(
-        plan=SimpleNamespace(
-            experiments=[
-                SimpleNamespace(source=selected_source),
-                SimpleNamespace(source=selected_source),
-            ]
-        )
-    )
+    receipts = {
+        b"a": receipt(phenotype_hash),
+        b"b": receipt(phenotype_hash),
+        b"c": receipt(phenotype_hash),
+        b"d": receipt(alternative_hash),
+    }
     monkeypatch.setattr(
         automation_controller_v2,
         "ChildWaveMaterializationV2",
-        SimpleNamespace(model_validate_json=lambda payload: receipt),
+        SimpleNamespace(model_validate_json=lambda payload: receipts[payload]),
     )
     controller = object.__new__(AutomationControllerV2)
     controller.automation_root = automation_root
     controller.policy = SimpleNamespace(max_continuation_parent_waves=3)
+    root = SimpleNamespace(wave_id="wave-root")
+    a = SimpleNamespace(wave_id="wave-a")
+    b = SimpleNamespace(wave_id="wave-b")
+    c = SimpleNamespace(wave_id="wave-c")
+    d = SimpleNamespace(wave_id="wave-d")
 
-    assert controller._saturated_continuation_parents() == [phenotype_hash]
+    # Two waves with two arms each are still only two consecutive parent uses.
+    assert controller._saturated_continuation_parents([root, a, b]) == []
+    assert controller._saturated_continuation_parents([root, a, b, c]) == [
+        phenotype_hash
+    ]
+    # A different survivor breaks the streak, so the old champion can return.
+    assert controller._saturated_continuation_parents([root, a, b, c, d]) == []
 
 
 def test_week_profile_changes_only_campaign_identity_and_budget():

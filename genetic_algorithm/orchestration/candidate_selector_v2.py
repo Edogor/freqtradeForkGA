@@ -394,23 +394,132 @@ def _select_diverse(
     return selected, selected_distances
 
 
+def build_candidate_archive(
+    candidates: list[CandidateAnalysisV2],
+    policy: CandidateSelectionPolicyV2,
+    *,
+    max_candidates: int,
+    comparison_panel_hashes: set[str] | None = None,
+) -> list[CandidateAnalysisV2]:
+    """Keep a bounded Pareto memory under the normal continuation contract.
+
+    The archive does not introduce another eligibility threshold.  It applies
+    the same promotion/continuation rules and Pareto ordering as live parent
+    selection, then keeps only a small diverse set of historical survivors.
+    """
+
+    if max_candidates < 1:
+        raise CandidateSelectionError("candidate archive capacity must be positive")
+    allowed_panels = comparison_panel_hashes or set()
+    unique: dict[tuple[str, str], CandidateAnalysisV2] = {}
+    for candidate in candidates:
+        if allowed_panels and candidate.comparison_panel_hash not in allowed_panels:
+            continue
+        key = (candidate.experiment_id, candidate.phenotype_hash)
+        previous = unique.get(key)
+        if previous is not None and previous != candidate:
+            raise CandidateSelectionError(
+                "candidate archive contains conflicting evidence for one identity"
+            )
+        unique[key] = candidate
+
+    selectable_observations = [
+        candidate
+        for candidate in unique.values()
+        if candidate.eligibility_status == CandidateEligibilityStatus.ELIGIBLE
+        or _continuation_candidate(candidate, policy)
+    ]
+    if not selectable_observations:
+        return []
+    panel_hashes = {
+        candidate.comparison_panel_hash for candidate in selectable_observations
+    }
+    if None in panel_hashes or len(panel_hashes) != 1:
+        raise CandidateSelectionError(
+            "candidate archive requires one common comparison panel"
+        )
+    by_phenotype: dict[str, CandidateAnalysisV2] = {}
+    for candidate in selectable_observations:
+        previous = by_phenotype.get(candidate.phenotype_hash)
+        candidate_key = (
+            -candidate.valid_observation_count,
+            -candidate.observation_count,
+            candidate.experiment_id,
+            candidate.phenotype_hash,
+        )
+        if previous is None:
+            by_phenotype[candidate.phenotype_hash] = candidate
+            continue
+        previous_key = (
+            -previous.valid_observation_count,
+            -previous.observation_count,
+            previous.experiment_id,
+            previous.phenotype_hash,
+        )
+        if candidate_key < previous_key:
+            by_phenotype[candidate.phenotype_hash] = candidate
+    selectable = sorted(
+        by_phenotype.values(),
+        key=lambda candidate: (candidate.experiment_id, candidate.phenotype_hash),
+    )
+    values = {
+        (candidate.experiment_id, candidate.phenotype_hash): _objectives(candidate)
+        for candidate in selectable
+    }
+    ranks = _pareto_ranks(selectable, values, policy.dominance_epsilon)
+    archive_policy = policy.model_copy(
+        update={
+            "max_selected": max_candidates,
+            "min_selected": 1,
+            "max_per_experiment": max_candidates,
+        }
+    )
+    selected, _ = _select_diverse(selectable, values, ranks, archive_policy)
+    by_key = {
+        (candidate.experiment_id, candidate.phenotype_hash): candidate
+        for candidate in selectable
+    }
+    return [by_key[key] for key in selected]
+
+
+def _merge_candidate_pool(
+    current: list[CandidateAnalysisV2],
+    retained: list[CandidateAnalysisV2],
+) -> list[CandidateAnalysisV2]:
+    candidate_pool: dict[tuple[str, str], CandidateAnalysisV2] = {}
+    for item in [*current, *retained]:
+        key = (item.experiment_id, item.phenotype_hash)
+        previous = candidate_pool.get(key)
+        if previous is not None and previous != item:
+            raise CandidateSelectionError(
+                "candidate pool contains conflicting evidence for one identity"
+            )
+        candidate_pool[key] = item
+    return [candidate_pool[key] for key in sorted(candidate_pool)]
+
+
 def select_wave_candidates(
     analysis: WaveAnalysisV2,
     policy: CandidateSelectionPolicyV2,
     *,
     excluded_continuation_phenotype_hashes: list[str] | None = None,
+    retained_candidates: list[CandidateAnalysisV2] | None = None,
 ) -> CandidateSelectionV2:
     """Rank and select candidates without collapsing return and risk to one score."""
 
     excluded = set(excluded_continuation_phenotype_hashes or [])
+    candidates = _merge_candidate_pool(
+        analysis.candidates,
+        retained_candidates or [],
+    )
     eligible = [
         item
-        for item in analysis.candidates
+        for item in candidates
         if item.eligibility_status == CandidateEligibilityStatus.ELIGIBLE
     ]
     all_continuation = [
         item
-        for item in analysis.candidates
+        for item in candidates
         if _continuation_candidate(item, policy)
     ]
     continuation = [
@@ -426,8 +535,8 @@ def select_wave_candidates(
         }
     )
     selectable = [*eligible, *continuation]
-    ineligible_count = len(analysis.candidates) - len(eligible)
-    rejected_count = len(analysis.candidates) - len(selectable)
+    ineligible_count = len(candidates) - len(eligible)
+    rejected_count = len(candidates) - len(selectable)
     reasons: set[str] = set()
     if policy.require_analysis_planning_allowed and not analysis.planning_allowed:
         reasons.add("ANALYSIS_BLOCKED")

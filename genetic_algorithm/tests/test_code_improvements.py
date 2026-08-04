@@ -216,6 +216,59 @@ class TestDrawdownDurationGradient:
         assert self.evaluator._normalize_drawdown_duration(float("nan")) == 0.0
 
 
+class TestDrawdownMagnitudeGradient:
+    def test_target_relative_scale_is_smooth_and_material(self):
+        evaluator = _make_fitness_evaluator(
+            {
+                "fitness_bounds": {"drawdown_normalization_target": 0.25},
+            }
+        )
+
+        assert evaluator._normalize_drawdown(0.0) == 1.0
+        assert evaluator._normalize_drawdown(0.25) == 0.5
+        assert (
+            evaluator._normalize_drawdown(0.04)
+            > evaluator._normalize_drawdown(0.15)
+            > evaluator._normalize_drawdown(0.25)
+        )
+        assert (
+            evaluator._normalize_drawdown(0.04)
+            - evaluator._normalize_drawdown(0.15)
+            > 0.20
+        )
+
+    def test_legacy_scale_is_retained_without_opt_in(self):
+        evaluator = _make_fitness_evaluator()
+        assert evaluator._normalize_drawdown(0.15) == pytest.approx(0.85)
+
+
+class TestProfitGradient:
+    def test_audited_bound_keeps_profit_gradient_above_ten_percent(self):
+        evaluator = _make_fitness_evaluator(
+            {
+                "fitness_bounds": {"profit_min": -5.0, "profit_max": 20.0},
+                "fitness_penalties": {
+                    "min_trades": 0,
+                    "max_drawdown": 10.0,
+                    "min_win_rate": 0.0,
+                    "min_penalty_floor": 0.0,
+                },
+            }
+        )
+        common = {
+            "sharpe_ratio": 0.0,
+            "sortino_ratio": 0.0,
+            "profit_factor": 1.0,
+            "max_drawdown": 0.10,
+            "win_rate": 0.50,
+            "num_trades": 50,
+        }
+
+        assert evaluator.calculate_fitness(
+            {**common, "profit": 15.0}
+        ) > evaluator.calculate_fitness({**common, "profit": 10.0})
+
+
 # ============================================================================
 # Test 2: Fitness Smoothing — Min Trades Logistic Ramp
 # ============================================================================

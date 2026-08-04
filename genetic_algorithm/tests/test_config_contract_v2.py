@@ -167,8 +167,19 @@ def test_automation_island_v2_preset_is_a_valid_shadow_search_contract():
     assert config["pair_validation"]["validate_top_n_only"] == 0
     assert config["fitness_penalties"]["target_trades_per_pair"] == 0
     assert config["fitness_penalties"]["target_trades_per_active_month"] == 5.0
-    assert config["fitness_weights"]["drawdown_duration"] == 0.08
+    assert config["promotion_v2"]["policy_version"] == "automation-island-v2.1-shadow"
+    assert config["fitness_weights"]["profit"] == 0.30
+    assert config["fitness_weights"]["profit_factor"] == 0.16
+    assert config["fitness_weights"]["drawdown_duration"] == 0.11
     assert sum(config["fitness_weights"].values()) == pytest.approx(1.0)
+    assert config["fitness_bounds"]["profit_min"] == -5.0
+    assert config["fitness_bounds"]["profit_max"] == 20.0
+    assert config["fitness_bounds"]["drawdown_normalization_target"] == 0.25
+    assert config["pair_validation"]["weight_train"] == 0.5
+    assert config["pair_validation"]["weight_val"] == 0.5
+    assert config["pair_validation"]["worst_split_weight"] == 0.25
+    assert config["strategy_constraints"]["stoploss_range"] == [-0.12, -0.03]
+    assert config["strategy_constraints"]["max_open_trades_range"] == [3, 3]
     assert config["output"]["top_n"] == 10
 
 

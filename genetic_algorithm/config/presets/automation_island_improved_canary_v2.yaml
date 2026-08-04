@@ -1,0 +1,12 @@
+# Five-wave canary for the audited week-run repairs.
+#
+# This campaign inherits the shadow-only Generic-Island search, independent
+# pair replay and promotion contract from automation_island_v2.  A fresh seed,
+# state database and artifact root keep the paused v2.0 week run immutable.
+
+config_schema_version: 2
+preset: automation_island_v2
+
+automation_controller:
+  root_seeds: [9001]
+  max_waves: 5

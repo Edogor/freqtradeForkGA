@@ -1,7 +1,46 @@
 # GA TODO und Befundregister
 
-Stand: 27.07.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
+Stand: 04.08.2026. Dieses Dokument ist die priorisierte Arbeitsliste aus
 [GA_AUDIT_2026-07-20.md](GA_AUDIT_2026-07-20.md).
+
+Vierunddreißigster Slice (04.08.2026): Die vollständige Auswertung des
+pausierten Seed-6001-Wochenlaufs umfasst 107 analysierbare Waves, 312 Attempts
+und 2.586 Kandidaten. Der technische Pfad blieb weitgehend stabil (311
+erfolgreiche Attempts, ein bewusst abgelehntes nichtkanonisches Genom), aber
+die Suche plateauierte: Kein Kandidat bestand den vollständigen
+Promotionvertrag; insbesondere Expectancy-LCB und Drawdown-Dauer blieben die
+Engpässe. Die Detailanalyse und die gemessenen Search-zu-Replay-Korrelationen
+stehen in
+[WEEK_RUN_FITNESS_AUDIT_2026-08-04.md](WEEK_RUN_FITNESS_AUDIT_2026-08-04.md).
+
+Die Reparatur fügt keine Promotion-Gates hinzu und lockert keine vorhandene
+Schwelle. Stattdessen bleibt der Überlebensdruck glatt: Profit, Profit-Factor,
+Drawdown und Erholungsdauer erhalten mehr Gewicht, die profitable
+Suchwert-Spanne reicht nun bis +20 %, Pair-Gruppen werden gleich gewichtet und
+ein kleiner Worst-Split-Anteil begrenzt Kompensation. Tatsächliche
+Trade-Close-Monate fließen in denselben weichen Activity-Multiplikator ein;
+eine kurze konzentrierte Handelsphase kann dadurch nicht mehr wie dauerhaftes
+Daytrading aussehen. Winrate bleibt ein Signal, kann aber seltene große
+Verluste nicht überstimmen. Die unbeobachtbare Single-Pair-Dimension
+`max_open_trades` wird nicht länger evolviert, und der Stoploss-Suchraum
+schließt den im Wochenlauf wiederholt selektierten 18--20-%-Verlusttail aus.
+
+Der Folge-Wave-Pfad behält maximal acht unterschiedliche, nach demselben
+Promotion-/Continuation-Vertrag zulässige historische Phänotypen. Damit geht
+ein guter Parent nach einer schwachen Wave nicht sofort verloren, ohne dass
+ein neues Quality-Gate entsteht. Der Drei-Wave-Parent-Cap gilt jetzt für drei
+aufeinanderfolgende Child-Waves, zählt einen Parent pro Wave nur einmal und
+bannt ihn nicht mehr lebenslang. Weitere Korrekturen binden gesalzene
+Search-Seeds korrekt an Reports, verhindern nichtkanonische Top-up-Conditions,
+deduplizieren logisch redundante Bedingungen und reparieren das
+Genome/Code-Cache-Roundtrip vor der Fingerprintbildung.
+
+Der alte v2.0-Wochenlauf bleibt mit Kill-Switch unverändert pausiert. Ein
+separater, auf fünf Waves begrenzter v2.1-Canary mit Seed 9001, eigener
+State-DB und eigenem Artefakt-Root prüft nun Search-Gradient, Parent-Memory,
+Repair-Arme und echte Auto-Next-Wave-Materialisierung. Erst dessen Auswertung
+entscheidet über einen neuen langen Lauf; historische v2.0-Resultate werden
+nicht unter geänderter Semantik fortgesetzt.
 
 Dreiunddreißigster Slice (27.07.2026): Die Analyse der ersten rund 28 Stunden
 des Seed-6001-Wochenlaufs bestätigt einen technisch stabilen Controller-,

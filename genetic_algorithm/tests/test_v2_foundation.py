@@ -221,10 +221,31 @@ class TestFitnessMetricContractV2:
             "BTC/USDT": 10.0,
             "SOL/USDT": 2.5,
         }
+        assert summary["per_pair_active_months"] == {
+            "BTC/USDT": 2,
+            "SOL/USDT": 4,
+        }
+        assert summary["worst_pair_active_months"] == 2
         assert summary["worst_pair_trades_per_active_month"] == 2.5
         assert evaluator._pair_trade_coverage_multiplier(summary) == pytest.approx(
             0.505
         )
+
+    def test_activity_coverage_uses_one_smooth_weakest_evidence_factor(self):
+        evaluator = self._penalty_evaluator(
+            target_trades_per_active_month=5.0,
+            pair_trade_penalty_floor=0.01,
+        )
+        evaluator.active_months_target = 12.0
+
+        # Rate is already at target, but activity spans only half the desired
+        # months. This is one 0.505 multiplier, not two stacked penalties.
+        assert evaluator._pair_trade_coverage_multiplier(
+            {
+                "worst_pair_trades_per_active_month": 5.0,
+                "worst_pair_active_months": 6,
+            }
+        ) == pytest.approx(0.505)
 
     def test_active_month_trade_rate_passes_at_target_and_missing_evidence_fails_closed(
         self,
