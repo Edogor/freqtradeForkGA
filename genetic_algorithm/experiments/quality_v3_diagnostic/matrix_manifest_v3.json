@@ -8,14 +8,14 @@
       "arm_id": "A0",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a0_historical.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-41001/config.resolved.yaml",
-      "config_sha256": "8715d53c315339e3cba19629f7557e8bc11496da1bfd0dac7313331070aef683",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-41001/diag-1h-a0-41001.resolved.yaml",
+      "config_sha256": "d3d4b00466acee03f907ed81e03a0b3435bdbbabf5c4db04a3d071c25c024779",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-41001/diag-1h-a0-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -27,14 +27,14 @@
       "arm_id": "A1",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a1_balanced.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-41001/config.resolved.yaml",
-      "config_sha256": "5185d98238e01109fdb433f2974bb7c4704a5ada7433cc2af3c118a2477662a3",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-41001/diag-1h-a1-41001.resolved.yaml",
+      "config_sha256": "65562ba612bdad8b7a08d502d86d9b58b0496413e75f24c56aca49bf4d197ac7",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-41001/diag-1h-a1-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -46,14 +46,14 @@
       "arm_id": "A2",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a2_separated.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-41001/config.resolved.yaml",
-      "config_sha256": "0c1c404caf401fecec2fb41bd43018aab76ecd119186a454903bef960e673f70",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-41001/diag-1h-a2-41001.resolved.yaml",
+      "config_sha256": "b21fd02fced383ef877b6905574a8360e33bf53c8818735298c46150e08f6995",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-41001/diag-1h-a2-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -65,14 +65,14 @@
       "arm_id": "A3",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a3_feasibility.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-41001/config.resolved.yaml",
-      "config_sha256": "ef0b33a1c9c1bf79652680bede76000d3fc3e6170d3f47ae4c8d0bea61a75a32",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-41001/diag-1h-a3-41001.resolved.yaml",
+      "config_sha256": "91764e2acb1897222f74991405fbcc202d64cd7a40075211c9458733dc66dfbe",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-41001/diag-1h-a3-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -84,14 +84,14 @@
       "arm_id": "A4",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a4_diversity.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-41001/config.resolved.yaml",
-      "config_sha256": "4db11f779aecd0a53d1a5ea4ec31beeeaa4cfe926d742bd82af7d0493ae149fc",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-41001/diag-1h-a4-41001.resolved.yaml",
+      "config_sha256": "da97ef152313a752fb6f0a69bb78b1505faa2f02f82dc4484039a7c301cbf458",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-41001/diag-1h-a4-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -103,14 +103,14 @@
       "arm_id": "A0",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a0_historical.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-42001/config.resolved.yaml",
-      "config_sha256": "7ff9e609e56e4f0a53f89c090bdfb7a237d3a976dc768755330ec3e70cdf2771",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-42001/diag-1h-a0-42001.resolved.yaml",
+      "config_sha256": "50bc4bf71015cce1ebcf55eaa3b91219e285d8519faa9c39c1e24f2799137307",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-42001/diag-1h-a0-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -122,14 +122,14 @@
       "arm_id": "A1",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a1_balanced.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-42001/config.resolved.yaml",
-      "config_sha256": "f31d6bfcd768ee187443255e0439ca1db19dd4242bbc5d39a4330cfc736a48df",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-42001/diag-1h-a1-42001.resolved.yaml",
+      "config_sha256": "91ea6b45c2a8144c0137467ba99f234e4dc4f628f1990738f8e6956bab6281f9",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-42001/diag-1h-a1-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -141,14 +141,14 @@
       "arm_id": "A2",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a2_separated.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-42001/config.resolved.yaml",
-      "config_sha256": "502ac408a674b009ffa35b6b3530831f776618f730af68271f489d1910c07959",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-42001/diag-1h-a2-42001.resolved.yaml",
+      "config_sha256": "2294e21c61ef1d608ccf846ec875e9e20b16a52aec16e2bee7f8e63b81933abe",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-42001/diag-1h-a2-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -160,14 +160,14 @@
       "arm_id": "A3",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a3_feasibility.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-42001/config.resolved.yaml",
-      "config_sha256": "b43709a891b71d1d3b93bd039ed84596dc81ce701664d1bc9b95c6326a5b09bb",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-42001/diag-1h-a3-42001.resolved.yaml",
+      "config_sha256": "a1cc0b2361a843d0994d265b5bfe6969f8370d2ee424fa257b1335c0f34c8956",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-42001/diag-1h-a3-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -179,14 +179,14 @@
       "arm_id": "A4",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a4_diversity.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-42001/config.resolved.yaml",
-      "config_sha256": "c1c9216f4dc72fcbda0fd0c83b1eee902e5dcc4198ca29b4a2b8bd4ca9006a2e",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-42001/diag-1h-a4-42001.resolved.yaml",
+      "config_sha256": "c7b32741a97df8aae010dd170a364883520b50f2b0922b73aeb6c858766a76b6",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-42001/diag-1h-a4-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -198,14 +198,14 @@
       "arm_id": "A0",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a0_historical.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-43001/config.resolved.yaml",
-      "config_sha256": "3b2d1de3091f446cce40c70c6f0c95130365cb72ee66900dd1a4a8984bee5eb1",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-43001/diag-1h-a0-43001.resolved.yaml",
+      "config_sha256": "b6d1be2e29ab7f1f1696fe00ccfd2c18ff6a35e581b4d9a9c34660613f96df39",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a0-43001/diag-1h-a0-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -217,14 +217,14 @@
       "arm_id": "A1",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a1_balanced.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-43001/config.resolved.yaml",
-      "config_sha256": "33edc6c39b0ec27842003d79fc24496d0dcdaf606e108f29c2734da017a92b91",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-43001/diag-1h-a1-43001.resolved.yaml",
+      "config_sha256": "1f629d5263cf1ce921b43eef52053f898184d843f17de37d9114442ce0e30390",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a1-43001/diag-1h-a1-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -236,14 +236,14 @@
       "arm_id": "A2",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a2_separated.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-43001/config.resolved.yaml",
-      "config_sha256": "616533c9849d27fee97846b2d853476d5e28c94a878fa5abd8a24460c811d362",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-43001/diag-1h-a2-43001.resolved.yaml",
+      "config_sha256": "cbbb7f4ef615c87165dbece695c8def05d439062b12cd95728ae585e4757927f",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a2-43001/diag-1h-a2-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -255,14 +255,14 @@
       "arm_id": "A3",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a3_feasibility.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-43001/config.resolved.yaml",
-      "config_sha256": "e2aaf28e2f2995f93e3b160ca80558b03dac9b373206f130039019336b248d35",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-43001/diag-1h-a3-43001.resolved.yaml",
+      "config_sha256": "8ca9f55a2156d659cd9d8156f666ef99c60fcd5ebbda0cbdd42d649f5e71d379",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a3-43001/diag-1h-a3-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -274,14 +274,14 @@
       "arm_id": "A4",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a4_diversity.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-43001/config.resolved.yaml",
-      "config_sha256": "f1999f901afc45ab931c000ade7cc95868700e835a762bd09490622932be8c19",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-43001/diag-1h-a4-43001.resolved.yaml",
+      "config_sha256": "08c6acb178e2bd04b7633a5ac28a08dc7cabd9d9efc6379cb5aae03dcddad970",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-43001/diag-1h-a4-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -293,14 +293,14 @@
       "arm_id": "A0",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a0_historical.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-41001/config.resolved.yaml",
-      "config_sha256": "8a164bc61720aa6234218f3b1499509c233e12cfa8b176aef3332ee1f3cdda21",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-41001/diag-15m-a0-41001.resolved.yaml",
+      "config_sha256": "123481dade3fad0da03d87b6d9ad5ed616968e2fe24ec9f47e1e8d6d149cb23c",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-41001/diag-15m-a0-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -312,14 +312,14 @@
       "arm_id": "A1",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a1_balanced.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-41001/config.resolved.yaml",
-      "config_sha256": "e0b3072653a1e3382a9fe6c02c442999980fddb580bd68ae26ef78a2d11b36ed",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-41001/diag-15m-a1-41001.resolved.yaml",
+      "config_sha256": "a474a1e88666f8f72b8317568197f425392d40d6aff439d1477eeac8f217e6e1",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-41001/diag-15m-a1-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -331,14 +331,14 @@
       "arm_id": "A2",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a2_separated.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-41001/config.resolved.yaml",
-      "config_sha256": "9f0ef9e6499e30f3a999f433f999606a35139407cab3d100b8afbb18135481f5",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-41001/diag-15m-a2-41001.resolved.yaml",
+      "config_sha256": "bd1426dcbbd41227eff303591ad0aa66c5f52bb51c4ea98bde0425c14551f338",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-41001/diag-15m-a2-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -350,14 +350,14 @@
       "arm_id": "A3",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a3_feasibility.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-41001/config.resolved.yaml",
-      "config_sha256": "57f32e723590cbc2f1050c0f4e4e730fd1ec4521ac97df6c25554940121340eb",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-41001/diag-15m-a3-41001.resolved.yaml",
+      "config_sha256": "7ede89084473046e0715489ae3e8aa930146956770bee48aa6c9fe9d814059e2",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-41001/diag-15m-a3-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -369,14 +369,14 @@
       "arm_id": "A4",
       "paired_seed": 41001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a4_diversity.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-41001/config.resolved.yaml",
-      "config_sha256": "48cafcaf93067767a12a3dcfc469227833c73a5dc1b40f7482d969817a5bdf98",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-41001/diag-15m-a4-41001.resolved.yaml",
+      "config_sha256": "a937d744d7e572aafb3377c87b804290ca31898b0fc7492e0f1370111c543c80",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-41001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-41001/diag-15m-a4-41001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -388,14 +388,14 @@
       "arm_id": "A0",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a0_historical.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-42001/config.resolved.yaml",
-      "config_sha256": "d76cf44582dea127b9dc88163d94f0f466babf2f7934bc8d17a0feee1debc4b0",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-42001/diag-15m-a0-42001.resolved.yaml",
+      "config_sha256": "7a3362cf4b21292207da03715f38d371370e906f059f7b9754671f0acd536f2b",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-42001/diag-15m-a0-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -407,14 +407,14 @@
       "arm_id": "A1",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a1_balanced.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-42001/config.resolved.yaml",
-      "config_sha256": "314961b2bcaedeb69455842025d80fb5a3502a5e91eac27d199781dbb8adb2c3",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-42001/diag-15m-a1-42001.resolved.yaml",
+      "config_sha256": "f5e031647e7ed2843c6e6847730b099d4200706d12da769758c168a9c76b2d94",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-42001/diag-15m-a1-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -426,14 +426,14 @@
       "arm_id": "A2",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a2_separated.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-42001/config.resolved.yaml",
-      "config_sha256": "68a37868fefa7d5d24e64ececfe96af5e846c974909eed8fe465d96f2e48ccc1",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-42001/diag-15m-a2-42001.resolved.yaml",
+      "config_sha256": "a73fb81f0b30a5aa39afaf31ffbabb8bce43ad4e331c6734f6ac0f79d85e86e4",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-42001/diag-15m-a2-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -445,14 +445,14 @@
       "arm_id": "A3",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a3_feasibility.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-42001/config.resolved.yaml",
-      "config_sha256": "0f8e593fa3b676dbf313109016a439a3842f2ed3c313699cbc6696d8c5e13215",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-42001/diag-15m-a3-42001.resolved.yaml",
+      "config_sha256": "bd4bbf9fc3ac451eb8227ac91aa308f51601061262d9a4bf281f6137ed0b06fb",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-42001/diag-15m-a3-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -464,14 +464,14 @@
       "arm_id": "A4",
       "paired_seed": 42001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a4_diversity.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-42001/config.resolved.yaml",
-      "config_sha256": "8cde2c03113d5622693a853f0da0e01a84651f5743138023ff546c114e47789c",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-42001/diag-15m-a4-42001.resolved.yaml",
+      "config_sha256": "e428b5f6ce2a7ca308fa3b5fb7cee00c957698949478e33f2a14fe1b81246e15",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-42001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-42001/diag-15m-a4-42001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -483,14 +483,14 @@
       "arm_id": "A0",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a0_historical.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-43001/config.resolved.yaml",
-      "config_sha256": "27ddad306884c0c3187c64f7c6c0f2db2c96f9440cec4839528ae143ce43d8cc",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-43001/diag-15m-a0-43001.resolved.yaml",
+      "config_sha256": "bc35da2bd20d05331b8eb61e0b20d44dc3d66b7a8df37ea28cdd8d3dcef64730",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-43001/diag-15m-a0-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -502,14 +502,14 @@
       "arm_id": "A1",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a1_balanced.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-43001/config.resolved.yaml",
-      "config_sha256": "6c37619aca6995ea4cc62bfcce9c70794a72c734d28f4228f7e35f474b0eddff",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-43001/diag-15m-a1-43001.resolved.yaml",
+      "config_sha256": "f9ef83a66c55663d81b67b7594354c2c0db5f73378165a52adeb942e4ee74bfb",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a1-43001/diag-15m-a1-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -521,14 +521,14 @@
       "arm_id": "A2",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a2_separated.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-43001/config.resolved.yaml",
-      "config_sha256": "13b11f7fa66346d196800a08ecf7d6dc430b4ad6625c1f10c2fa130fec744d64",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-43001/diag-15m-a2-43001.resolved.yaml",
+      "config_sha256": "23caafb05df58a200c66eb8d7b495f7294ec92b7dd4bc15263ab5587e73514fa",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a2-43001/diag-15m-a2-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -540,14 +540,14 @@
       "arm_id": "A3",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a3_feasibility.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-43001/config.resolved.yaml",
-      "config_sha256": "46663003fccde828e1d5db0a9e231836be674b142b5b42ca1ca3b22c7ab91334",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-43001/diag-15m-a3-43001.resolved.yaml",
+      "config_sha256": "42da45b31d078ce8401b5cef4e93d14cbfadb3fdf09c5a7242ec112e54e907f4",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a3-43001/diag-15m-a3-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]
@@ -559,14 +559,14 @@
       "arm_id": "A4",
       "paired_seed": 43001,
       "preset_path": "genetic_algorithm/config/presets/quality_v3_a4_diversity.yaml",
-      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-43001/config.resolved.yaml",
-      "config_sha256": "4ea2575c527b1ba12923f0d424330a1645ca35ae29105295702244281400de5d",
+      "config_path": "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-43001/diag-15m-a4-43001.resolved.yaml",
+      "config_sha256": "41d4b0eb57c2658ef83f685599d3816927676efbf9bf1ba72d5b9d14031b5c37",
       "command": [
         ".venv/bin/python",
         "-m",
         "genetic_algorithm.run_ga",
         "--config",
-        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-43001/config.resolved.yaml",
+        "/home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-43001/diag-15m-a4-43001.resolved.yaml",
         "--yes",
         "--no-monitor"
       ]

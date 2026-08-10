@@ -21,9 +21,9 @@ backtesting:
   - PEPE/USDT
   slippage_pct: 0.0005
   stake_amount: 0.15
-  timeframe: 15m
+  timeframe: 1h
   timeout: 120
-  timerange: 20230506-20260327
+  timerange: 20230509-20260327
 config_schema_version: 2
 cpcv:
   enabled: false
@@ -220,7 +220,7 @@ genetic_algorithm:
   sharing_radius: 0.25
   tournament_size: 3
 hall_of_fame:
-  directory: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-41001/hall_of_fame
+  directory: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-41001/hall_of_fame
 holdout_monitoring:
   early_stop: true
   early_stop_checks: 3
@@ -274,7 +274,7 @@ nsga2:
     type: minimize
   pareto_front_size: 20
 output:
-  dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-41001/output
+  dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-41001/output
   stats_file: evolution_stats.json
   top_n: 10
 pair_validation:
@@ -321,45 +321,45 @@ promotion_v2:
   - cost_multiplier: 1.0
     pair: BTC/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-btc
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: SOL/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-sol
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: XRP/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-xrp
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: BNB/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-bnb
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: ETH/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-eth
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: PEPE/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-pepe
-    timeframe: 15m
+    timeframe: 1h
 qualification_v3:
   development_evidence:
     min_active_months: 12
@@ -398,50 +398,50 @@ qualification_v3:
     pair: BTC/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-btc
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: SOL/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-sol
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: XRP/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-xrp
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: BNB/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-bnb
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: ETH/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-eth
-    timeframe: 15m
+    timeframe: 1h
   - cost_multiplier: 1.0
     pair: PEPE/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-pepe
-    timeframe: 15m
+    timeframe: 1h
   schema_version: '3.0'
   soft_targets:
     median_hold_hours_target: 24.0
@@ -461,9 +461,9 @@ short_selling:
 sis:
   enabled: false
 storage:
-  checkpoint_dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-41001/checkpoints
+  checkpoint_dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-41001/checkpoints
   min_disk_gb: 5.0
-  runs_dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a4-41001/runs
+  runs_dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-41001/runs
 strategy_constraints:
   allow_indicators: null
   max_entry_conditions: 3
@@ -482,7 +482,7 @@ strategy_constraints:
   - -0.12
   - -0.03
   timeframes:
-  - 15m
+  - 1h
 surrogate:
   enabled: false
   filter_percentile: 60
@@ -491,7 +491,7 @@ terminal_monitor:
   default_mode: simple
   enabled: true
 walk_forward:
-  aggregation: median
+  aggregation: trimmed_mean
   embargo_days: 7
   enabled: true
   gap_penalty:

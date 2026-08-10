@@ -165,7 +165,7 @@ def materialize_matrix(specs: Iterable[QualityRunSpecV3], output_root: Path) -> 
         config.setdefault("hall_of_fame", {})["directory"] = str(
             run_root / "hall_of_fame"
         )
-        config_path = run_root / "config.resolved.yaml"
+        config_path = run_root / f"{spec.run_id}.resolved.yaml"
         config_path.write_text(yaml.safe_dump(config, sort_keys=True), encoding="utf-8")
         payload = json.dumps(config, sort_keys=True, separators=(",", ":"), default=str)
         manifest.append(

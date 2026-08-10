@@ -7,6 +7,7 @@ from genetic_algorithm.orchestration.quality_experiment_matrix_v3 import (
     choose_winner,
     diagnostic_specs,
     full_specs,
+    materialize_matrix,
     resolved_run_config,
 )
 
@@ -39,6 +40,22 @@ def test_timeframe_materialization_updates_every_scenario():
         for section in ("promotion_v2", "qualification_v3")
         for item in config[section]["required_scenarios"]
     )
+    assert config["backtesting"]["timerange"] == "20230509-20260327"
+    assert all(
+        str(item["period_start"]) == "2023-05-09"
+        for section in ("promotion_v2", "qualification_v3")
+        for item in config[section]["required_scenarios"]
+    )
+
+
+def test_materialized_config_filename_preserves_unique_run_id(tmp_path):
+    spec = diagnostic_specs()[0]
+
+    manifest_path = materialize_matrix([spec], tmp_path / "matrix")
+
+    config_path = manifest_path.parent / spec.run_id / f"{spec.run_id}.resolved.yaml"
+    assert config_path.is_file()
+    assert spec.run_id in config_path.name
 
 
 def test_winner_prefers_qualification_yield_before_raw_score():

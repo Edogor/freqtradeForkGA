@@ -23,7 +23,7 @@ backtesting:
   stake_amount: 0.15
   timeframe: 15m
   timeout: 120
-  timerange: 20230506-20260327
+  timerange: 20230509-20260327
 config_schema_version: 2
 cpcv:
   enabled: false
@@ -302,42 +302,42 @@ promotion_v2:
   - cost_multiplier: 1.0
     pair: BTC/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-btc
     timeframe: 15m
   - cost_multiplier: 1.0
     pair: SOL/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-sol
     timeframe: 15m
   - cost_multiplier: 1.0
     pair: XRP/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-xrp
     timeframe: 15m
   - cost_multiplier: 1.0
     pair: BNB/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-bnb
     timeframe: 15m
   - cost_multiplier: 1.0
     pair: ETH/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-eth
     timeframe: 15m
   - cost_multiplier: 1.0
     pair: PEPE/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-pepe
     timeframe: 15m
@@ -379,7 +379,7 @@ qualification_v3:
     pair: BTC/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-btc
     timeframe: 15m
@@ -387,7 +387,7 @@ qualification_v3:
     pair: SOL/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-sol
     timeframe: 15m
@@ -395,7 +395,7 @@ qualification_v3:
     pair: XRP/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-xrp
     timeframe: 15m
@@ -403,7 +403,7 @@ qualification_v3:
     pair: BNB/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-bnb
     timeframe: 15m
@@ -411,7 +411,7 @@ qualification_v3:
     pair: ETH/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-eth
     timeframe: 15m
@@ -419,7 +419,7 @@ qualification_v3:
     pair: PEPE/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-pepe
     timeframe: 15m

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import yaml
 
 from genetic_algorithm.config.invariants import validate_runtime_invariants
+from genetic_algorithm.utils.timerange import validate_walk_forward_config
 
 
 logger = logging.getLogger(__name__)
@@ -832,6 +833,13 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             + ", ".join(preview)
             + suffix
         )
+
+    # Keep configuration acceptance aligned with the runtime implementation.
+    # This prevents expensive queued runs from failing only after startup.
+    try:
+        validate_walk_forward_config(_nested_config(config, ("walk_forward",)))
+    except ValueError as exc:
+        errors.append(f"invalid walk_forward configuration: {exc}")
 
     for path, replacement in _DEPRECATED_CONFIG_PATHS.items():
         value: Any = config

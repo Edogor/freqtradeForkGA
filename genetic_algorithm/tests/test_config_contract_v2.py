@@ -117,6 +117,28 @@ def test_schema_v2_uses_strict_types(tmp_path, override, expected):
     assert any(expected in error for error in resolve_config(path).errors)
 
 
+def test_walk_forward_runtime_contract_is_enforced_during_config_resolution(tmp_path):
+    path = _write(
+        tmp_path,
+        {
+            "preset": "safe_v2",
+            "walk_forward": {
+                "enabled": True,
+                "train_days": 180,
+                "validation_days": 60,
+                "step_days": 60,
+                "aggregation": "median",
+            },
+        },
+    )
+
+    resolution = resolve_config(path)
+
+    assert any("Walk-forward aggregation" in error for error in resolution.errors)
+    with pytest.raises(ValueError, match="Walk-forward aggregation"):
+        load_config(path)
+
+
 def test_programmatic_overrides_use_the_same_unknown_key_contract(tmp_path):
     path = _write(tmp_path, {"preset": "safe_v2"})
 

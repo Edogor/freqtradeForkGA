@@ -1,7 +1,7 @@
 # A2: defer unseen-pair replay to local finalists and add rolling time windows.
 preset: quality_v3_a1_balanced
 pair_validation: {validate_top_n_only: 3}
-walk_forward: {enabled: true, train_days: 180, validation_days: 60, step_days: 60, mode: rolling, aggregation: median, embargo_days: 7, min_train_trades: 12, max_windows: 8}
+walk_forward: {enabled: true, train_days: 180, validation_days: 60, step_days: 60, mode: rolling, aggregation: trimmed_mean, embargo_days: 7, min_train_trades: 12, max_windows: 8}
 generic_island_model:
   walk_forward: {enabled: true}
 promotion_v2: {policy_version: quality-v3-a2-search}

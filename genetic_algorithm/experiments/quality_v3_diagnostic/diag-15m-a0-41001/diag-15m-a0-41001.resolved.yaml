@@ -4,7 +4,7 @@ advanced:
 automation_controller:
   max_waves: 1
   root_seeds:
-  - 42001
+  - 41001
 backtesting:
   auto_download_data: false
   enable_cache: true
@@ -21,9 +21,9 @@ backtesting:
   - PEPE/USDT
   slippage_pct: 0.0005
   stake_amount: 0.15
-  timeframe: 1h
+  timeframe: 15m
   timeout: 120
-  timerange: 20230506-20260327
+  timerange: 20230509-20260327
 config_schema_version: 2
 cpcv:
   enabled: false
@@ -39,12 +39,12 @@ evaluation_v2:
   mark_to_market: true
   trade_bootstrap_block: 5
 fitness_bounds:
-  drawdown_normalization_target: 0.25
-  profit_factor_break_even_normalization: true
+  drawdown_normalization_target: 0.0
+  profit_factor_break_even_normalization: false
   profit_factor_max: 10.0
   profit_factor_normalization: 3.0
-  profit_max: 20.0
-  profit_min: -5.0
+  profit_max: 10.0
+  profit_min: -10.0
   sharpe_max: 10.0
   sharpe_min: -5.0
   sortino_max: 12.0
@@ -55,43 +55,24 @@ fitness_penalties:
   min_trades: 12
   min_win_rate: 0.35
   pair_loss_threshold: -8.0
-  pair_trade_coverage_exponent: 0.5
+  pair_trade_coverage_exponent: 1.0
   pair_trade_penalty_floor: 0.01
-  target_trades_per_active_month: 2.5
+  target_trades_per_active_month: 1.0e-06
   target_trades_per_pair: 0
   unused_indicator_weight: 0.02
-fitness_policy_v3:
-  enabled: true
-  holding_soft_weight: 0.1
-  max_drawdown: 0.2
-  max_drawdown_duration_days: 120.0
-  max_worst_pair_loss: -5.0
-  median_hold_hours_target: 24.0
-  min_net_profit: 0.0
-  min_profit_factor: 1.0
-  min_profitable_pair_ratio: 0.6666666666666666
-  min_trades: 12
-  p90_hold_hours_target: 72.0
-  policy_version: fitness-v3.0-feasibility-first
 fitness_weights:
   consecutive_losses: 0.0
-  cross_pair: 0.02
-  drawdown: 0.17
-  drawdown_duration: 0.11
-  monthly_stability: 0.005
-  profit: 0.34
-  profit_factor: 0.2
-  sharpe_ratio: 0.07
-  sortino_ratio: 0.02
-  trade_frequency: 0.06
-  win_rate: 0.005
+  cross_pair: 0.04
+  drawdown: 0.15
+  drawdown_duration: 0.0
+  monthly_stability: 0.04
+  profit: 0.28
+  profit_factor: 0.08
+  sharpe_ratio: 0.18
+  sortino_ratio: 0.13
+  trade_frequency: 0.05
+  win_rate: 0.05
 generic_island_model:
-  common_panel_replay:
-    early_stop_patience: 4
-    enabled: true
-    interval: 3
-    min_improvement: 0.002
-    top_n_per_island: 3
   enabled: true
   external_migration:
     directory: ''
@@ -116,7 +97,7 @@ generic_island_model:
     - BNB/USDT
     - PEPE/USDT
     population_size: 10
-    seed: 42001
+    seed: 41001
   - generations: 12
     indicator_pool:
     - EMA
@@ -135,7 +116,7 @@ generic_island_model:
     - BNB/USDT
     - PEPE/USDT
     population_size: 10
-    seed: 42002
+    seed: 41002
   - generations: 12
     indicator_pool:
     - BBANDS
@@ -154,7 +135,7 @@ generic_island_model:
     - BNB/USDT
     - PEPE/USDT
     population_size: 10
-    seed: 42003
+    seed: 41003
   - generations: 12
     indicator_pool:
     - RSI
@@ -174,7 +155,7 @@ generic_island_model:
     - BNB/USDT
     - PEPE/USDT
     population_size: 10
-    seed: 42004
+    seed: 41004
   migration:
     count: 1
     interval: 3
@@ -192,13 +173,13 @@ generic_island_model:
     pair_subset_size: 2
     rotate_seeds: true
   walk_forward:
-    enabled: true
+    enabled: false
 genetic_algorithm:
   adaptation_step: 0.15
   adaptive_mutation: true
   adaptive_tournament: false
   allow_self_crossover: false
-  behavioral_distance_weight: 0.35
+  behavioral_distance_weight: 0.0
   convergence_patience: 8
   crossover_method: uniform
   crossover_rate: 0.75
@@ -213,14 +194,14 @@ genetic_algorithm:
   mutation_cooldown_factor: 0.5
   mutation_rate: 0.2
   population_size: 10
-  random_immigrants: 2
-  random_seed: 42001
+  random_immigrants: 1
+  random_seed: 41001
   search_seed_salt: 0
   selection_method: tournament
   sharing_radius: 0.25
   tournament_size: 3
 hall_of_fame:
-  directory: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-42001/hall_of_fame
+  directory: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-41001/hall_of_fame
 holdout_monitoring:
   early_stop: true
   early_stop_checks: 3
@@ -274,21 +255,21 @@ nsga2:
     type: minimize
   pareto_front_size: 20
 output:
-  dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-42001/output
+  dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-41001/output
   stats_file: evolution_stats.json
   top_n: 10
 pair_validation:
   enabled: true
   evaluation_mode: independent_pairs
-  max_pair_loss_pct: 5.0
-  min_profitable_pair_ratio: 0.6666666666666666
+  max_pair_loss_pct: 0.0
+  min_profitable_pair_ratio: 0.0
   min_val_fitness: 0.0
   profitable_pair_penalty_floor: 0.1
   training_pairs:
   - BTC/USDT
   - SOL/USDT
   - XRP/USDT
-  validate_top_n_only: 3
+  validate_top_n_only: 0
   validation_pairs:
   - BNB/USDT
   - ETH/USDT
@@ -297,7 +278,7 @@ pair_validation:
   weight_val: 0.5
   worst_pair_loss_penalty_floor: 0.1
   worst_pair_weight: 0.5
-  worst_split_weight: 0.25
+  worst_split_weight: 0.0
 parallel_evaluation:
   backtest_timeout: 120
   enabled: true
@@ -315,51 +296,51 @@ promotion_v2:
   min_profitable_scenario_ratio: 0.6666666666666666
   min_trades_per_active_month: 5.0
   min_worst_scenario_return: -0.05
-  policy_version: quality-v3-a4-search
+  policy_version: quality-v3-a0-search
   require_final_test: false
   required_scenarios:
   - cost_multiplier: 1.0
     pair: BTC/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-btc
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: SOL/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-sol
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: XRP/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-xrp
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: BNB/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-bnb
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: ETH/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-eth
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: PEPE/USDT
     period_end: '2026-03-26'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-pepe
-    timeframe: 1h
+    timeframe: 15m
 qualification_v3:
   development_evidence:
     min_active_months: 12
@@ -391,57 +372,57 @@ qualification_v3:
     - BNB/USDT
     - ETH/USDT
     - PEPE/USDT
-  policy_version: quality-v3-a4-search
+  policy_version: quality-v3-a0-search
   require_final_test: false
   required_scenarios:
   - cost_multiplier: 1.0
     pair: BTC/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-btc
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: SOL/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-sol
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: XRP/USDT
     pair_group: development
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: TRAIN
     scenario_id: dev-xrp
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: BNB/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-bnb
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: ETH/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-eth
-    timeframe: 1h
+    timeframe: 15m
   - cost_multiplier: 1.0
     pair: PEPE/USDT
     pair_group: validation
     period_end_exclusive: '2026-03-27'
-    period_start: '2023-05-06'
+    period_start: '2023-05-09'
     role: PAIR_VALIDATION
     scenario_id: val-pepe
-    timeframe: 1h
+    timeframe: 15m
   schema_version: '3.0'
   soft_targets:
     median_hold_hours_target: 24.0
@@ -461,9 +442,9 @@ short_selling:
 sis:
   enabled: false
 storage:
-  checkpoint_dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-42001/checkpoints
+  checkpoint_dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-41001/checkpoints
   min_disk_gb: 5.0
-  runs_dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-1h-a4-42001/runs
+  runs_dir: /home/periklis/projects/trading/freqtradeForkGA/genetic_algorithm/experiments/quality_v3_diagnostic/diag-15m-a0-41001/runs
 strategy_constraints:
   allow_indicators: null
   max_entry_conditions: 3
@@ -482,7 +463,7 @@ strategy_constraints:
   - -0.12
   - -0.03
   timeframes:
-  - 1h
+  - 15m
 surrogate:
   enabled: false
   filter_percentile: 60
@@ -491,19 +472,19 @@ terminal_monitor:
   default_mode: simple
   enabled: true
 walk_forward:
-  aggregation: median
-  embargo_days: 7
-  enabled: true
+  aggregation: mean
+  embargo_days: 5
+  enabled: false
   gap_penalty:
     enabled: true
     max_penalty: 0.5
     threshold: 0.1
-  max_windows: 8
-  min_train_trades: 12
+  max_windows: 10
+  min_train_trades: 10
   mode: rolling
-  step_days: 60
-  train_days: 180
-  validation_days: 60
+  step_days: 30
+  train_days: 120
+  validation_days: 30
 web_dashboard:
   enabled: false
   host: 0.0.0.0

@@ -9,7 +9,7 @@ safety_profile:
 
 backtesting:
   pairs: [BTC/USDT, SOL/USDT, XRP/USDT, ETH/USDT, BNB/USDT, PEPE/USDT]
-  timerange: "20230506-20260327"
+  timerange: "20230509-20260327"
 
 generic_island_model:
   islands:
@@ -26,12 +26,12 @@ pair_validation:
 promotion_v2:
   policy_version: quality-v3-a1-search
   required_scenarios:
-    - {scenario_id: dev-btc, pair: BTC/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-06", period_end: "2026-03-26", cost_multiplier: 1.0}
-    - {scenario_id: dev-sol, pair: SOL/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-06", period_end: "2026-03-26", cost_multiplier: 1.0}
-    - {scenario_id: dev-xrp, pair: XRP/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-06", period_end: "2026-03-26", cost_multiplier: 1.0}
-    - {scenario_id: val-bnb, pair: BNB/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-06", period_end: "2026-03-26", cost_multiplier: 1.0}
-    - {scenario_id: val-eth, pair: ETH/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-06", period_end: "2026-03-26", cost_multiplier: 1.0}
-    - {scenario_id: val-pepe, pair: PEPE/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-06", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-btc, pair: BTC/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-sol, pair: SOL/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-xrp, pair: XRP/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-bnb, pair: BNB/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-eth, pair: ETH/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-pepe, pair: PEPE/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
   min_profitable_scenario_ratio: 0.6666666666666666
 
 qualification_v3:
@@ -39,12 +39,12 @@ qualification_v3:
   schema_version: "3.0"
   policy_version: quality-v3-a1-search
   required_scenarios:
-    - {scenario_id: dev-btc, pair: BTC/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-06", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
-    - {scenario_id: dev-sol, pair: SOL/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-06", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
-    - {scenario_id: dev-xrp, pair: XRP/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-06", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
-    - {scenario_id: val-bnb, pair: BNB/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-06", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
-    - {scenario_id: val-eth, pair: ETH/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-06", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
-    - {scenario_id: val-pepe, pair: PEPE/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-06", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: dev-btc, pair: BTC/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: dev-sol, pair: SOL/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: dev-xrp, pair: XRP/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: val-bnb, pair: BNB/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: val-eth, pair: ETH/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: val-pepe, pair: PEPE/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
   pair_groups:
     - {group_id: development, pairs: [BTC/USDT, SOL/USDT, XRP/USDT], min_profitable_pairs: 2, min_group_expectancy_lcb: 0.0, min_group_annual_return_lcb: 0.0, min_worst_pair_scenario_return: -0.05}
     - {group_id: validation, pairs: [BNB/USDT, ETH/USDT, PEPE/USDT], min_profitable_pairs: 2, min_group_expectancy_lcb: 0.0, min_group_annual_return_lcb: 0.0, min_worst_pair_scenario_return: -0.05}
