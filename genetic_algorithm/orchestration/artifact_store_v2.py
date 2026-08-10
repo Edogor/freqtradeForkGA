@@ -308,6 +308,38 @@ class V2ArtifactStore:
             _canonical_model_bytes(candidate),
         )
 
+    def write_qualification_v3(self, qualification: BaseModel) -> Path:
+        """Persist additive V3 qualification without mutating V2 result semantics."""
+
+        from genetic_algorithm.orchestration.promotion_policy_v3 import (
+            CandidateEvaluationV3,
+        )
+
+        candidate = CandidateEvaluationV3.model_validate(
+            qualification.model_dump(mode="python")
+        )
+        candidate_id = _safe_id(candidate.candidate_id, "candidate_id")
+        manifest = self._read_manifest()
+        for record in candidate.scenarios:
+            self._validate_record_provenance(record, manifest)
+            scenario = _safe_id(record.metrics.scenario_id, "scenario_id")
+            scenario_path = self._path(
+                Path("candidates") / candidate_id / "scenarios" / f"{scenario}.json"
+            )
+            if not scenario_path.exists():
+                raise ArtifactIntegrityError(
+                    f"V3 qualification references missing scenario artifact: {scenario}"
+                )
+            persisted = BacktestRecordV2.model_validate_json(scenario_path.read_bytes())
+            if not _models_have_same_canonical_payload(persisted, record):
+                raise ArtifactIntegrityError(
+                    f"V3 qualification scenario differs from artifact: {scenario}"
+                )
+        return self._write_immutable(
+            Path("candidates") / candidate_id / "qualification_v3.json",
+            _canonical_model_bytes(candidate),
+        )
+
     def write_policy(self, policy: ShadowGatePolicyV2) -> Path:
         return self._write_immutable(self.POLICY_NAME, _canonical_model_bytes(policy))
 
@@ -502,6 +534,28 @@ class V2ArtifactStore:
                     raise ArtifactIntegrityError(
                         f"candidate scenario differs from artifact: {scenario}"
                     )
+
+        for disposition in finalized.candidate_artifact_dispositions:
+            candidate_id = _safe_id(disposition.candidate_id, "candidate_id")
+            candidate_path = self._path(
+                Path("candidates") / candidate_id / "candidate.json"
+            )
+            if not candidate_path.exists():
+                raise ArtifactIntegrityError(
+                    "candidate disposition references missing artifact: "
+                    f"{candidate_id}"
+                )
+            persisted_candidate = CandidateEvaluationV2.model_validate_json(
+                candidate_path.read_bytes()
+            )
+            if (
+                persisted_candidate.phenotype_hash != disposition.phenotype_hash
+                or persisted_candidate.status != disposition.evaluation_status
+            ):
+                raise ArtifactIntegrityError(
+                    "candidate disposition differs from persisted artifact: "
+                    f"{candidate_id}"
+                )
 
         result_bytes = _canonical_model_bytes(finalized)
         result_path = self._write_immutable(self.RESULT_NAME, result_bytes)

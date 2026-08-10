@@ -16,6 +16,10 @@ from genetic_algorithm.core.strategy_gene import StrategyGene
 from genetic_algorithm.evaluation.activity_metrics import count_active_trade_months
 from genetic_algorithm.evaluation.direct_backtester import DirectBacktester, BacktestResult
 from genetic_algorithm.evaluation.profit_factor_v2 import profit_factor_for_scoring
+from genetic_algorithm.evaluation.fitness_policy_v3 import (
+    apply_feasibility_first_v3,
+    fitness_policy_v3_from_config,
+)
 from genetic_algorithm.strategies.generator import StrategyGenerator
 from genetic_algorithm.utils.timerange import (
     create_walk_forward_windows,
@@ -89,6 +93,7 @@ class FitnessEvaluator:
             config.get('fitness_weights', {})
         )
         self.fitness_penalties = config.get('fitness_penalties', {})
+        self.feasibility_policy_v3 = fitness_policy_v3_from_config(config)
         self.backtest_config = config.get('backtesting', {})
         self.walk_forward_config = config.get('walk_forward', {})
         self.monte_carlo_config = config.get('monte_carlo', {})
@@ -108,6 +113,9 @@ class FitnessEvaluator:
         self.sortino_max = fitness_bounds.get('sortino_max', 12)
         self.profit_factor_max = fitness_bounds.get('profit_factor_max', 10)
         self.profit_factor_norm = fitness_bounds.get('profit_factor_normalization', 3.0)
+        self.profit_factor_break_even_normalization = bool(
+            fitness_bounds.get('profit_factor_break_even_normalization', False)
+        )
         self.drawdown_normalization_target = fitness_bounds.get(
             'drawdown_normalization_target'
         )
@@ -1913,7 +1921,7 @@ class FitnessEvaluator:
         norm_sharpe = (sharpe - self.sharpe_min) / sharpe_range if sharpe_range > 0 else 0
         sortino_range = self.sortino_max - self.sortino_min
         norm_sortino = (sortino - self.sortino_min) / sortino_range if sortino_range > 0 else 0
-        norm_profit_factor = min(1.0, profit_factor / self.profit_factor_norm)  # configurable via fitness_bounds.profit_factor_normalization
+        norm_profit_factor = self._normalize_profit_factor(profit_factor)
         norm_drawdown = self._normalize_drawdown(drawdown)
         norm_win_rate = win_rate  # Already 0-1
         strict_trade_rate = metrics.get("worst_pair_trades_per_active_month")
@@ -2137,6 +2145,16 @@ class FitnessEvaluator:
             apply_pair_coverage=apply_pair_coverage,
         )
         
+        # Optional V3 ordering makes evidence and robust positive edge
+        # non-compensable while retaining a smooth gradient inside each band.
+        if self.feasibility_policy_v3 is not None:
+            penalized_fitness = apply_feasibility_first_v3(
+                penalized_fitness,
+                metrics,
+                self.feasibility_policy_v3,
+                resolved_profit_factor=profit_factor,
+            )
+
         # Ensure non-negative
         return max(0, penalized_fitness)
     
@@ -2208,6 +2226,20 @@ class FitnessEvaluator:
         target = self.drawdown_duration_target_days
         return target / (target + duration)
 
+    def _normalize_profit_factor(self, profit_factor: float) -> float:
+        """Normalize PF with an opt-in break-even origin for edge search.
+
+        Legacy profiles retain the historical PF/normalization-cap mapping.
+        The automation profile maps PF <= 1 to zero so a merely break-even
+        strategy cannot receive the same free score as a measured edge.
+        """
+
+        value = max(0.0, float(profit_factor))
+        if not self.profit_factor_break_even_normalization:
+            return min(1.0, value / self.profit_factor_norm)
+        denominator = max(float(self.profit_factor_norm) - 1.0, 1e-12)
+        return max(0.0, min(1.0, (value - 1.0) / denominator))
+
     def _normalize_drawdown(self, drawdown: float) -> float:
         """Normalize drawdown with an optional, smooth policy-relative scale.
 
@@ -2271,6 +2303,15 @@ class FitnessEvaluator:
                 else:
                     active_ratio = 0.0
                 coverage_ratio = min(coverage_ratio, active_ratio)
+            exponent = penalties.get('pair_trade_coverage_exponent', 1.0)
+            if (
+                not isinstance(exponent, (int, float))
+                or isinstance(exponent, bool)
+                or not math.isfinite(float(exponent))
+                or float(exponent) <= 0.0
+            ):
+                exponent = 1.0
+            coverage_ratio = coverage_ratio ** float(exponent)
             return coverage_floor + (1.0 - coverage_floor) * coverage_ratio
         per_pair_target = penalties.get('target_trades_per_pair', 0)
         per_pair_trades = metrics.get('per_pair_trades')

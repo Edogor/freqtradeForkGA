@@ -103,6 +103,8 @@ def evolution_context_factory(tmp_path: Path):
         generations: int = 1,
         generic_island: bool = False,
         search_seed_salt: int = 0,
+        replay_input_seeds: bool = False,
+        top_n: int = 1,
     ) -> _Context:
         nonlocal sequence
         sequence += 1
@@ -162,7 +164,7 @@ def evolution_context_factory(tmp_path: Path):
             }
         )
         config["parallel_evaluation"].update({"enabled": False, "num_workers": 1})
-        config["output"]["top_n"] = 1
+        config["output"]["top_n"] = top_n
         if generic_island:
             config["safety_profile"].update(
                 {
@@ -254,7 +256,8 @@ def evolution_context_factory(tmp_path: Path):
             repo_root=repo_root,
             final_test_ledger_path=ledger,
             created_at=created_at + timedelta(seconds=1),
-            top_n=1,
+            top_n=top_n,
+            replay_input_seeds=replay_input_seeds,
         )
         return _Context(prepared, config, repo_root, ledger)
 
@@ -687,6 +690,37 @@ def test_strict_parent_seed_is_reproduced_and_delivered_to_engine(
     assert result.status == AttemptStatus.SUCCEEDED
     assert len(observed) == 1
     assert observed[0].strategy_gene.to_dict() == source_seed.strategy_gene
+
+
+def test_replication_replays_immutable_parent_alongside_evolved_finalist(
+    evolution_context_factory,
+):
+    seed_config = evolution_context_factory().config
+    source_seed = freeze_evolution_seed(
+        _evaluated_individual(seed_config),
+        resolved_config=seed_config,
+        candidate_id="parent-replication-seed",
+    )
+    context = evolution_context_factory(
+        seeds=[source_seed],
+        replay_input_seeds=True,
+        top_n=2,
+    )
+
+    result = run_evolution_worker(
+        context.prepared.spec_path,
+        expected_spec_sha256=context.prepared.spec_file_sha256,
+        evolution_runner=lambda config_path, seeds: [
+            _evaluated_individual(context.config)
+        ],
+        backtester_factory=_failing_backtester_factory,
+    )
+
+    assert result.status == AttemptStatus.SUCCEEDED
+    by_id = {item.candidate_id: item for item in result.candidate_evaluations}
+    parent_id = next(candidate_id for candidate_id in by_id if candidate_id.endswith("rank-000"))
+    assert by_id[parent_id].phenotype_hash == source_seed.phenotype_hash
+    assert len(result.candidate_evaluations) == 2
 
 
 def test_tampered_evolution_input_commits_verified_invalid_result(

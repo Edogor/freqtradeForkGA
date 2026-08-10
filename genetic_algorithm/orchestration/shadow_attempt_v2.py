@@ -18,10 +18,16 @@ from genetic_algorithm.orchestration.promotion_policy_v2 import (
     evaluate_candidate_shadow,
     make_shadow_promotion_decision,
 )
+from genetic_algorithm.orchestration.promotion_policy_v3 import (
+    QualificationPolicyV3,
+    evaluate_candidate_v3,
+    qualification_policy_v3_from_config,
+)
 from genetic_algorithm.orchestration.result_contract import (
     AttemptManifestV2,
     AttemptResultV2,
     BacktestRecordV2,
+    CandidateArtifactDispositionV2,
     CandidateEvaluationV2,
     EvaluationStatus,
 )
@@ -78,18 +84,61 @@ def _deduplicate_valid_behaviors(
 ) -> list[CandidateEvaluationV2]:
     """Keep the lexicographically first candidate for each exact VALID behavior."""
 
+    selected, _ = _classify_candidate_artifacts(candidates)
+    return selected
+
+
+def _classify_candidate_artifacts(
+    candidates: list[CandidateEvaluationV2],
+) -> tuple[list[CandidateEvaluationV2], list[CandidateArtifactDispositionV2]]:
+    """Select authoritative results and retain explicit duplicate provenance."""
+
     selected: list[CandidateEvaluationV2] = []
-    valid_signatures: set[str] = set()
+    dispositions: list[CandidateArtifactDispositionV2] = []
+    valid_signatures: dict[str, str] = {}
     for candidate in sorted(candidates, key=lambda item: item.candidate_id):
         if candidate.status != EvaluationStatus.VALID:
             selected.append(candidate)
+            dispositions.append(
+                CandidateArtifactDispositionV2(
+                    candidate_id=candidate.candidate_id,
+                    phenotype_hash=candidate.phenotype_hash,
+                    evaluation_status=candidate.status,
+                    authoritative=True,
+                    reason_code="AUTHORITATIVE_RESULT",
+                    canonical_candidate_id=candidate.candidate_id,
+                )
+            )
             continue
         signature = _exact_behavior_signature(candidate)
-        if signature in valid_signatures:
+        canonical_candidate_id = valid_signatures.get(signature)
+        if canonical_candidate_id is not None:
+            dispositions.append(
+                CandidateArtifactDispositionV2(
+                    candidate_id=candidate.candidate_id,
+                    phenotype_hash=candidate.phenotype_hash,
+                    evaluation_status=candidate.status,
+                    authoritative=False,
+                    reason_code="EXACT_BEHAVIOR_DUPLICATE",
+                    canonical_candidate_id=canonical_candidate_id,
+                    behavior_signature=signature,
+                )
+            )
             continue
-        valid_signatures.add(signature)
+        valid_signatures[signature] = candidate.candidate_id
         selected.append(candidate)
-    return selected
+        dispositions.append(
+            CandidateArtifactDispositionV2(
+                candidate_id=candidate.candidate_id,
+                phenotype_hash=candidate.phenotype_hash,
+                evaluation_status=candidate.status,
+                authoritative=True,
+                reason_code="AUTHORITATIVE_RESULT",
+                canonical_candidate_id=candidate.candidate_id,
+                behavior_signature=signature,
+            )
+        )
+    return selected, dispositions
 
 
 class ShadowAttemptRecorderV2:
@@ -106,6 +155,34 @@ class ShadowAttemptRecorderV2:
     ) -> None:
         self.manifest = manifest
         self.policy = policy
+        self.qualification_policy_v3: QualificationPolicyV3 | None = None
+        qualification_config = resolved_config.get("qualification_v3")
+        if isinstance(qualification_config, Mapping) and qualification_config.get(
+            "enabled", False
+        ):
+            self.qualification_policy_v3 = qualification_policy_v3_from_config(
+                resolved_config
+            )
+            v2_cells = {
+                (
+                    item.scenario_id,
+                    item.pair,
+                    item.timeframe,
+                    item.role,
+                    str(item.period_start),
+                    str(item.period_end),
+                    item.cost_multiplier,
+                )
+                for item in policy.required_scenarios
+            }
+            v3_cells = {
+                item.record_key
+                for item in self.qualification_policy_v3.required_scenarios
+            }
+            if v2_cells != v3_cells:
+                raise ArtifactIntegrityError(
+                    "qualification_v3 and promotion_v2 scenario matrices differ"
+                )
         self.store = V2ArtifactStore(manifest.artifact_root)
         self.store.write_manifest(manifest, resolved_config)
         self.store.write_policy(policy)
@@ -188,9 +265,15 @@ class ShadowAttemptRecorderV2:
             )
             self.store.write_candidate(candidate)
             self.store.write_decision(decision)
+            if self.qualification_policy_v3 is not None:
+                qualification = evaluate_candidate_v3(
+                    records,
+                    self.qualification_policy_v3,
+                )
+                self.store.write_qualification_v3(qualification)
             evaluated_candidates.append(candidate)
 
-        candidates = _deduplicate_valid_behaviors(evaluated_candidates)
+        candidates, dispositions = _classify_candidate_artifacts(evaluated_candidates)
         if candidates:
             status = "SUCCEEDED"
             error_code = None
@@ -208,6 +291,10 @@ class ShadowAttemptRecorderV2:
             "manifest": self.manifest.model_dump(mode="python"),
             "candidate_evaluations": [
                 candidate.model_dump(mode="python") for candidate in candidates
+            ],
+            "candidate_artifact_dispositions": [
+                disposition.model_dump(mode="python")
+                for disposition in dispositions
             ],
             "error_code": error_code,
             "error_detail": error_detail,

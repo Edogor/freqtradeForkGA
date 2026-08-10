@@ -26,8 +26,8 @@ from genetic_algorithm.orchestration.wave_materializer_v2 import (
 from genetic_algorithm.orchestration.wave_state_v2 import WaveStateStoreV2
 
 
-REPORT_SCHEMA_VERSION = "2.3"
-CAMPAIGN_SUMMARY_SCHEMA_VERSION = "1.2"
+REPORT_SCHEMA_VERSION = "2.4"
+CAMPAIGN_SUMMARY_SCHEMA_VERSION = "1.4"
 DIAGNOSTIC_CANDIDATE_RANKING_BASIS = "GATE_ALIGNMENT_THEN_ROBUST_SCORE"
 
 
@@ -145,6 +145,35 @@ def _gate_summary(gate: Any) -> dict[str, Any]:
     }
 
 
+def _qualification_v3_summary(
+    artifact_root: str | Path,
+    candidate_id: str,
+) -> dict[str, Any] | None:
+    """Read the optional additive V3 artifact already covered by result hashes."""
+
+    from genetic_algorithm.orchestration.promotion_policy_v3 import (
+        CandidateEvaluationV3,
+    )
+
+    path = Path(artifact_root) / "candidates" / candidate_id / "qualification_v3.json"
+    if not path.is_file():
+        return None
+    qualification = CandidateEvaluationV3.model_validate_json(path.read_bytes())
+    return {
+        "schema_version": qualification.schema_version,
+        "status": qualification.status.value,
+        "would_pass": qualification.would_pass,
+        "robust_score": qualification.robust_score,
+        "groups": [item.model_dump(mode="json") for item in qualification.group_results],
+        "gates": [_gate_summary(gate) for gate in qualification.gates],
+        "diagnostics": (
+            qualification.diagnostics.model_dump(mode="json")
+            if qualification.diagnostics is not None
+            else None
+        ),
+    }
+
+
 def _engine_seed_evidence(
     manifest_seed: int,
     engine_config: dict[str, Any],
@@ -214,6 +243,8 @@ def _attempt_summaries(
                 for path in Path(state.artifact_root).rglob("*")
                 if path.is_file()
             ),
+            "replayed_candidate_artifact_count": 0,
+            "behavior_duplicate_artifact_count": 0,
             "candidates": [],
         }
         if state.result_path:
@@ -246,6 +277,15 @@ def _attempt_summaries(
                     "data_manifest_hash": result.manifest.data_manifest_hash,
                     "seeds": result.manifest.seeds,
                     "engine_seed_evidence": engine_seed_evidence,
+                    "replayed_candidate_artifact_count": (
+                        len(result.candidate_artifact_dispositions)
+                        if result.candidate_artifact_dispositions
+                        else len(result.candidate_evaluations)
+                    ),
+                    "behavior_duplicate_artifact_count": sum(
+                        not disposition.authoritative
+                        for disposition in result.candidate_artifact_dispositions
+                    ),
                     "candidates": [
                         {
                             "candidate_id": candidate.candidate_id,
@@ -253,6 +293,10 @@ def _attempt_summaries(
                             "status": candidate.status.value,
                             "robust_score": candidate.robust_score,
                             "pareto_rank": candidate.pareto_rank,
+                            "qualification_v3": _qualification_v3_summary(
+                                state.artifact_root,
+                                candidate.candidate_id,
+                            ),
                             "gates": [_gate_summary(gate) for gate in candidate.gates],
                             "scenarios": [
                                 _scenario_summary(record)
@@ -706,12 +750,30 @@ def build_campaign_summary_v2(
                 "artifact_bytes": sum(
                     int(item.get("artifact_bytes") or 0) for item in attempts
                 ),
+                "replayed_candidate_artifact_count": sum(
+                    int(item.get("replayed_candidate_artifact_count") or 0)
+                    for item in attempts
+                ),
+                "behavior_duplicate_artifact_count": sum(
+                    int(item.get("behavior_duplicate_artifact_count") or 0)
+                    for item in attempts
+                ),
                 "seeds": sorted(
                     {int(seed) for item in attempts for seed in item.get("seeds", [])}
                 ),
                 "candidate_count": len(candidates),
                 "promotion_eligible_candidate_count": sum(
                     item.get("eligibility_status") == "ELIGIBLE" for item in candidates
+                ),
+                "v3_evaluated_candidate_count": sum(
+                    candidate.get("qualification_v3") is not None
+                    for attempt in attempts
+                    for candidate in attempt.get("candidates", [])
+                ),
+                "v3_would_pass_candidate_count": sum(
+                    bool((candidate.get("qualification_v3") or {}).get("would_pass"))
+                    for attempt in attempts
+                    for candidate in attempt.get("candidates", [])
                 ),
                 "unique_phenotype_count": len(phenotype_hashes),
                 "repeated_phenotype_count": len(repeated),
@@ -764,6 +826,18 @@ def build_campaign_summary_v2(
         ),
         "duration_seconds": sum(item["duration_seconds"] for item in entries),
         "artifact_bytes": sum(item["artifact_bytes"] for item in entries),
+        "replayed_candidate_artifact_count": sum(
+            item["replayed_candidate_artifact_count"] for item in entries
+        ),
+        "behavior_duplicate_artifact_count": sum(
+            item["behavior_duplicate_artifact_count"] for item in entries
+        ),
+        "v3_evaluated_candidate_count": sum(
+            item["v3_evaluated_candidate_count"] for item in entries
+        ),
+        "v3_would_pass_candidate_count": sum(
+            item["v3_would_pass_candidate_count"] for item in entries
+        ),
         "unique_phenotype_count": len(seen_phenotypes),
         "repeated_phenotype_observation_count": sum(
             item["repeated_phenotype_count"] for item in entries
@@ -784,6 +858,11 @@ def _campaign_markdown(summary: dict[str, Any]) -> str:
         f"- Successful attempts: `{summary['successful_attempt_count']}` / "
         f"`{summary['attempt_count']}`",
         f"- Artifact bytes: `{summary['artifact_bytes']}`",
+        f"- Replayed candidate artifacts: `{summary['replayed_candidate_artifact_count']}`",
+        f"- Exact-behavior duplicates excluded from analysis: "
+        f"`{summary['behavior_duplicate_artifact_count']}`",
+        f"- V3-qualified candidates: `{summary['v3_would_pass_candidate_count']}` / "
+        f"`{summary['v3_evaluated_candidate_count']}`",
         f"- Unique phenotypes: `{summary['unique_phenotype_count']}`",
         f"- Repeated phenotype observations: `{summary['repeated_phenotype_observation_count']}`",
         "",

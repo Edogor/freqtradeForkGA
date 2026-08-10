@@ -195,6 +195,7 @@ class EvolutionWorkerSpecV2(StrictV2Model):
     # RunEngine currently returns at most ten standard-GA finalists.
     top_n: int = Field(default=5, ge=1, le=10)
     seeds: list[EvolutionWorkerSeedInputV2] = Field(default_factory=list)
+    replay_input_seeds: bool = False
     input_hashes: dict[str, str] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -209,6 +210,8 @@ class EvolutionWorkerSpecV2(StrictV2Model):
         ids = [item.candidate_id for item in self.seeds]
         if ids != sorted(ids) or len(ids) != len(set(ids)):
             raise ValueError("evolution seeds must be sorted and unique")
+        if self.replay_input_seeds and len(self.seeds) != 1:
+            raise ValueError("seed replay requires exactly one immutable parent seed")
         required = {
             V2ArtifactStore.MANIFEST_NAME,
             V2ArtifactStore.CONFIG_NAME,
@@ -406,6 +409,7 @@ def prepare_evolution_worker(
     final_test_ledger_path: str | Path,
     created_at: datetime,
     top_n: int = 5,
+    replay_input_seeds: bool = False,
 ) -> PreparedEvolutionWorkerV2:
     """Persist and hash every input before an evolution attempt can be queued."""
 
@@ -435,6 +439,10 @@ def prepare_evolution_worker(
     population_size = int(config.get("genetic_algorithm", {}).get("population_size", 0))
     if len(seed_list) > population_size:
         raise EvolutionWorkerError("evolution seed count exceeds population size")
+    if replay_input_seeds and len(seed_list) != 1:
+        raise EvolutionWorkerError(
+            "immutable parent replay requires exactly one evolution seed"
+        )
     for seed in seed_list:
         validate_evolution_seed(seed, config)
 
@@ -471,6 +479,7 @@ def prepare_evolution_worker(
         output_layout=AttemptOutputLayoutV2.for_artifact_root(root),
         top_n=top_n,
         seeds=worker_seeds,
+        replay_input_seeds=replay_input_seeds,
         input_hashes=input_hashes,
     )
     spec_path = store.write_worker_spec(spec)
@@ -928,8 +937,23 @@ def run_evolution_worker(
             results = _usable_results(evolution_runner(config_path, strict_seeds))
         if not results:
             raise EvolutionWorkerError("evolution produced no finite evaluated individual")
-        selected = results[: loaded.spec.top_n]
-        output_seeds = [
+        replayed_parent: list[FrozenEvolutionSeedV2] = []
+        evolved_capacity = loaded.spec.top_n
+        if loaded.spec.replay_input_seeds:
+            parent = loaded.seeds[0]
+            reproduced_parent = freeze_evolution_seed(
+                parent.fresh_individual(),
+                resolved_config=loaded.resolved_config,
+                candidate_id=_candidate_id(loaded.manifest.attempt_id, 0),
+            )
+            if reproduced_parent.phenotype_hash != parent.phenotype_hash:
+                raise EvolutionWorkerError(
+                    "immutable replay parent phenotype changed before strict replay"
+                )
+            replayed_parent.append(reproduced_parent)
+            evolved_capacity -= 1
+        selected = results[:evolved_capacity]
+        evolved_seeds = [
             freeze_evolution_seed(
                 individual,
                 resolved_config=loaded.resolved_config,
@@ -937,6 +961,7 @@ def run_evolution_worker(
             )
             for rank, individual in enumerate(selected, start=1)
         ]
+        output_seeds = [*replayed_parent, *evolved_seeds]
         for seed in output_seeds:
             store.write_frozen_candidate(seed.frozen_candidate)
             store.write_evolution_seed(seed)

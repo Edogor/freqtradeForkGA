@@ -50,6 +50,7 @@ _SEMANTIC_CONFIG_SECTIONS = (
     "fitness_weights",
     "fitness_penalties",
     "fitness_bounds",
+    "fitness_policy_v3",
     "trade_frequency_thresholds",
     "walk_forward",
     "pair_validation",

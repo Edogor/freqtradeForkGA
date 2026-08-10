@@ -445,6 +445,39 @@ class AttemptManifestV2(StrictV2Model):
     artifact_root: str = Field(min_length=1)
 
 
+class CandidateArtifactDispositionV2(StrictV2Model):
+    """Explain whether a replayed candidate is authoritative for analysis."""
+
+    candidate_id: str = Field(min_length=1)
+    phenotype_hash: str = Field(min_length=8)
+    evaluation_status: EvaluationStatus
+    authoritative: bool
+    reason_code: Literal[
+        "AUTHORITATIVE_RESULT",
+        "EXACT_BEHAVIOR_DUPLICATE",
+    ]
+    canonical_candidate_id: str = Field(min_length=1)
+    behavior_signature: Optional[str] = Field(default=None, min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def _consistent_disposition(self) -> "CandidateArtifactDispositionV2":
+        if self.authoritative:
+            if self.reason_code != "AUTHORITATIVE_RESULT":
+                raise ValueError("authoritative candidate has a duplicate disposition")
+            if self.canonical_candidate_id != self.candidate_id:
+                raise ValueError("authoritative candidate must reference itself")
+        else:
+            if self.reason_code != "EXACT_BEHAVIOR_DUPLICATE":
+                raise ValueError("non-authoritative candidate lacks duplicate reason")
+            if self.evaluation_status != EvaluationStatus.VALID:
+                raise ValueError("only VALID exact behavior may be deduplicated")
+            if self.canonical_candidate_id == self.candidate_id:
+                raise ValueError("behavior duplicate cannot reference itself")
+            if self.behavior_signature is None:
+                raise ValueError("behavior duplicate lacks exact replay signature")
+        return self
+
+
 class AttemptResultV2(StrictV2Model):
     """Terminal attempt result consumed by reconciliation and wave planning."""
 
@@ -455,6 +488,9 @@ class AttemptResultV2(StrictV2Model):
     finished_at: datetime
     manifest: AttemptManifestV2
     candidate_evaluations: List[CandidateEvaluationV2] = Field(default_factory=list)
+    candidate_artifact_dispositions: List[CandidateArtifactDispositionV2] = Field(
+        default_factory=list
+    )
     artifact_hashes: Dict[str, str] = Field(default_factory=dict)
     error_code: Optional[str] = None
     error_detail: Optional[str] = None
@@ -465,6 +501,37 @@ class AttemptResultV2(StrictV2Model):
             raise ValueError("finished_at cannot precede started_at")
         if self.attempt_id != self.manifest.attempt_id:
             raise ValueError("result attempt_id differs from manifest")
+        if self.candidate_artifact_dispositions:
+            ordered = sorted(
+                self.candidate_artifact_dispositions,
+                key=lambda item: item.candidate_id,
+            )
+            if self.candidate_artifact_dispositions != ordered:
+                raise ValueError("candidate artifact dispositions must be sorted")
+            disposition_ids = [item.candidate_id for item in ordered]
+            if len(disposition_ids) != len(set(disposition_ids)):
+                raise ValueError("candidate artifact dispositions contain duplicate IDs")
+            authoritative = {
+                item.candidate_id: item
+                for item in ordered
+                if item.authoritative
+            }
+            evaluations = {
+                item.candidate_id: item for item in self.candidate_evaluations
+            }
+            if set(authoritative) != set(evaluations):
+                raise ValueError(
+                    "authoritative dispositions differ from candidate evaluations"
+                )
+            for candidate_id, evaluation in evaluations.items():
+                disposition = authoritative[candidate_id]
+                if (
+                    disposition.phenotype_hash != evaluation.phenotype_hash
+                    or disposition.evaluation_status != evaluation.status
+                ):
+                    raise ValueError(
+                        "authoritative disposition differs from candidate evaluation"
+                    )
         if self.status == AttemptStatus.SUCCEEDED:
             if self.error_code:
                 raise ValueError("SUCCEEDED result cannot contain error_code")

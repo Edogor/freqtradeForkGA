@@ -168,8 +168,11 @@ def test_automation_island_v2_preset_is_a_valid_shadow_search_contract():
     assert config["fitness_penalties"]["target_trades_per_pair"] == 0
     assert config["fitness_penalties"]["target_trades_per_active_month"] == 5.0
     assert config["promotion_v2"]["policy_version"] == "automation-island-v2.1-shadow"
-    assert config["fitness_weights"]["profit"] == 0.30
-    assert config["fitness_weights"]["profit_factor"] == 0.16
+    assert config["fitness_weights"]["profit"] == 0.34
+    assert config["fitness_weights"]["profit_factor"] == 0.20
+    assert config["fitness_weights"]["trade_frequency"] == 0.06
+    assert config["fitness_bounds"]["profit_factor_break_even_normalization"] is True
+    assert config["fitness_penalties"]["pair_trade_coverage_exponent"] == 0.5
     assert config["fitness_weights"]["drawdown_duration"] == 0.11
     assert sum(config["fitness_weights"].values()) == pytest.approx(1.0)
     assert config["fitness_bounds"]["profit_min"] == -5.0

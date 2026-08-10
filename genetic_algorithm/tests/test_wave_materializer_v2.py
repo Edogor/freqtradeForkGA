@@ -24,7 +24,10 @@ from genetic_algorithm.orchestration.candidate_selector_v2 import (
     CandidateSelectionPolicyV2,
     select_wave_candidates,
 )
-from genetic_algorithm.orchestration.evolution_worker_v2 import freeze_evolution_seed
+from genetic_algorithm.orchestration.evolution_worker_v2 import (
+    EvolutionWorkerSpecV2,
+    freeze_evolution_seed,
+)
 from genetic_algorithm.orchestration.promotion_policy_v2 import (
     ScenarioRequirementV2,
     ShadowGatePolicyV2,
@@ -634,6 +637,18 @@ def test_evolution_materialization_binds_all_arm_types_and_queues_atomically(
         if item.experiment_spec.arm_type != ExperimentArmType.CONTROL
     ]
     assert all(item.verified_source.evolution_seed is not None for item in selected)
+    arm_by_experiment = {
+        item.experiment_spec.experiment_id: item.experiment_spec.arm_type
+        for item in prepared.materialization.experiments
+    }
+    for attempt in prepared.materialization.attempts:
+        spec = EvolutionWorkerSpecV2.model_validate_json(
+            Path(attempt.worker_binding.spec_path).read_bytes()
+        )
+        assert spec.replay_input_seeds is (
+            arm_by_experiment[attempt.manifest.experiment_id]
+            == ExperimentArmType.REPLICATION
+        )
 
     store = _approved_parent_store(context, tmp_path, prepared)
     queue_approved_materialization(

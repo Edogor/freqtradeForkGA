@@ -150,18 +150,18 @@ pair_validation:
 # month and pair, so the search uses the same rate instead of a campaign-length
 # approximation. This remains a smooth penalty, not a hard cliff.
 fitness_weights:
-  profit: 0.30
-  sharpe_ratio: 0.10
-  sortino_ratio: 0.03
-  profit_factor: 0.16
-  drawdown: 0.15
+  profit: 0.34
+  sharpe_ratio: 0.07
+  sortino_ratio: 0.02
+  profit_factor: 0.20
+  drawdown: 0.17
   # Week-run winners often combined a very high win rate with rare, large
   # losses. Profit factor and drawdown therefore carry the quality signal;
   # win rate remains informative but cannot dominate it.
-  win_rate: 0.01
-  trade_frequency: 0.10
-  monthly_stability: 0.01
-  cross_pair: 0.03
+  win_rate: 0.005
+  trade_frequency: 0.06
+  monthly_stability: 0.005
+  cross_pair: 0.02
   drawdown_duration: 0.11
   consecutive_losses: 0.00
 
@@ -173,11 +173,17 @@ fitness_bounds:
   profit_min: -5.0
   profit_max: 20.0
   drawdown_normalization_target: 0.25
+  # PF=1 is break-even, not positive edge. Preserve a smooth gradient above
+  # that point instead of gifting one third of the PF score at break-even.
+  profit_factor_break_even_normalization: true
 
 fitness_penalties:
   target_trades_per_pair: 0
   target_trades_per_active_month: 5.0
   pair_trade_penalty_floor: 0.01
+  # Keep weakest-pair evidence influential without letting the activity
+  # multiplier dominate profit, PF and drawdown a second time.
+  pair_trade_coverage_exponent: 0.5
 
 promotion_v2:
   enabled: true

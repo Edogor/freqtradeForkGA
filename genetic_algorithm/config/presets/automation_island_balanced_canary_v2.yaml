@@ -1,0 +1,12 @@
+# Five-wave canary for immutable replication and balanced parent selection.
+#
+# This remains search-only and inherits every no-trading, no-promotion and
+# resource guard from automation_island_v2.  A distinct seed and artifact root
+# keep the previous v2.1 evidence immutable.
+
+config_schema_version: 2
+preset: automation_island_v2
+
+automation_controller:
+  root_seeds: [10001]
+  max_waves: 5

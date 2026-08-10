@@ -242,6 +242,56 @@ class TestDrawdownMagnitudeGradient:
         assert evaluator._normalize_drawdown(0.15) == pytest.approx(0.85)
 
 
+class TestEdgeAlignedProfitFactor:
+    def test_automation_mapping_starts_at_break_even(self):
+        evaluator = _make_fitness_evaluator(
+            {
+                "fitness_bounds": {
+                    "profit_factor_normalization": 3.0,
+                    "profit_factor_break_even_normalization": True,
+                }
+            }
+        )
+
+        assert evaluator._normalize_profit_factor(0.8) == 0.0
+        assert evaluator._normalize_profit_factor(1.0) == 0.0
+        assert evaluator._normalize_profit_factor(1.2) > 0.0
+        assert evaluator._normalize_profit_factor(1.5) > evaluator._normalize_profit_factor(1.2)
+
+    def test_legacy_mapping_is_unchanged_without_opt_in(self):
+        evaluator = _make_fitness_evaluator(
+            {"fitness_bounds": {"profit_factor_normalization": 3.0}}
+        )
+
+        assert evaluator._normalize_profit_factor(1.0) == pytest.approx(1 / 3)
+
+
+class TestSoftWeakestPairCoverage:
+    def test_exponent_softens_activity_pressure_without_removing_gradient(self):
+        evaluator = _make_fitness_evaluator(
+            {
+                "fitness_penalties": {
+                    "target_trades_per_active_month": 5.0,
+                    "pair_trade_penalty_floor": 0.01,
+                    "pair_trade_coverage_exponent": 0.5,
+                }
+            }
+        )
+
+        low = evaluator._pair_trade_coverage_multiplier(
+            {"worst_pair_trades_per_active_month": 1.0}
+        )
+        middle = evaluator._pair_trade_coverage_multiplier(
+            {"worst_pair_trades_per_active_month": 3.0}
+        )
+        target = evaluator._pair_trade_coverage_multiplier(
+            {"worst_pair_trades_per_active_month": 5.0}
+        )
+
+        assert 0.01 < low < middle < target == 1.0
+        assert middle > 0.6
+
+
 class TestProfitGradient:
     def test_audited_bound_keeps_profit_gradient_above_ten_percent(self):
         evaluator = _make_fitness_evaluator(

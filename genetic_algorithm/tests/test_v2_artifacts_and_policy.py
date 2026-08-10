@@ -19,6 +19,12 @@ from genetic_algorithm.orchestration.promotion_policy_v2 import (
     make_shadow_promotion_decision,
     shadow_gate_policy_from_config,
 )
+from genetic_algorithm.orchestration.promotion_policy_v3 import (
+    CandidateEvaluationV3,
+    EvaluationScenarioV3,
+    PairGroupGateV3,
+    QualificationPolicyV3,
+)
 from genetic_algorithm.orchestration.result_contract import (
     AttemptManifestV2,
     BacktestRecordV2,
@@ -329,6 +335,96 @@ def test_terminal_artifact_roundtrip_is_atomic_hashed_and_tamper_evident(tmp_pat
         store.read_verified_result()
 
 
+def test_recorder_persists_additive_v3_qualification(tmp_path: Path):
+    root = tmp_path / "attempt-v3"
+    policy_v2 = ShadowGatePolicyV2(
+        policy_version="promotion-v2-with-v3",
+        required_scenarios=[
+            ScenarioRequirementV2(
+                scenario_id="final-btc",
+                pair="BTC/USDT",
+                timeframe="1h",
+                role="FINAL_TEST",
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 6, 30),
+                cost_multiplier=1.0,
+            ),
+            ScenarioRequirementV2(
+                scenario_id="train-btc",
+                pair="BTC/USDT",
+                timeframe="1h",
+                role="TRAIN",
+                period_start=date(2025, 1, 1),
+                period_end=date(2025, 6, 30),
+                cost_multiplier=1.0,
+            ),
+        ],
+    )
+    policy_v3 = QualificationPolicyV3(
+        policy_version="qualification-v3-test",
+        required_scenarios=[
+            EvaluationScenarioV3(
+                scenario_id="final-btc",
+                pair="BTC/USDT",
+                pair_group="development",
+                timeframe="1h",
+                role="FINAL_TEST",
+                period_start=date(2025, 1, 1),
+                period_end_exclusive=date(2025, 7, 1),
+                cost_multiplier=1.0,
+            ),
+            EvaluationScenarioV3(
+                scenario_id="train-btc",
+                pair="BTC/USDT",
+                pair_group="development",
+                timeframe="1h",
+                role="TRAIN",
+                period_start=date(2025, 1, 1),
+                period_end_exclusive=date(2025, 7, 1),
+                cost_multiplier=1.0,
+            ),
+        ],
+        pair_groups=[
+            PairGroupGateV3(
+                group_id="development",
+                pairs=["BTC/USDT"],
+                min_profitable_pairs=1,
+            )
+        ],
+        development_evidence={"min_effective_sample_size": 30, "min_active_months": 6},
+    )
+    config = {
+        "config_schema_version": 2,
+        "qualification_v3": {
+            "enabled": True,
+            **policy_v3.model_dump(mode="json"),
+        },
+    }
+    manifest = _manifest(root, config).model_copy(
+        update={
+            "attempt_id": "attempt-v3",
+            "artifact_root": str(root),
+            "resolved_config_path": str(root / "resolved_config.yaml"),
+        }
+    )
+    records = [
+        _record_for_manifest(manifest, "final-btc", "FINAL_TEST"),
+        _record_for_manifest(manifest, "train-btc", "TRAIN"),
+    ]
+    recorder = ShadowAttemptRecorderV2(manifest, config, policy_v2)
+    for record in records:
+        recorder.add_backtest(record)
+
+    result = recorder.finalize(
+        finished_at=datetime(2026, 7, 21, 12, 2, tzinfo=timezone.utc)
+    )
+
+    path = root / "candidates/candidate-001/qualification_v3.json"
+    qualification = CandidateEvaluationV3.model_validate_json(path.read_bytes())
+    assert qualification.would_pass
+    assert path.relative_to(root).as_posix() in result.artifact_hashes
+
+
 def test_raw_trade_datetime_roundtrips_through_canonical_artifacts(tmp_path: Path):
     """Engine-native timestamps must not look like artifact corruption."""
     root = tmp_path / "attempt-runtime-types"
@@ -469,6 +565,16 @@ def test_shadow_attempt_deduplicates_exact_valid_behavior_after_full_replay(
     assert [candidate.candidate_id for candidate in result.candidate_evaluations] == [
         "evo-test-rank-001"
     ]
+    dispositions = {
+        item.candidate_id: item for item in result.candidate_artifact_dispositions
+    }
+    assert dispositions["evo-test-rank-001"].authoritative is True
+    assert dispositions["evo-test-rank-002"].authoritative is False
+    assert (
+        dispositions["evo-test-rank-002"].canonical_candidate_id
+        == "evo-test-rank-001"
+    )
+    assert dispositions["evo-test-rank-002"].reason_code == "EXACT_BEHAVIOR_DUPLICATE"
     assert (root / "candidates/evo-test-rank-002/candidate.json").exists(), (
         "deduplication must not delete replay artifacts"
     )

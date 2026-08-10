@@ -72,6 +72,7 @@ from genetic_algorithm.evaluation.panel_contract import (
     build_evaluation_panel,
     replay_on_common_panel,
 )
+from genetic_algorithm.orchestration.generation_trace_v2 import GenerationTraceWriterV2
 
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,17 @@ class GenericIslandModelEvolution:
             tournament_size=mig_cfg.get('tournament_size', 3),
         )
 
+        common_cfg = gim_cfg.get('common_panel_replay', {})
+        self.common_panel_replay_enabled = bool(common_cfg.get('enabled', False))
+        self.common_panel_replay_interval = int(common_cfg.get('interval', 3))
+        self.common_panel_top_n = int(common_cfg.get('top_n_per_island', 3))
+        self.common_panel_early_stop_patience = int(
+            common_cfg.get('early_stop_patience', 4)
+        )
+        self.common_panel_min_improvement = float(
+            common_cfg.get('min_improvement', 0.002)
+        )
+
         # Walk-forward config (per-island override)
         wf_cfg = gim_cfg.get('walk_forward', {})
         self.island_walk_forward: Optional[bool] = (
@@ -278,6 +290,9 @@ class GenericIslandModelEvolution:
         )
         self.checkpoint_interval: int = storage_config.get('checkpoint_interval', 5)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.generation_trace = GenerationTraceWriterV2(
+            self.checkpoint_dir.parent / "generation_trace_v2.jsonl"
+        )
         self._checkpoint_requested = False  # for SIGUSR1 manual trigger
 
         # Thread safety
@@ -286,6 +301,10 @@ class GenericIslandModelEvolution:
         self._migration_lock = threading.Lock()
         self._shutdown_requested = False
         self._strict_initial_seeds: List[Individual] = []
+        self._evaluated_generation_elites: Dict[str, List[Individual]] = {}
+        self._common_panel_best: Optional[float] = None
+        self._common_panel_no_improvement_checks = 0
+        self.common_panel_replay_history: List[Dict[str, Any]] = []
 
     def set_strict_initial_seeds(self, seeds: List[Individual]) -> None:
         """Inject the same immutable parent set into every island.
@@ -800,6 +819,10 @@ class GenericIslandModelEvolution:
                         gen,
                     )
 
+            self._maybe_replay_common_panel(gen)
+
+            self._persist_generation_trace(gen)
+
             # Migration (skip generation 0 — populations not yet evaluated)
             if (
                 gen > 0
@@ -928,6 +951,26 @@ class GenericIslandModelEvolution:
 
         return results
 
+    def _persist_generation_trace(self, generation: int) -> None:
+        """Persist comparable diagnostics before migration mutates populations."""
+
+        for island_config in self.island_configs:
+            island_name = island_config.name
+            population = self.island_populations[island_name]
+            stats_history = self.generation_stats.get(island_name, [])
+            if not stats_history:
+                raise RuntimeError(
+                    f"missing generation statistics for {island_name} generation {generation}"
+                )
+            panel_id = self.islands[island_name].evaluation_panel.panel_id
+            self.generation_trace.append(
+                generation=generation,
+                island_name=island_name,
+                panel_id=panel_id,
+                individuals=population.individuals,
+                stats=stats_history[-1],
+            )
+
     # ------------------------------------------------------------------
     # Single-island evolution (one generation)
     # ------------------------------------------------------------------
@@ -1030,6 +1073,9 @@ class GenericIslandModelEvolution:
         stats.generation = generation
         with self._stats_lock:
             self.generation_stats[island_name].append(stats)
+            self._evaluated_generation_elites[island_name] = copy.deepcopy(
+                population.get_best_measured(self.common_panel_top_n)
+            )
 
         # Step 6b: Record LLM strategy performance
         if ga.llm_enabled and ga.strategy_designer and ga.strategy_designer.enabled:
@@ -1152,6 +1198,11 @@ class GenericIslandModelEvolution:
             'island_stats': stats_data,
             'hall_of_fame': hof_data,
             'migration_history_count': len(self.migration_history),
+            'common_panel_replay': {
+                'best_fitness': self._common_panel_best,
+                'no_improvement_checks': self._common_panel_no_improvement_checks,
+                'history': self.common_panel_replay_history,
+            },
             'config_snapshot': {
                 'genetic_algorithm': self.config.get('genetic_algorithm', {}),
                 'backtesting': self.config.get('backtesting', {}),
@@ -1289,6 +1340,18 @@ class GenericIslandModelEvolution:
                 ist.generations_completed = sd.get('generations_completed', 0)
                 ist.migrants_sent = sd.get('migrants_sent', 0)
                 ist.migrants_received = sd.get('migrants_received', 0)
+
+        common_state = checkpoint.get('common_panel_replay', {})
+        if isinstance(common_state, dict):
+            best = common_state.get('best_fitness')
+            self._common_panel_best = float(best) if best is not None else None
+            self._common_panel_no_improvement_checks = int(
+                common_state.get('no_improvement_checks', 0)
+            )
+            history = common_state.get('history', [])
+            self.common_panel_replay_history = (
+                list(history) if isinstance(history, list) else []
+            )
 
         # Restore random state
         random_state = checkpoint.get('random_state', {})
@@ -2042,6 +2105,76 @@ class GenericIslandModelEvolution:
                 generation=max(0, self.generations - 1),
             )
         return replayed
+
+    def _maybe_replay_common_panel(self, generation: int) -> None:
+        """Periodically compare local elites on one immutable common panel."""
+        if (
+            not self.common_panel_replay_enabled
+            or self.common_panel_replay_interval <= 0
+            or (generation + 1) % self.common_panel_replay_interval != 0
+        ):
+            return
+        candidates = [
+            individual
+            for island_name in sorted(self._evaluated_generation_elites)
+            for individual in self._evaluated_generation_elites[island_name]
+        ]
+        if not candidates:
+            return
+        evaluator, panel = self._create_common_replay_evaluator()
+        replayed = replay_on_common_panel(
+            candidates,
+            evaluator=evaluator,
+            panel=panel,
+            logger=self.logger,
+        )
+        measured = [item for item in replayed if item.has_measured_fitness]
+        scores = sorted(
+            (float(item.raw_fitness) for item in measured), reverse=True
+        )
+        if not scores:
+            return
+        best = scores[0]
+        improved = (
+            self._common_panel_best is None
+            or best > self._common_panel_best + self.common_panel_min_improvement
+        )
+        if improved:
+            self._common_panel_best = best
+            self._common_panel_no_improvement_checks = 0
+        else:
+            self._common_panel_no_improvement_checks += 1
+        stopped = (
+            self.common_panel_early_stop_patience > 0
+            and self._common_panel_no_improvement_checks
+            >= self.common_panel_early_stop_patience
+        )
+        event = {
+            'generation': generation,
+            'panel_id': panel.panel_id,
+            'candidate_count': len(measured),
+            'best_fitness': best,
+            'median_fitness': scores[len(scores) // 2],
+            'improved': improved,
+            'no_improvement_checks': self._common_panel_no_improvement_checks,
+            'early_stop_triggered': stopped,
+        }
+        self.common_panel_replay_history.append(event)
+        self.logger.info(
+            "[COMMON-PANEL] gen=%d candidates=%d best=%.4f improved=%s stale=%d/%d",
+            generation + 1,
+            len(measured),
+            best,
+            improved,
+            self._common_panel_no_improvement_checks,
+            self.common_panel_early_stop_patience,
+        )
+        if stopped:
+            self._shutdown_requested = True
+            self.logger.info(
+                "[COMMON-PANEL] Early stop requested after %d checks without material improvement",
+                self._common_panel_no_improvement_checks,
+            )
 
     # ------------------------------------------------------------------
     # Phase 3: Reporting

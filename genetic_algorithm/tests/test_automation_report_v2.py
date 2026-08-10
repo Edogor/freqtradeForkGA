@@ -112,7 +112,7 @@ def test_campaign_summary_is_order_independent_and_warns_on_repeated_phenotype()
     reversed_input = build_campaign_summary_v2([second, first])
 
     assert forward == reversed_input
-    assert forward["schema_version"] == "1.2"
+    assert forward["schema_version"] == "1.4"
     assert forward["wave_count"] == 2
     assert forward["attempt_count"] == 2
     assert forward["successful_attempt_count"] == 2

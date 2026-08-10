@@ -49,6 +49,10 @@ class CandidateSelectionPolicyV2(StrictV2Model):
     max_pareto_rank: int = Field(default=2, ge=0)
     min_normalized_objective_distance: float = Field(default=0.15, ge=0, le=2)
     dominance_epsilon: float = Field(default=1e-12, ge=0)
+    first_selection_mode: Literal[
+        "CONSERVATIVE_RISK",
+        "BALANCED_CONTINUATION",
+    ] = "CONSERVATIVE_RISK"
     require_common_comparison_panel: bool = True
     require_analysis_planning_allowed: bool = True
     allow_continuation_candidates: bool = False
@@ -313,6 +317,47 @@ def _normalized_vectors(
     }
 
 
+def _balanced_normalized_vectors(
+    candidates: list[CandidateAnalysisV2],
+    values: dict[tuple[str, str], dict[ParetoObjective, float]],
+) -> dict[tuple[str, str], tuple[float, ...]]:
+    """Normalize return, risk, activity and recovery without adding gates.
+
+    Pareto dominance deliberately remains non-compensating on the four strict
+    return/risk axes.  This wider vector is used only to choose a balanced
+    survivor from the Pareto front, so low drawdown cannot silently outweigh
+    persistently sparse trading and year-long recovery times.
+    """
+
+    by_key = {
+        (candidate.experiment_id, candidate.phenotype_hash): candidate
+        for candidate in candidates
+    }
+    maximizing = {
+        key: (
+            *_maximization_vector(objectives),
+            _require_metric(
+                by_key[key].min_trades_per_active_month,
+                "min_trades_per_active_month",
+            ),
+            -_require_metric(
+                by_key[key].max_drawdown_duration_days,
+                "max_drawdown_duration_days",
+            ),
+        )
+        for key, objectives in values.items()
+    }
+    columns = list(zip(*maximizing.values(), strict=True))
+    bounds = [(min(column), max(column)) for column in columns]
+    return {
+        key: tuple(
+            0.5 if high == low else (value - low) / (high - low)
+            for value, (low, high) in zip(vector, bounds, strict=True)
+        )
+        for key, vector in maximizing.items()
+    }
+
+
 def _distance(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(left, right, strict=True)))
 
@@ -331,13 +376,34 @@ def _conservative_key(
     )
 
 
+def _balanced_key(
+    candidate: CandidateAnalysisV2,
+    values: dict[ParetoObjective, float],
+    normalized: tuple[float, ...],
+) -> tuple[float, float, float, float, float, str, str]:
+    ideal_distance = _distance(normalized, tuple(1.0 for _ in normalized))
+    return (
+        ideal_distance,
+        -float(candidate.median_gate_alignment_score or 0.0),
+        values[ParetoObjective.MAX_DRAWDOWN_UCB],
+        values[ParetoObjective.DAILY_ES5_UCB],
+        -values[ParetoObjective.WORST_EXPECTANCY_LCB],
+        candidate.experiment_id,
+        candidate.phenotype_hash,
+    )
+
+
 def _select_diverse(
     candidates: list[CandidateAnalysisV2],
     values: dict[tuple[str, str], dict[ParetoObjective, float]],
     ranks: dict[tuple[str, str], int],
     policy: CandidateSelectionPolicyV2,
 ) -> tuple[list[tuple[str, str]], dict[tuple[str, str], float | None]]:
-    normalized = _normalized_vectors(values)
+    normalized = (
+        _balanced_normalized_vectors(candidates, values)
+        if policy.first_selection_mode == "BALANCED_CONTINUATION"
+        else _normalized_vectors(values)
+    )
     selected: list[tuple[str, str]] = []
     selected_distances: dict[tuple[str, str], float | None] = {}
     experiment_counts: Counter[str] = Counter()
@@ -354,7 +420,11 @@ def _select_diverse(
             if not selected:
                 chosen = min(
                     available,
-                    key=lambda key: _conservative_key(by_key[key], values[key]),
+                    key=lambda key: (
+                        _balanced_key(by_key[key], values[key], normalized[key])
+                        if policy.first_selection_mode == "BALANCED_CONTINUATION"
+                        else _conservative_key(by_key[key], values[key])
+                    ),
                 )
                 minimum_distance = None
             else:

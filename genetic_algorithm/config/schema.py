@@ -312,8 +312,75 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
         "drawdown_duration": 0.0,
         "consecutive_losses": 0.0,
     },
+    "fitness_bounds": {
+        "profit_factor_break_even_normalization": False,
+    },
     "fitness_penalties": {
         "target_trades_per_active_month": 5.0,
+        "pair_trade_coverage_exponent": 1.0,
+    },
+    "fitness_policy_v3": {
+        "enabled": True,
+        "policy_version": "fitness-v3.0-feasibility-first",
+        "min_trades": 12,
+        "min_net_profit": 0.0,
+        "min_profit_factor": 1.0,
+        "min_profitable_pair_ratio": 0.6666666666666666,
+        "max_worst_pair_loss": -5.0,
+        "max_drawdown": 0.20,
+        "max_drawdown_duration_days": 120.0,
+        "median_hold_hours_target": 24.0,
+        "p90_hold_hours_target": 72.0,
+        "holding_soft_weight": 0.10,
+    },
+    # V3 qualification is an additive shadow contract.  Keeping it outside
+    # DEFAULTS prevents legacy/V2 runs from changing behavior merely because
+    # the schema learned how to validate the new section.
+    "qualification_v3": {
+        "enabled": False,
+        "schema_version": "3.0",
+        "policy_version": "qualification-v3.0-shadow",
+        "required_scenarios": [
+            {
+                "scenario_id": "scenario",
+                "pair": "BTC/USDT",
+                "pair_group": "development",
+                "timeframe": "1h",
+                "role": "TRAIN",
+                "period_start": "2025-01-01",
+                "period_end_exclusive": "2025-02-01",
+                "cost_multiplier": 1.0,
+            }
+        ],
+        "pair_groups": [
+            {
+                "group_id": "development",
+                "pairs": ["BTC/USDT"],
+                "min_profitable_pairs": 1,
+                "min_group_expectancy_lcb": 0.0,
+                "min_group_annual_return_lcb": 0.0,
+                "min_worst_pair_scenario_return": -0.05,
+            }
+        ],
+        "development_evidence": {
+            "min_effective_sample_size": 30.0,
+            "min_active_months": 12,
+        },
+        "final_test_evidence": {
+            "min_effective_sample_size": 20.0,
+            "min_active_months": 1,
+        },
+        "max_drawdown_ucb": 0.20,
+        "max_daily_es5_ucb": 0.05,
+        "max_consecutive_losses": 12,
+        "max_drawdown_duration_days": 120.0,
+        "require_final_test": True,
+        "soft_targets": {
+            "target_trades_per_day_min": 0.5,
+            "target_trades_per_day_max": 1.5,
+            "median_hold_hours_target": 24.0,
+            "p90_hold_hours_target": 72.0,
+        },
     },
     "safety_profile": {
         "name": "safe_v2",
@@ -347,6 +414,13 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
     },
     "generic_island_model": {
         "parallel_islands": False,
+        "common_panel_replay": {
+            "enabled": False,
+            "interval": 3,
+            "top_n_per_island": 3,
+            "early_stop_patience": 4,
+            "min_improvement": 0.002,
+        },
         "specialization": {
             "rotate_seeds": True,
             "indicator_pools": True,
@@ -834,6 +908,51 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         ):
             errors.append(
                 "pair_validation.max_pair_loss_pct must be a finite non-negative number"
+            )
+
+    qualification_v3 = _nested_config(config, ("qualification_v3",))
+    if qualification_v3.get("enabled", False):
+        try:
+            from genetic_algorithm.orchestration.promotion_policy_v3 import (
+                qualification_policy_v3_from_config,
+            )
+
+            qualification_policy_v3_from_config(config)
+        except ValueError as exc:
+            errors.append(f"invalid qualification_v3: {exc}")
+
+    fitness_policy_v3 = _nested_config(config, ("fitness_policy_v3",))
+    if fitness_policy_v3.get("enabled", False):
+        try:
+            from genetic_algorithm.evaluation.fitness_policy_v3 import (
+                fitness_policy_v3_from_config,
+            )
+
+            fitness_policy_v3_from_config(config)
+        except ValueError as exc:
+            errors.append(f"invalid fitness_policy_v3: {exc}")
+
+    common_replay = _nested_config(
+        config, ("generic_island_model", "common_panel_replay")
+    )
+    if common_replay.get("enabled", False):
+        for key in ("interval", "top_n_per_island", "early_stop_patience"):
+            value = common_replay.get(key)
+            if type(value) is not int or value < 1:
+                errors.append(
+                    f"generic_island_model.common_panel_replay.{key} "
+                    "must be a positive integer"
+                )
+        min_improvement = common_replay.get("min_improvement")
+        if (
+            isinstance(min_improvement, bool)
+            or not isinstance(min_improvement, (int, float))
+            or not math.isfinite(float(min_improvement))
+            or float(min_improvement) < 0
+        ):
+            errors.append(
+                "generic_island_model.common_panel_replay.min_improvement "
+                "must be a finite non-negative number"
             )
 
     # --- NSGA-II contract ---

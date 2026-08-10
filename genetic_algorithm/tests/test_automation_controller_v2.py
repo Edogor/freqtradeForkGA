@@ -87,7 +87,7 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources(
     assert policy.max_concurrent == 1
     assert policy.max_continuation_parent_waves == 3
     assert policy.max_remembered_parent_candidates == 8
-    assert policy.planner_policy.child_search_space_version == "automation-island-v2.1"
+    assert policy.planner_policy.child_search_space_version == "automation-island-v2.2"
     assert policy.selection_policy.allow_continuation_candidates is True
     assert policy.selection_policy.continuation_min_scenario_net_return == 0.0
     assert policy.selection_policy.continuation_min_profitable_scenario_ratio == 0.75
@@ -102,7 +102,11 @@ def test_real_preset_preflight_proves_pair_split_data_and_resources(
         resolved["fitness_penalties"]["target_trades_per_active_month"]
         == 5.0
     )
-    assert resolved["fitness_weights"]["trade_frequency"] == 0.10
+    assert resolved["fitness_weights"]["trade_frequency"] == 0.06
+    assert resolved["fitness_weights"]["profit"] == 0.34
+    assert resolved["fitness_weights"]["profit_factor"] == 0.20
+    assert resolved["fitness_bounds"]["profit_factor_break_even_normalization"] is True
+    assert resolved["fitness_penalties"]["pair_trade_coverage_exponent"] == 0.5
     assert resolved["fitness_weights"]["drawdown_duration"] == 0.11
     assert resolved["strategy_constraints"]["stoploss_range"] == [-0.12, -0.03]
     assert resolved["strategy_constraints"]["max_open_trades_range"] == [3, 3]

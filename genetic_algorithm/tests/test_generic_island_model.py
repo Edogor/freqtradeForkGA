@@ -13,7 +13,7 @@ Tests cover:
 - Integration with run_ga.py branching
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from genetic_algorithm.core.generic_island_model import (
     ALL_INDICATORS,
@@ -170,6 +170,37 @@ def _create_model_from_config(config):
         os.unlink(tmp_path)
 
     return model
+
+
+class TestPeriodicCommonPanelReplay:
+    def test_replay_every_third_generation_and_stop_after_stagnation(self):
+        config = _minimal_config(num_islands=1)
+        config['generic_island_model']['common_panel_replay'] = {
+            'enabled': True,
+            'interval': 3,
+            'top_n_per_island': 1,
+            'early_stop_patience': 2,
+            'min_improvement': 0.01,
+        }
+        model = _create_model_from_config(config)
+        candidate = _make_individual(fitness=0.6)
+        model._evaluated_generation_elites = {'island_0': [candidate]}
+        panel = MagicMock(panel_id='panel_v1_' + 'a' * 24)
+        model._create_common_replay_evaluator = MagicMock(
+            return_value=(MagicMock(), panel)
+        )
+
+        with patch(
+            'genetic_algorithm.core.generic_island_model.replay_on_common_panel',
+            return_value=[candidate],
+        ) as replay:
+            for generation in range(9):
+                model._maybe_replay_common_panel(generation)
+
+        assert replay.call_count == 3
+        assert [item['generation'] for item in model.common_panel_replay_history] == [2, 5, 8]
+        assert model.common_panel_replay_history[-1]['early_stop_triggered'] is True
+        assert model._shutdown_requested is True
 
 
 # ══════════════════════════════════════════════════════════════════════

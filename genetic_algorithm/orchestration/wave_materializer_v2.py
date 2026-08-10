@@ -761,6 +761,9 @@ def materialize_evolution_wave(
                 final_test_ledger_path=ledger_path,
                 created_at=materialized_at,
                 top_n=top_n,
+                replay_input_seeds=(
+                    experiment.arm_type == ExperimentArmType.REPLICATION
+                ),
             )
             binding = WorkerBindingV2(
                 worker_kind=WorkerKind(prepared.spec.worker_kind),

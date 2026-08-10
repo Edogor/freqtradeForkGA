@@ -60,7 +60,7 @@ PROVIDERS = [
 ]
 
 
-def test_single_provider(provider_config: dict) -> dict:
+def probe_single_provider(provider_config: dict) -> dict:
     """Test a single LLM provider.
     
     Returns:
@@ -127,7 +127,7 @@ def test_single_provider(provider_config: dict) -> dict:
     return result
 
 
-def test_router(providers_list: list) -> dict:
+def probe_router(providers_list: list) -> dict:
     """Test the router with multiple providers.
     
     Returns:
@@ -199,7 +199,7 @@ def test_router(providers_list: list) -> dict:
     return result
 
 
-def test_failover() -> dict:
+def probe_failover() -> dict:
     """Test router failover by using a bad key for the first provider."""
     from genetic_algorithm.llm.router import LLMProviderRouter
     
@@ -322,7 +322,7 @@ def main():
     print("-" * 40)
     provider_results = []
     for p in PROVIDERS:
-        result = test_single_provider(p)
+        result = probe_single_provider(p)
         provider_results.append(result)
         print_result(result, indent=1)
         print()
@@ -330,14 +330,14 @@ def main():
     # Test router
     print("3. ROUTER TEST (Multi-Provider)")
     print("-" * 40)
-    router_result = test_router(PROVIDERS)
+    router_result = probe_router(PROVIDERS)
     print_result(router_result, indent=1)
     print()
     
     # Test failover
     print("4. FAILOVER TEST")
     print("-" * 40)
-    failover_result = test_failover()
+    failover_result = probe_failover()
     print_result(failover_result, indent=1)
     print()
     

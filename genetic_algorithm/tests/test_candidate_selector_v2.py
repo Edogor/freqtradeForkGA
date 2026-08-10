@@ -42,6 +42,7 @@ def _candidate(
     min_scenario_return: float = 0.02,
     profitable_scenario_ratio: float | None = None,
     max_drawdown_duration_days: float = 180,
+    trades_per_active_month: float = 10,
 ) -> CandidateAnalysisV2:
     phenotype_hash = marker * 64
     candidate_ids = [f"candidate-{marker}-1", f"candidate-{marker}-2"]
@@ -82,7 +83,7 @@ def _candidate(
         median_profit_factor=1.5,
         median_win_rate=0.6,
         min_effective_sample_size=40,
-        min_trades_per_active_month=10,
+        min_trades_per_active_month=trades_per_active_month,
         min_scenario_net_return=min_scenario_return,
         profitable_scenario_ratio=(
             profitable_scenario_ratio
@@ -220,6 +221,39 @@ def test_high_return_does_not_compensate_higher_tail_risk_in_dominance():
     assert selection.assessments[0].objective_values[
         ParetoObjective.MAX_DRAWDOWN_UCB
     ] == pytest.approx(0.08)
+
+
+def test_balanced_first_selection_includes_activity_and_recovery_without_new_gate():
+    risk_first = _candidate(
+        "a",
+        annual_return_lcb=0.08,
+        expectancy_lcb=0.002,
+        drawdown_ucb=0.08,
+        es_ucb=0.01,
+        trades_per_active_month=2.0,
+        max_drawdown_duration_days=600,
+    )
+    balanced = _candidate(
+        "b",
+        annual_return_lcb=0.11,
+        expectancy_lcb=0.003,
+        drawdown_ucb=0.14,
+        es_ucb=0.015,
+        trades_per_active_month=5.0,
+        max_drawdown_duration_days=200,
+    )
+
+    selection = select_wave_candidates(
+        _analysis([risk_first, balanced]),
+        _policy(
+            max_selected=1,
+            first_selection_mode="BALANCED_CONTINUATION",
+        ),
+    )
+    selected = next(item for item in selection.assessments if item.selected)
+
+    assert selected.phenotype_hash == balanced.phenotype_hash
+    assert {item.pareto_rank for item in selection.assessments} == {0}
 
 
 def test_selection_is_byte_deterministic():

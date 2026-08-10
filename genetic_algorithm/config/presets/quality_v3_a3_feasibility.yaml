@@ -1,0 +1,18 @@
+# A3: feasibility-first search plus soft activity and holding targets.
+preset: quality_v3_a2_separated
+fitness_penalties: {target_trades_per_active_month: 2.5, pair_trade_coverage_exponent: 0.5}
+fitness_policy_v3:
+  enabled: true
+  policy_version: fitness-v3.0-feasibility-first
+  min_trades: 12
+  min_net_profit: 0.0
+  min_profit_factor: 1.0
+  min_profitable_pair_ratio: 0.6666666666666666
+  max_worst_pair_loss: -5.0
+  max_drawdown: 0.20
+  max_drawdown_duration_days: 120.0
+  median_hold_hours_target: 24.0
+  p90_hold_hours_target: 72.0
+  holding_soft_weight: 0.10
+promotion_v2: {policy_version: quality-v3-a3-search}
+qualification_v3: {policy_version: quality-v3-a3-search}
