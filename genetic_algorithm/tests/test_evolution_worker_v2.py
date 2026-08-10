@@ -57,6 +57,7 @@ from genetic_algorithm.orchestration.result_contract import (
     EvaluationStatus,
 )
 from genetic_algorithm.orchestration.runner_v2 import (
+    _validate_supported_config,
     prepare_and_queue_standard_attempt,
 )
 from genetic_algorithm.orchestration.shadow_scheduler_v2 import ShadowSchedulerConfigV2
@@ -105,6 +106,8 @@ def evolution_context_factory(tmp_path: Path):
         search_seed_salt: int = 0,
         replay_input_seeds: bool = False,
         top_n: int = 1,
+        quality_profile: bool = False,
+        validate_top_n_only: int = 0,
     ) -> _Context:
         nonlocal sequence
         sequence += 1
@@ -168,7 +171,11 @@ def evolution_context_factory(tmp_path: Path):
         if generic_island:
             config["safety_profile"].update(
                 {
-                    "name": "automation_island_v2",
+                    "name": (
+                        "quality_experiment_v3"
+                        if quality_profile
+                        else "automation_island_v2"
+                    ),
                     "automation_eligible": False,
                 }
             )
@@ -227,7 +234,7 @@ def evolution_context_factory(tmp_path: Path):
                 "weight_train": 0.6,
                 "weight_val": 0.4,
                 "min_val_fitness": 0.0,
-                "validate_top_n_only": 0,
+                "validate_top_n_only": validate_top_n_only,
             }
         config["promotion_v2"] = {"enabled": True, **policy.model_dump(mode="json")}
         created_at = datetime.now(UTC) - timedelta(seconds=20)
@@ -401,6 +408,31 @@ def test_generic_island_worker_is_bound_and_uses_pair_split(
         island["seed"]
         for island in context.config["generic_island_model"]["islands"]
     ] == [9001, 9002]
+
+
+def test_quality_experiment_profile_allows_deferred_pair_validation(
+    evolution_context_factory,
+):
+    context = evolution_context_factory(
+        generic_island=True,
+        quality_profile=True,
+        validate_top_n_only=3,
+    )
+
+    _validate_supported_config(context.config)
+    loaded = load_evolution_worker(
+        context.prepared.spec_path,
+        expected_spec_sha256=context.prepared.spec_file_sha256,
+    )
+
+    assert loaded.spec.worker_kind == "GENERIC_ISLAND_EVOLUTION"
+    assert loaded.resolved_config["safety_profile"] == {
+        "name": "quality_experiment_v3",
+        "enforce": True,
+        "shadow_mode": True,
+        "automation_eligible": False,
+    }
+    assert loaded.resolved_config["pair_validation"]["validate_top_n_only"] == 3
 
 
 def test_generic_island_worker_delivers_strict_parent_seed(

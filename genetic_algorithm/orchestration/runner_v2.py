@@ -86,21 +86,29 @@ def _attempt_id(experiment_name: str, created_at: datetime) -> str:
 
 
 def _validate_supported_config(config: Mapping[str, Any]) -> None:
+    supported_safety_profiles = {
+        "safe_v2",
+        "automation_island_v2",
+        "quality_experiment_v3",
+    }
     if config.get("generic_island_model", {}).get("enabled", False):
         safety = config.get("safety_profile", {})
         if (
-            safety.get("name") != "automation_island_v2"
+            safety.get("name") not in {
+                "automation_island_v2",
+                "quality_experiment_v3",
+            }
             or not safety.get("enforce", False)
             or not safety.get("shadow_mode", False)
             or safety.get("automation_eligible", False)
         ):
             raise CanonicalRunnerError(
-                "generic island evolution requires enforced automation_island_v2"
+                "generic island evolution requires an enforced shadow-only safety profile"
             )
     if config.get("island_model", {}).get("enabled", False):
         raise CanonicalRunnerError("island evolution has no canonical V2 worker yet")
     safety = config.get("safety_profile", {})
-    if safety.get("name") not in {"safe_v2", "automation_island_v2"} or not safety.get(
+    if safety.get("name") not in supported_safety_profiles or not safety.get(
         "enforce", False
     ):
         raise CanonicalRunnerError(

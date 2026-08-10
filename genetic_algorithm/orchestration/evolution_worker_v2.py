@@ -314,13 +314,16 @@ def _validate_evolution_contract(
         raise EvolutionWorkerError("only one island engine may be enabled")
     if generic_enabled:
         if (
-            safety.get("name") != "automation_island_v2"
+            safety.get("name") not in {
+                "automation_island_v2",
+                "quality_experiment_v3",
+            }
             or not safety.get("enforce", False)
             or not safety.get("shadow_mode", False)
             or safety.get("automation_eligible", False)
         ):
             raise EvolutionWorkerError(
-                "generic-island evolution requires enforced automation_island_v2"
+                "generic-island evolution requires an enforced shadow-only safety profile"
             )
         if generic.get("parallel_islands", False):
             raise EvolutionWorkerError(
@@ -351,7 +354,10 @@ def _validate_evolution_contract(
             raise EvolutionWorkerError(
                 "automation_island_v2 requires pair_validation.enabled"
             )
-        if pair_validation.get("validate_top_n_only", 0) != 0:
+        if (
+            safety.get("name") == "automation_island_v2"
+            and pair_validation.get("validate_top_n_only", 0) != 0
+        ):
             raise EvolutionWorkerError(
                 "automation_island_v2 must validate every candidate across the pair split"
             )
