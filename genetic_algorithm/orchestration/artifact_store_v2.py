@@ -264,6 +264,24 @@ class V2ArtifactStore:
             _canonical_model_bytes(seed),
         )
 
+    def write_evolution_checkpoint_input(
+        self,
+        *,
+        filename: str,
+        payload: bytes,
+    ) -> Path:
+        """Bind one verified Generic-Island resume checkpoint as worker input."""
+
+        safe_name = _safe_id(filename, "checkpoint filename")
+        if not safe_name.startswith("island_checkpoint_gen") or not safe_name.endswith(
+            ".json"
+        ):
+            raise ArtifactIntegrityError("resume checkpoint filename is not canonical")
+        return self._write_immutable(
+            Path("inputs") / "checkpoints" / safe_name,
+            payload,
+        )
+
     def write_engine_config(self, config: Mapping[str, Any]) -> Path:
         """Persist the derived, attempt-local engine config as immutable evidence."""
 

@@ -96,6 +96,11 @@ class ScenarioMetricsV2(StrictV2Model):
     role: ScenarioRole
     period_start: date
     period_end: date
+    # Raw measured UTC boundaries are distinct from the declared scenario
+    # dates. Hardcore strict replay requires both fields and verifies the
+    # timeframe-specific first and last candle timestamps.
+    measured_period_start: Optional[datetime] = None
+    measured_period_end: Optional[datetime] = None
     cost_multiplier: float = Field(gt=0)
 
     status: EvaluationStatus

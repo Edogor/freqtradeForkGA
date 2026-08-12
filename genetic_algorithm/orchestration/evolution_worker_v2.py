@@ -180,6 +180,22 @@ class EvolutionWorkerSeedInputV2(StrictV2Model):
         return self
 
 
+class EvolutionWorkerCheckpointInputV2(StrictV2Model):
+    relative_path: str = Field(min_length=1)
+    sha256: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def _canonical_path(self) -> "EvolutionWorkerCheckpointInputV2":
+        relative = _safe_relative_path(self.relative_path)
+        if relative.parent != Path("inputs/checkpoints"):
+            raise ValueError("resume checkpoint must use the canonical input directory")
+        if not relative.name.startswith("island_checkpoint_gen") or not relative.name.endswith(
+            ".json"
+        ):
+            raise ValueError("resume checkpoint filename is not canonical")
+        return self
+
+
 class EvolutionWorkerSpecV2(StrictV2Model):
     schema_version: Literal["2.0"] = "2.0"
     worker_kind: Literal[
@@ -195,6 +211,7 @@ class EvolutionWorkerSpecV2(StrictV2Model):
     # RunEngine currently returns at most ten standard-GA finalists.
     top_n: int = Field(default=5, ge=1, le=10)
     seeds: list[EvolutionWorkerSeedInputV2] = Field(default_factory=list)
+    resume_checkpoint: EvolutionWorkerCheckpointInputV2 | None = None
     replay_input_seeds: bool = False
     input_hashes: dict[str, str] = Field(min_length=1)
 
@@ -220,6 +237,11 @@ class EvolutionWorkerSpecV2(StrictV2Model):
             V2ArtifactStore.CODE_MANIFEST_NAME,
             V2ArtifactStore.SPLIT_MANIFEST_NAME,
             *(item.relative_path for item in self.seeds),
+            *(
+                [self.resume_checkpoint.relative_path]
+                if self.resume_checkpoint is not None
+                else []
+            ),
         }
         if set(self.input_hashes) != required:
             raise ValueError("worker input hash matrix is incomplete or contains extras")
@@ -317,6 +339,7 @@ def _validate_evolution_contract(
             safety.get("name") not in {
                 "automation_island_v2",
                 "quality_experiment_v3",
+                "hardcore_multipair_v1",
             }
             or not safety.get("enforce", False)
             or not safety.get("shadow_mode", False)
@@ -355,7 +378,10 @@ def _validate_evolution_contract(
                 "automation_island_v2 requires pair_validation.enabled"
             )
         if (
-            safety.get("name") == "automation_island_v2"
+            safety.get("name") in {
+                "automation_island_v2",
+                "hardcore_multipair_v1",
+            }
             and pair_validation.get("validate_top_n_only", 0) != 0
         ):
             raise EvolutionWorkerError(
@@ -416,6 +442,7 @@ def prepare_evolution_worker(
     created_at: datetime,
     top_n: int = 5,
     replay_input_seeds: bool = False,
+    resume_checkpoint_path: str | Path | None = None,
 ) -> PreparedEvolutionWorkerV2:
     """Persist and hash every input before an evolution attempt can be queued."""
 
@@ -470,7 +497,28 @@ def prepare_evolution_worker(
                 phenotype_hash=seed.phenotype_hash,
             )
         )
-    input_paths = [*_base_input_paths(), *(item.relative_path for item in worker_seeds)]
+    checkpoint_input: EvolutionWorkerCheckpointInputV2 | None = None
+    if resume_checkpoint_path is not None:
+        checkpoint_source = Path(resume_checkpoint_path).resolve()
+        if not checkpoint_source.is_file():
+            raise EvolutionWorkerError("resume checkpoint does not exist")
+        checkpoint_target = store.write_evolution_checkpoint_input(
+            filename=checkpoint_source.name,
+            payload=checkpoint_source.read_bytes(),
+        )
+        checkpoint_input = EvolutionWorkerCheckpointInputV2(
+            relative_path=checkpoint_target.relative_to(root).as_posix(),
+            sha256=_sha256_file(checkpoint_target),
+        )
+    input_paths = [
+        *_base_input_paths(),
+        *(item.relative_path for item in worker_seeds),
+        *(
+            [checkpoint_input.relative_path]
+            if checkpoint_input is not None
+            else []
+        ),
+    ]
     input_hashes = {
         relative: _sha256_file(root / _safe_relative_path(relative))
         for relative in sorted(input_paths)
@@ -485,6 +533,7 @@ def prepare_evolution_worker(
         output_layout=AttemptOutputLayoutV2.for_artifact_root(root),
         top_n=top_n,
         seeds=worker_seeds,
+        resume_checkpoint=checkpoint_input,
         replay_input_seeds=replay_input_seeds,
         input_hashes=input_hashes,
     )
@@ -807,7 +856,14 @@ def _run_evolution_engine(
             visualize=False,
             interactive=False,
         )
-        algorithm.set_strict_initial_seeds(list(seeds))
+        if config.get("safety_profile", {}).get("name") == "hardcore_multipair_v1":
+            # Across-run champions are intentionally confined to the three
+            # configured archive islands.  The other nine islands remain
+            # fully fresh; treating these as ordinary strict seeds would
+            # inject every champion into every island and collapse diversity.
+            algorithm.set_archive_initial_seeds(list(seeds))
+        else:
+            algorithm.set_strict_initial_seeds(list(seeds))
         results = algorithm.evolve()
         return extract_island_finalists(
             results,
@@ -907,7 +963,7 @@ def run_evolution_worker(
     backtester_factory: Callable[[dict[str, Any]], Any] | None = None,
     clock: Callable[[], datetime] = _utc_now,
 ) -> AttemptResultV2:
-    """Search with legacy fitness, then commit only strict V2 replay evidence."""
+    """Search with configured fitness, then commit immutable six-pair replay evidence."""
 
     try:
         loaded = load_evolution_worker(
@@ -935,6 +991,23 @@ def run_evolution_worker(
         config_path = store.write_engine_config(engine_config)
         if config_path.resolve() != Path(loaded.spec.output_layout.engine_config_path).resolve():
             raise EvolutionWorkerError("engine config path differs from output layout")
+        if loaded.spec.resume_checkpoint is not None:
+            checkpoint_input = (
+                Path(loaded.spec.artifact_root)
+                / loaded.spec.resume_checkpoint.relative_path
+            )
+            if _sha256_file(checkpoint_input) != loaded.spec.resume_checkpoint.sha256:
+                raise EvolutionWorkerError("resume checkpoint hash changed after input verification")
+            checkpoint_target = (
+                Path(loaded.spec.output_layout.checkpoint_dir)
+                / checkpoint_input.name
+            )
+            checkpoint_target.parent.mkdir(parents=True, exist_ok=True)
+            if checkpoint_target.exists():
+                if _sha256_file(checkpoint_target) != loaded.spec.resume_checkpoint.sha256:
+                    raise EvolutionWorkerError("materialized resume checkpoint differs")
+            else:
+                checkpoint_target.write_bytes(checkpoint_input.read_bytes())
         # Keep the attempt-local filesystem contract independent of tracker
         # implementation details. Generic-island sub-GAs are coordinated
         # directly and therefore must not initialise standalone run trackers.
@@ -973,8 +1046,7 @@ def run_evolution_worker(
             store.write_evolution_seed(seed)
         with attempt_output_scope(loaded.spec.output_layout, phase="replay"):
             return runner.execute(
-                [seed.frozen_candidate for seed in output_seeds],
-                finished_at=clock(),
+                [seed.frozen_candidate for seed in output_seeds]
             )
     except Exception as exc:
         return _finalize_worker_failure(spec_path, exc, finished_at=clock())

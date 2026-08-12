@@ -220,9 +220,18 @@ def apply_fitness_sharing(population: 'Population', sigma_share: float = 0.3,
     else:
         distances = distance_matrix
     
-    # Calculate niche counts for each individual
+    # Calculate niche counts for each individual.  Traditional fitness
+    # sharing divides a positive score by the niche count.  For a maximized
+    # signed score, division would make a negative value *less* negative and
+    # therefore reward crowding.  Multiplication is the signed counterpart:
+    # it moves a negative score downward while preserving zero and keeps the
+    # historical positive-only behaviour unchanged.
     for i, individual in enumerate(individuals):
-        if individual.raw_fitness is None or individual.raw_fitness <= 0:
+        if individual.raw_fitness is None:
+            continue
+
+        raw_fitness = float(individual.raw_fitness)
+        if not math.isfinite(raw_fitness):
             continue
         
         # Calculate sharing function
@@ -236,7 +245,12 @@ def apply_fitness_sharing(population: 'Population', sigma_share: float = 0.3,
         
         # Adjust fitness by niche count (shared fitness)
         if niche_count > 0:
-            shared_fitness = individual.raw_fitness / niche_count
+            if raw_fitness > 0:
+                shared_fitness = raw_fitness / niche_count
+            elif raw_fitness < 0:
+                shared_fitness = raw_fitness * niche_count
+            else:
+                shared_fitness = 0.0
             individual.set_shared_fitness(shared_fitness)
 
 

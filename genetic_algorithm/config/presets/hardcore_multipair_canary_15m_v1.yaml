@@ -1,0 +1,70 @@
+# Reduced dual-lane integration canary.  It retains all twelve specialists and
+# every safety/score/pair invariant, but executes one tiny generation.
+
+config_schema_version: 2
+preset: hardcore_multipair_15m_v1
+
+safety_profile:
+  canary: true
+
+genetic_algorithm:
+  population_size: 3
+  generations: 1
+  elite_size: 1
+  tournament_size: 2
+
+output:
+  top_n: 2
+
+generic_island_model:
+  population_per_island: 3
+  generations: 1
+  common_panel_replay:
+    enabled: true
+    interval: 3
+    top_n_per_island: 2
+    early_stop_patience: 4
+    min_improvement: 0.25
+    relative_min_improvement: 0.005
+    min_generation: 9
+  islands:
+    - &momentum1
+      name: momentum-1
+      population_size: 3
+      generations: 1
+      seed: 42
+      indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - {<<: *momentum1, name: momentum-2, seed: 43}
+    - {<<: *momentum1, name: momentum-3, seed: 44}
+    - &trend1
+      name: trend-1
+      population_size: 3
+      generations: 1
+      seed: 45
+      indicator_pool: [EMA, SMA, TEMA, KAMA, SUPERTREND, AROON, PSAR]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - {<<: *trend1, name: trend-2, seed: 46}
+    - {<<: *trend1, name: trend-3, seed: 47}
+    - &volatility1
+      name: volatility-volume-1
+      population_size: 3
+      generations: 1
+      seed: 48
+      indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - {<<: *volatility1, name: volatility-volume-2, seed: 49}
+    - {<<: *volatility1, name: volatility-volume-3, seed: 50}
+    - &mixed1
+      name: mixed-1
+      population_size: 3
+      generations: 1
+      seed: 51
+      indicator_pool: [RSI, MACD, EMA, SUPERTREND, BBANDS, ATR, CMF, VWAP]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - {<<: *mixed1, name: mixed-2, seed: 52}
+    - {<<: *mixed1, name: mixed-3, seed: 53}

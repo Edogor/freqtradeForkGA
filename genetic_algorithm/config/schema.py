@@ -22,6 +22,7 @@ import copy
 import logging
 import math
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -177,6 +178,8 @@ DEFAULTS: Dict[str, Any] = {
     # === Strategy constraints ===
     "strategy_constraints": {
         "timeframes": ["5m", "15m", "1h"],
+        "startup_candle_floor": None,
+        "startup_candle_cap": None,
         "stoploss_range": [-0.20, -0.05],
         "roi_range": [0.01, 0.10],
         "max_open_trades_range": [1, 5],
@@ -383,11 +386,23 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
             "p90_hold_hours_target": 72.0,
         },
     },
+    # Search-only score used by the hardcore multi-pair campaign.  This is a
+    # deliberately raw contract: no confidence bounds, ESS, Sharpe-family
+    # statistic, gate state or deferred validation may influence selection.
+    "raw_multipair_score": {
+        "enabled": False,
+        "policy_version": "raw-multipair-score-v1",
+        "development_pairs": ["BTC/USDT", "SOL/USDT", "XRP/USDT"],
+        "validation_pairs": ["BNB/USDT", "ETH/USDT", "PEPE/USDT"],
+        "period_start": "2023-05-09",
+        "period_end": "2026-03-26",
+    },
     "safety_profile": {
         "name": "safe_v2",
         "enforce": True,
         "shadow_mode": True,
         "automation_eligible": False,
+        "canary": False,
     },
     "backtesting": {
         "timeframe": "1h",
@@ -421,6 +436,24 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
             "top_n_per_island": 3,
             "early_stop_patience": 4,
             "min_improvement": 0.002,
+            "relative_min_improvement": 0.0,
+            "min_generation": 1,
+            "incumbent_score": None,
+        },
+        "diversity_recovery": {
+            "enabled": False,
+            "island_threshold_count": 1,
+            "consecutive_checks_before_recovery": 2,
+            "consecutive_checks_after_recovery": 2,
+            "duplicate_fraction_threshold": 0.75,
+            "genetic_diversity_threshold": 0.10,
+            "replacement_fraction": 0.25,
+            "recovery_mutation_rate": 0.35,
+        },
+        "archive_seeding": {
+            "enabled": False,
+            "island_names": ["island-1"],
+            "max_seeds_per_island": 4,
         },
         "specialization": {
             "rotate_seeds": True,
@@ -588,6 +621,7 @@ _OPTIONAL_CONFIG_TYPES: Dict[str, type] = {
     "genetic_algorithm.max_runtime_minutes": int,
     "parallel_evaluation.num_workers": int,
     "generic_island_model.generations": int,
+    "generic_island_model.common_panel_replay.incumbent_score": float,
     "strategy_constraints.allow_indicators": list,
 }
 
@@ -628,6 +662,47 @@ _AUTOMATION_ISLAND_V2_DISABLED_FEATURES: Tuple[Tuple[str, ...], ...] = (
     ("multi_timeframe",),
 )
 
+_HARDCORE_MULTIPAIR_V1_DISABLED_FEATURES: Tuple[Tuple[str, ...], ...] = (
+    ("walk_forward",),
+    ("holdout_validation",),
+    ("holdout_monitoring",),
+    ("monte_carlo",),
+    ("deflated_sharpe",),
+    ("surrogate",),
+    ("regime_aware",),
+    ("island_model",),
+    ("cpcv",),
+    ("sis",),
+    ("llm",),
+    ("advanced", "llm"),
+    ("short_selling",),
+    ("multi_timeframe",),
+    ("qualification_v3",),
+    ("fitness_policy_v3",),
+    ("nsga2",),
+)
+
+_HARDCORE_RECURSIVE_FEATURE_NAMES = frozenset(
+    {
+        "walk_forward",
+        "holdout_validation",
+        "holdout_monitoring",
+        "monte_carlo",
+        "deflated_sharpe",
+        "surrogate",
+        "regime_aware",
+        "cpcv",
+        "pbo",
+        "sis",
+        "llm",
+        "short_selling",
+        "multi_timeframe",
+        "qualification_v3",
+        "fitness_policy_v3",
+        "nsga2",
+    }
+)
+
 
 def _nested_config(config: Dict[str, Any], path: Sequence[str]) -> Dict[str, Any]:
     """Return a nested config mapping, or an empty mapping when absent."""
@@ -637,6 +712,47 @@ def _nested_config(config: Dict[str, Any], path: Sequence[str]) -> Dict[str, Any
             return {}
         value = value.get(key, {})
     return value if isinstance(value, dict) else {}
+
+
+def _recursively_enabled_forbidden_features(
+    value: Any,
+    *,
+    prefix: str,
+) -> List[str]:
+    """Return forbidden feature paths enabled inside an island subtree.
+
+    Island configuration is intentionally inspected recursively so a child
+    cannot re-enable a robustness feature hidden below an otherwise safe
+    parent.  Both ``feature: {enabled: true}`` and the historical
+    ``feature_enabled: true`` spellings are rejected.
+    """
+
+    violations: List[str] = []
+    if isinstance(value, dict):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            path = _join_path(prefix, key)
+            if key in _HARDCORE_RECURSIVE_FEATURE_NAMES:
+                if child is True or (
+                    isinstance(child, dict) and child.get("enabled", False) is True
+                ):
+                    violations.append(path)
+            elif key.endswith("_enabled"):
+                feature = key[: -len("_enabled")]
+                if feature in _HARDCORE_RECURSIVE_FEATURE_NAMES and child is True:
+                    violations.append(path)
+            violations.extend(
+                _recursively_enabled_forbidden_features(child, prefix=path)
+            )
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            violations.extend(
+                _recursively_enabled_forbidden_features(
+                    child,
+                    prefix=f"{prefix}[{index}]",
+                )
+            )
+    return violations
 
 
 # ---------------------------------------------------------------------------
@@ -918,6 +1034,62 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
                 "pair_validation.max_pair_loss_pct must be a finite non-negative number"
             )
 
+    raw_score = _nested_config(config, ("raw_multipair_score",))
+    if raw_score.get("enabled", False):
+        if raw_score.get("policy_version") != "raw-multipair-score-v1":
+            errors.append(
+                "raw_multipair_score.policy_version must be raw-multipair-score-v1"
+            )
+        development_pairs = raw_score.get("development_pairs", [])
+        validation_pairs = raw_score.get("validation_pairs", [])
+        if (
+            not isinstance(development_pairs, list)
+            or len(development_pairs) != 3
+            or any(not isinstance(pair, str) or not pair for pair in development_pairs)
+            or len(set(development_pairs)) != 3
+        ):
+            errors.append(
+                "raw_multipair_score.development_pairs must contain three unique pairs"
+            )
+        if (
+            not isinstance(validation_pairs, list)
+            or len(validation_pairs) != 3
+            or any(not isinstance(pair, str) or not pair for pair in validation_pairs)
+            or len(set(validation_pairs)) != 3
+        ):
+            errors.append(
+                "raw_multipair_score.validation_pairs must contain three unique pairs"
+            )
+        if (
+            isinstance(development_pairs, list)
+            and isinstance(validation_pairs, list)
+            and all(isinstance(pair, str) for pair in development_pairs)
+            and all(isinstance(pair, str) for pair in validation_pairs)
+        ):
+            overlap = set(development_pairs) & set(validation_pairs)
+            if overlap:
+                errors.append(
+                    "raw_multipair_score pair groups must be disjoint: "
+                    + ", ".join(sorted(overlap))
+                )
+        for key in ("period_start", "period_end"):
+            raw_value = raw_score.get(key)
+            try:
+                parsed = date.fromisoformat(raw_value) if isinstance(raw_value, str) else None
+            except ValueError:
+                parsed = None
+            if parsed is None:
+                errors.append(f"raw_multipair_score.{key} must be an ISO date")
+        try:
+            if date.fromisoformat(str(raw_score.get("period_end"))) < date.fromisoformat(
+                str(raw_score.get("period_start"))
+            ):
+                errors.append(
+                    "raw_multipair_score.period_end must not precede period_start"
+                )
+        except ValueError:
+            pass
+
     qualification_v3 = _nested_config(config, ("qualification_v3",))
     if qualification_v3.get("enabled", False):
         try:
@@ -944,8 +1116,13 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         config, ("generic_island_model", "common_panel_replay")
     )
     if common_replay.get("enabled", False):
-        for key in ("interval", "top_n_per_island", "early_stop_patience"):
-            value = common_replay.get(key)
+        for key in (
+            "interval",
+            "top_n_per_island",
+            "early_stop_patience",
+            "min_generation",
+        ):
+            value = common_replay.get(key, 1) if key == "min_generation" else common_replay.get(key)
             if type(value) is not int or value < 1:
                 errors.append(
                     f"generic_island_model.common_panel_replay.{key} "
@@ -961,6 +1138,86 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             errors.append(
                 "generic_island_model.common_panel_replay.min_improvement "
                 "must be a finite non-negative number"
+            )
+        relative_min_improvement = common_replay.get(
+            "relative_min_improvement",
+            0.0,
+        )
+        if (
+            isinstance(relative_min_improvement, bool)
+            or not isinstance(relative_min_improvement, (int, float))
+            or not math.isfinite(float(relative_min_improvement))
+            or float(relative_min_improvement) < 0
+        ):
+            errors.append(
+                "generic_island_model.common_panel_replay."
+                "relative_min_improvement must be a finite non-negative number"
+            )
+        incumbent_score = common_replay.get("incumbent_score")
+        if incumbent_score is not None and (
+            isinstance(incumbent_score, bool)
+            or not isinstance(incumbent_score, (int, float))
+            or not math.isfinite(float(incumbent_score))
+        ):
+            errors.append(
+                "generic_island_model.common_panel_replay.incumbent_score "
+                "must be null or a finite number"
+            )
+    diversity_recovery = _nested_config(
+        config,
+        ("generic_island_model", "diversity_recovery"),
+    )
+    if diversity_recovery.get("enabled", False):
+        for key in (
+            "island_threshold_count",
+            "consecutive_checks_before_recovery",
+            "consecutive_checks_after_recovery",
+        ):
+            value = diversity_recovery.get(key)
+            if type(value) is not int or value < 1:
+                errors.append(
+                    f"generic_island_model.diversity_recovery.{key} "
+                    "must be a positive integer"
+                )
+        for key in (
+            "duplicate_fraction_threshold",
+            "genetic_diversity_threshold",
+            "replacement_fraction",
+            "recovery_mutation_rate",
+        ):
+            value = diversity_recovery.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                errors.append(
+                    f"generic_island_model.diversity_recovery.{key} "
+                    "must be between 0 and 1"
+                )
+
+    archive_seeding = _nested_config(
+        config,
+        ("generic_island_model", "archive_seeding"),
+    )
+    if archive_seeding.get("enabled", False):
+        island_names = archive_seeding.get("island_names", [])
+        if (
+            not isinstance(island_names, list)
+            or not island_names
+            or any(not isinstance(name, str) or not name for name in island_names)
+            or len(island_names) != len(set(island_names))
+        ):
+            errors.append(
+                "generic_island_model.archive_seeding.island_names must be a "
+                "non-empty list of unique names"
+            )
+        max_seeds = archive_seeding.get("max_seeds_per_island")
+        if type(max_seeds) is not int or max_seeds < 1:
+            errors.append(
+                "generic_island_model.archive_seeding.max_seeds_per_island "
+                "must be a positive integer"
             )
 
     # --- NSGA-II contract ---
@@ -1253,6 +1510,222 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             errors.append("automation_island_v2 requires evaluation_v2.mark_to_market: true")
         if not _nested_config(config, ("promotion_v2",)).get("enabled", False):
             errors.append("automation_island_v2 requires promotion_v2.enabled: true")
+    if safety.get("name") == "hardcore_multipair_v1" and safety.get(
+        "enforce",
+        True,
+    ):
+        label = "hardcore_multipair_v1"
+        if config.get("config_schema_version") != 2:
+            errors.append(f"{label} requires config_schema_version: 2")
+        if ga.get("mode") != "single_objective":
+            errors.append(f"{label} requires genetic_algorithm.mode: single_objective")
+        if not safety.get("shadow_mode", False):
+            errors.append(f"{label} requires shadow_mode: true")
+        if safety.get("automation_eligible", False):
+            errors.append(f"{label} forbids automation_eligible: true")
+        if max_runtime_minutes is None or max_runtime_minutes > 540:
+            errors.append(
+                f"{label} requires max_runtime_minutes <= 540 to reserve "
+                "watchdog finalization headroom"
+            )
+        if _nested_config(config, ("storage",)).get("checkpoint_interval") != 1:
+            errors.append(f"{label} requires a checkpoint after every generation")
+        if ga.get("allow_self_crossover", True):
+            errors.append(f"{label} requires allow_self_crossover: false")
+        if ga.get("random_immigrants") != 2:
+            errors.append(f"{label} requires exactly two random immigrants")
+        if not ga.get("fitness_sharing", False):
+            errors.append(f"{label} requires fitness sharing")
+
+        for path in _HARDCORE_MULTIPAIR_V1_DISABLED_FEATURES:
+            feature = _nested_config(config, path)
+            if feature.get("enabled", False):
+                errors.append(f"{label} forbids {'.'.join(path)}.enabled: true")
+
+        generic_island = _nested_config(config, ("generic_island_model",))
+        if not generic_island.get("enabled", False):
+            errors.append(f"{label} requires generic_island_model.enabled: true")
+        if generic_island.get("parallel_islands", False):
+            errors.append(f"{label} requires one shared worker pool")
+        if generic_island.get("num_islands") != 12:
+            errors.append(f"{label} requires generic_island_model.num_islands: 12")
+        islands = generic_island.get("islands", [])
+        if not isinstance(islands, list) or len(islands) != 12:
+            errors.append(f"{label} requires exactly twelve explicit islands")
+            islands = []
+        island_names = [
+            island.get("name") for island in islands if isinstance(island, dict)
+        ]
+        if len(island_names) != len(set(island_names)) or any(
+            not isinstance(name, str) or not name for name in island_names
+        ):
+            errors.append(f"{label} requires twelve unique island names")
+        if not safety.get("canary", False):
+            if ga.get("population_size") != 12 or ga.get("generations") != 30:
+                errors.append(f"{label} production GA requires population 12 x 30 generations")
+            if generic_island.get("population_per_island") != 12:
+                errors.append(f"{label} production islands require population size 12")
+            if generic_island.get("generations") != 30:
+                errors.append(f"{label} production islands require 30 generations")
+            for index, island in enumerate(islands):
+                if not isinstance(island, dict):
+                    continue
+                if island.get("population_size") != 12:
+                    errors.append(f"{label} island[{index}] requires population_size: 12")
+                if island.get("generations") != 30:
+                    errors.append(f"{label} island[{index}] requires generations: 30")
+
+        recursive_violations = sorted(
+            set(
+                _recursively_enabled_forbidden_features(
+                    generic_island,
+                    prefix="generic_island_model",
+                )
+            )
+        )
+        for path in recursive_violations:
+            errors.append(f"{label} recursively forbids enabled feature {path}")
+
+        expected_dev = ["BTC/USDT", "SOL/USDT", "XRP/USDT"]
+        expected_val = ["BNB/USDT", "ETH/USDT", "PEPE/USDT"]
+        expected_pairs = set(expected_dev) | set(expected_val)
+        raw_score = _nested_config(config, ("raw_multipair_score",))
+        if not raw_score.get("enabled", False):
+            errors.append(f"{label} requires raw_multipair_score.enabled: true")
+        if raw_score.get("policy_version") != "raw-multipair-score-v1":
+            errors.append(f"{label} requires raw-multipair-score-v1")
+        if raw_score.get("development_pairs") != expected_dev:
+            errors.append(f"{label} requires the fixed development pair group")
+        if raw_score.get("validation_pairs") != expected_val:
+            errors.append(f"{label} requires the fixed validation pair group")
+        if raw_score.get("period_start") != "2023-05-09":
+            errors.append(f"{label} requires period_start: 2023-05-09")
+        if raw_score.get("period_end") != "2026-03-26":
+            errors.append(f"{label} requires period_end: 2026-03-26")
+
+        if set(bt.get("pairs", [])) != expected_pairs or len(bt.get("pairs", [])) != 6:
+            errors.append(f"{label} requires the fixed six-pair panel")
+        if bt.get("timeframe") not in {"15m", "1h"}:
+            errors.append(f"{label} permits only 15m or 1h")
+        expected_timerange = {
+            "15m": "1683590400-1774568700",
+            "1h": "1683590400-1774566000",
+        }.get(bt.get("timeframe"))
+        if bt.get("timerange") != expected_timerange:
+            errors.append(
+                f"{label} requires the exact inclusive 2023-05-09 through "
+                f"2026-03-26 {bt.get('timeframe')} candle timerange"
+            )
+        if bt.get("fee") != 0.001 or bt.get("slippage_pct") != 0.0005:
+            errors.append(f"{label} requires deterministic 0.1% fee and 0.05% slippage")
+        if bt.get("fee_noise_std", 0.0) != 0.0:
+            errors.append(f"{label} requires fee_noise_std: 0.0")
+        if bt.get("auto_download_data", False):
+            errors.append(f"{label} forbids automatic data downloads")
+        constraints = _nested_config(config, ("strategy_constraints",))
+        if (
+            constraints.get("startup_candle_floor") != 75
+            or constraints.get("startup_candle_cap") != 75
+        ):
+            errors.append(
+                f"{label} requires the proven 75-candle startup floor/cap"
+            )
+
+        promotion = _nested_config(config, ("promotion_v2",))
+        scenarios = promotion.get("required_scenarios", [])
+        scenario_rows = [row for row in scenarios if isinstance(row, dict)]
+        expected_roles = {
+            **{pair: "TRAIN" for pair in expected_dev},
+            **{pair: "PAIR_VALIDATION" for pair in expected_val},
+        }
+        if not promotion.get("enabled", False) or len(scenario_rows) != 6:
+            errors.append(f"{label} requires one replay manifest row per panel pair")
+        elif {
+            (row.get("pair"), row.get("timeframe")) for row in scenario_rows
+        } != {(pair, bt.get("timeframe")) for pair in expected_pairs}:
+            errors.append(f"{label} replay manifest must cover the exact timeframe panel")
+        for row in scenario_rows:
+            pair = row.get("pair")
+            if (
+                row.get("period_start") != "2023-05-09"
+                or row.get("period_end") != "2026-03-26"
+                or row.get("cost_multiplier") != 1.0
+                or row.get("role") != expected_roles.get(pair)
+            ):
+                errors.append(
+                    f"{label} replay manifest row for {pair!r} differs from "
+                    "the fixed raw panel"
+                )
+
+        pair_validation = _nested_config(config, ("pair_validation",))
+        if not pair_validation.get("enabled", False):
+            errors.append(f"{label} requires pair_validation.enabled: true")
+        if pair_validation.get("evaluation_mode") != "independent_pairs":
+            errors.append(f"{label} requires independent pair evaluation")
+        if pair_validation.get("validate_top_n_only") != 0:
+            errors.append(f"{label} requires validate_top_n_only: 0")
+        if pair_validation.get("training_pairs") != expected_dev:
+            errors.append(f"{label} requires the fixed development pair split")
+        if pair_validation.get("validation_pairs") != expected_val:
+            errors.append(f"{label} requires the fixed validation pair split")
+        specialization = generic_island.get("specialization", {})
+        if specialization.get("pair_rotation", False):
+            errors.append(f"{label} forbids pair rotation")
+        for index, island in enumerate(islands):
+            if not isinstance(island, dict):
+                continue
+            if set(island.get("pairs", [])) != expected_pairs:
+                errors.append(f"{label} island[{index}] must see all six pairs")
+            if island.get("walk_forward_enabled", False):
+                errors.append(f"{label} island[{index}] forbids walk forward")
+
+        migration = generic_island.get("migration", {})
+        if migration.get("topology") != "ring":
+            errors.append(f"{label} requires ring migration")
+        if migration.get("interval") != 5 or migration.get("count") != 1:
+            errors.append(f"{label} requires one migrant every five generations")
+        if migration.get("merge_rounds", False):
+            errors.append(f"{label} forbids merge rounds")
+        common_replay = generic_island.get("common_panel_replay", {})
+        if not common_replay.get("enabled", False):
+            errors.append(f"{label} requires common-panel replay")
+        if common_replay.get("interval") != 3:
+            errors.append(f"{label} requires common-panel interval: 3")
+        if common_replay.get("top_n_per_island") != 2:
+            errors.append(f"{label} requires top two candidates per island")
+        if common_replay.get("min_generation") != 9:
+            errors.append(f"{label} requires no economic stop before generation 9")
+        if common_replay.get("early_stop_patience") != 4:
+            errors.append(f"{label} requires four-check plateau patience")
+        if common_replay.get("min_improvement") != 0.25:
+            errors.append(f"{label} requires absolute material improvement 0.25")
+        if common_replay.get("relative_min_improvement") != 0.005:
+            errors.append(f"{label} requires relative material improvement 0.005")
+
+        archive_seeding = generic_island.get("archive_seeding", {})
+        archive_names = archive_seeding.get("island_names", [])
+        if not archive_seeding.get("enabled", False) or len(archive_names) != 3:
+            errors.append(f"{label} requires exactly three archive islands")
+        if not set(archive_names).issubset(set(island_names)):
+            errors.append(f"{label} archive island names must exist")
+        if archive_seeding.get("max_seeds_per_island") != 4:
+            errors.append(f"{label} allows at most four archive seeds per island")
+        diversity_recovery = generic_island.get("diversity_recovery", {})
+        expected_diversity = {
+            "enabled": True,
+            "island_threshold_count": 9,
+            "consecutive_checks_before_recovery": 2,
+            "consecutive_checks_after_recovery": 2,
+            "duplicate_fraction_threshold": 0.75,
+            "genetic_diversity_threshold": 0.10,
+            "replacement_fraction": 0.25,
+            "recovery_mutation_rate": 0.35,
+        }
+        for key, expected in expected_diversity.items():
+            if diversity_recovery.get(key) != expected:
+                errors.append(
+                    f"{label} requires diversity_recovery.{key}: {expected}"
+                )
     if (
         safety.get("name") == "automation_island_child_v2"
         and safety.get("enforce", True)

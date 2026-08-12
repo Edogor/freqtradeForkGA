@@ -647,8 +647,8 @@ class TestShadowResultAdapter:
             trades=[{"profit_ratio": 0.001}] * 30,
             starting_balance=series.starting_balance,
             final_balance=series.final_balance,
-            backtest_start="2025-01-01",
-            backtest_end="2025-04-30",
+            backtest_start="2025-01-01T00:00:00+00:00",
+            backtest_end="2025-04-30T23:00:00+00:00",
             daily_profit_abs=[
                 [day.isoformat(), pnl]
                 for day, pnl in zip(series.dates, series.daily_profit_abs)
@@ -798,3 +798,72 @@ class TestShadowResultAdapter:
         assert record.metrics.error_code == "MISSING_EQUITY_EVIDENCE"
         assert record.metrics.max_drawdown is None
         assert record.metrics.daily_expected_shortfall_5 is None
+
+    def test_hardcore_point_metrics_skip_all_confidence_estimators(
+        self, monkeypatch
+    ):
+        from genetic_algorithm.orchestration import result_adapter
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("confidence estimator entered hardcore raw replay")
+
+        monkeypatch.setattr(result_adapter, "moving_block_bootstrap_bounds", forbidden)
+        monkeypatch.setattr(result_adapter, "clustered_trade_expectancy_lcb", forbidden)
+        result = self._complete_mark_to_market_result()
+
+        record = result_adapter.adapt_shadow_backtest_result(
+            result,
+            self._context(),
+            point_metrics_only=True,
+        )
+
+        assert record.metrics.status.value == "INCONCLUSIVE"
+        assert record.metrics.error_code == "RAW_POINT_METRICS_ONLY"
+        assert record.metrics.measured_period_start.isoformat() == (
+            "2025-01-01T00:00:00+00:00"
+        )
+        assert record.metrics.measured_period_end.isoformat() == (
+            "2025-04-30T23:00:00+00:00"
+        )
+        assert record.metrics.net_expectancy == pytest.approx(result.avg_profit)
+        assert record.metrics.annualized_net_return_lcb is None
+        assert record.metrics.max_drawdown_ucb is None
+        assert record.metrics.net_expectancy_lcb is None
+        assert record.metrics.net_expectancy_on_committed_capital_lcb is None
+        assert record.metrics.effective_sample_size is None
+
+    def test_hardcore_point_metrics_still_reject_period_mismatch(self):
+        from genetic_algorithm.orchestration.result_adapter import (
+            adapt_shadow_backtest_result,
+        )
+
+        result = self._complete_mark_to_market_result()
+        result.backtest_end = "2025-04-29"
+        record = adapt_shadow_backtest_result(
+            result,
+            self._context(),
+            point_metrics_only=True,
+        )
+
+        assert record.metrics.status.value == "INVALID"
+        assert record.metrics.error_code == "PERIOD_COVERAGE_MISMATCH"
+
+    def test_hardcore_zero_trade_requires_measured_period_proof(self):
+        from genetic_algorithm.orchestration.result_adapter import (
+            adapt_shadow_backtest_result,
+        )
+
+        result = self._complete_mark_to_market_result()
+        result.total_trades = 0
+        result.no_trades = True
+        result.trades = []
+        result.backtest_start = "2025-01-01T22:00:00+00:00"
+
+        record = adapt_shadow_backtest_result(
+            result,
+            self._context(),
+            point_metrics_only=True,
+        )
+
+        assert record.metrics.status.value == "INVALID"
+        assert record.metrics.error_code == "PERIOD_COVERAGE_MISMATCH"

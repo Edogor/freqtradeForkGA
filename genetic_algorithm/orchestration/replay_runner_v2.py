@@ -310,7 +310,7 @@ class ShadowReplayRunnerV2:
         self,
         candidates: Sequence[FrozenCandidateV2],
         *,
-        finished_at: datetime,
+        finished_at: datetime | None = None,
     ) -> AttemptResultV2:
         candidate_ids = [candidate.candidate_id for candidate in candidates]
         if len(candidate_ids) != len(set(candidate_ids)):
@@ -406,6 +406,10 @@ class ShadowReplayRunnerV2:
                             evaluation.get("expectancy_cluster_days", 1)
                         ),
                         bootstrap_confidence=float(evaluation["bootstrap_confidence"]),
+                        point_metrics_only=(
+                            self.config.get("safety_profile", {}).get("name")
+                            == "hardcore_multipair_v1"
+                        ),
                     )
                     recorder.add_backtest(record)
 
@@ -416,7 +420,11 @@ class ShadowReplayRunnerV2:
                 )
             if reservation is not None:
                 recorder.add_final_test_usage(reservation)
-            return recorder.finalize(finished_at=finished_at)
+            # Explicit timestamps remain available for deterministic tests.
+            # Production callers omit the argument so completion is sampled
+            # only after every strict-replay scenario has finished.
+            completion_time = finished_at if finished_at is not None else self.clock()
+            return recorder.finalize(finished_at=completion_time)
         except Exception:
             if reservation is not None and not exposed:
                 self.final_test_ledger.release_unexposed(

@@ -294,6 +294,47 @@ def test_common_replay_deduplicates_same_phenotype_before_backtest():
     evaluator.evaluate.assert_called_once()
 
 
+def test_common_replay_uses_parallel_batch_and_preserves_stable_ranking_context():
+    source_a = _panel(_config(pairs=["BTC/USDT"]))
+    source_b = _panel(_config(pairs=["ETH/USDT"]))
+    common = _panel(
+        _config(pairs=["BTC/USDT", "ETH/USDT"]),
+        role=PANEL_ROLE_COMMON_REPLAY,
+    )
+    locally_high = _measured(0.95, 1, source_a.panel_id, period=11)
+    locally_low = _measured(0.10, 2, source_b.panel_id, period=22)
+    failed = _measured(0.80, 3, source_b.panel_id, period=33)
+    evaluator = MagicMock()
+    parallel = MagicMock()
+
+    def evaluate_batch(candidates):
+        candidates[0].set_fitness(0.2, {"profit": 1.0, "num_trades": 20})
+        candidates[1].set_fitness(0.8, {"profit": 5.0, "num_trades": 30})
+        candidates[2].set_fitness(
+            0.0,
+            {"error": "parallel backtest failed", "num_trades": 0},
+        )
+
+    parallel.evaluate_batch.side_effect = evaluate_batch
+
+    ranked = replay_on_common_panel(
+        [locally_high, locally_low, failed],
+        evaluator=evaluator,
+        panel=common,
+        logger=logging.getLogger("test.parallel-common-replay"),
+        parallel_evaluator=parallel,
+    )
+
+    assert ranked == [locally_low, locally_high]
+    parallel.evaluate_batch.assert_called_once_with(
+        [locally_high, locally_low, failed]
+    )
+    evaluator.evaluate.assert_not_called()
+    assert locally_high.metrics["source_fitness"] == pytest.approx(0.95)
+    assert locally_low.metrics["source_panel_id"] == source_b.panel_id
+    assert failed.has_comparable_fitness(common.panel_id) is False
+
+
 def test_cross_panel_merge_selection_is_round_robin_not_raw_score():
     model = object.__new__(GenericIslandModelEvolution)
     model._gene_hash = lambda individual: str(

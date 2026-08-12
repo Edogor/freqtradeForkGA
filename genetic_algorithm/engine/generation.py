@@ -559,13 +559,20 @@ class GenerationStep:
                 )
                 break
 
-            parent1, parent2 = select_parents(
+            parents = select_parents(
                 population,
                 num_parents=2,
                 method=self.selection_method,
                 tournament_size=effective_tournament_size,
                 allow_duplicates=self.allow_self_crossover,
             )
+            if len(parents) < 2:
+                self.logger.warning(
+                    "[OFFSPRING] Fewer than two distinct parents are available; "
+                    "remaining slots will be filled randomly."
+                )
+                break
+            parent1, parent2 = parents
 
             child1_id = len(next_gen)
             child2_id = len(next_gen) + 1

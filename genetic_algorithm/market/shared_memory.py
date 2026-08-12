@@ -179,6 +179,12 @@ class SharedDataManager:
             )
             return {}
         timeframe = timeframes[0]
+        startup_candles = int(
+            config.get('strategy_constraints', {}).get(
+                'startup_candle_cap'
+            )
+            or 0
+        )
 
         logger.info(
             f"[SHARED] Loading {timeframe} OHLCV data for {len(pairs)} pairs, "
@@ -187,7 +193,13 @@ class SharedDataManager:
         start = time.time()
 
         # Use FreqTrade's data loading to get the same data workers would load
-        data = self._load_ohlcv_data(config, pairs, timerange_str, timeframe)
+        data = self._load_ohlcv_data(
+            config,
+            pairs,
+            timerange_str,
+            timeframe,
+            startup_candles=startup_candles,
+        )
 
         if not data:
             logger.warning("[SHARED] No data loaded — shared memory disabled")
@@ -204,6 +216,7 @@ class SharedDataManager:
             'pairs': pair_metadata,
             'timerange': timerange_str,
             'timeframe': timeframe,
+            'startup_candles': startup_candles,
             'loaded_at': time.time(),
         }
         self._loaded = True
@@ -243,6 +256,8 @@ class SharedDataManager:
         pairs: List[str],
         timerange_str: str,
         timeframe: str,
+        *,
+        startup_candles: int = 0,
     ) -> Dict[str, pd.DataFrame]:
         """
         Load OHLCV data using FreqTrade's data loading utilities.
@@ -272,6 +287,7 @@ class SharedDataManager:
                         timeframe=timeframe,
                         datadir=data_dir,
                         timerange=timerange,
+                        startup_candles=startup_candles,
                         data_format=dataformat,
                     )
                     if df is not None and len(df) > 0:

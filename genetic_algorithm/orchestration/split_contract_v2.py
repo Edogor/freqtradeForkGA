@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from pydantic import Field, model_validator
@@ -65,20 +65,35 @@ class EvaluationSplitPlanV2(StrictV2Model):
 
 
 _TIMERANGE_PATTERN = re.compile(r"^(\d{8})-(\d{8})$")
+_EPOCH_TIMERANGE_PATTERN = re.compile(r"^(\d{10})-(\d{10})$")
 
 
 def _parse_closed_config_timerange(value: object) -> tuple[date, date]:
     if not isinstance(value, str):
         raise SplitContractError("backtesting.timerange must be an explicit closed timerange")
     match = _TIMERANGE_PATTERN.fullmatch(value)
-    if match is None:
+    epoch_match = _EPOCH_TIMERANGE_PATTERN.fullmatch(value)
+    if match is None and epoch_match is None:
         raise SplitContractError(
-            "backtesting.timerange must use YYYYMMDD-YYYYMMDD with both bounds"
+            "backtesting.timerange must use YYYYMMDD-YYYYMMDD or exact "
+            "UTC epoch bounds"
         )
     try:
-        start = datetime.strptime(match.group(1), "%Y%m%d").date()
-        exclusive_end = datetime.strptime(match.group(2), "%Y%m%d").date()
-    except ValueError as exc:
+        if match is not None:
+            start = datetime.strptime(match.group(1), "%Y%m%d").date()
+            exclusive_end = datetime.strptime(match.group(2), "%Y%m%d").date()
+        else:
+            start_at = datetime.fromtimestamp(int(epoch_match.group(1)), tz=UTC)
+            stop_at = datetime.fromtimestamp(int(epoch_match.group(2)), tz=UTC)
+            if start_at.time() != datetime.min.time():
+                raise SplitContractError(
+                    "epoch timerange must start at UTC midnight"
+                )
+            start = start_at.date()
+            # Epoch stops are inclusive candle opens.  The split contract is
+            # date based, so the covered calendar interval ends next midnight.
+            exclusive_end = stop_at.date() + timedelta(days=1)
+    except (OverflowError, OSError, ValueError) as exc:
         raise SplitContractError("backtesting.timerange contains an invalid date") from exc
     if exclusive_end <= start:
         raise SplitContractError("backtesting.timerange must contain at least one day")

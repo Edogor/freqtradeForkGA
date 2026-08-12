@@ -137,6 +137,44 @@ def main(argv: list[str] | None = None) -> int:
     a_unit.add_argument("--state-db", help="Canonical V2 SQLite state path")
     a_unit.add_argument("--automation-root", help="Automation artifact directory")
 
+    # --- hardcore dual-lane campaign ---
+    p_hardcore = sub.add_parser(
+        "hardcore-campaign",
+        help="Seven-day raw-score six-pair 15m/1h search campaign",
+    )
+    h_sub = p_hardcore.add_subparsers(dest="hardcore_cmd")
+    for command_name, command_help in (
+        ("start", "Start or resume the isolated seven-day campaign"),
+        ("preflight", "Prove configs, isolation and pushed git commit"),
+        ("canary", "Run exactly one reduced 15m and one reduced 1h evolution"),
+    ):
+        command = h_sub.add_parser(command_name, help=command_help)
+        command.add_argument("--campaign-id", required=True)
+        command.add_argument("--config-15m")
+        command.add_argument("--config-1h")
+        command.add_argument("--automation-root")
+        command.add_argument("--state-db")
+        if command_name == "start":
+            command.add_argument("--once", action="store_true")
+        if command_name == "preflight":
+            command.add_argument(
+                "--canary",
+                action="store_true",
+                help="Validate the reduced dual-lane canary presets",
+            )
+    h_status = h_sub.add_parser("status", help="Read the hash-covered live status")
+    h_status.add_argument("--automation-root", required=True)
+    h_stop = h_sub.add_parser("stop", help="Request a generation-boundary stop")
+    h_stop.add_argument("--automation-root", required=True)
+    h_unit = h_sub.add_parser(
+        "service-unit", help="Render the isolated systemd --user service"
+    )
+    h_unit.add_argument("--campaign-id", required=True)
+    h_unit.add_argument("--config-15m", default="hardcore_multipair_15m_v1")
+    h_unit.add_argument("--config-1h", default="hardcore_multipair_1h_v1")
+    h_unit.add_argument("--automation-root", required=True)
+    h_unit.add_argument("--output", required=True)
+
     # --- experiment ---
     p_exp = sub.add_parser("experiment", help="Experiment management")
     e_sub = p_exp.add_subparsers(dest="exp_cmd")
@@ -228,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_queue(args)
         elif args.command == "automation":
             return _cmd_automation(args)
+        elif args.command == "hardcore-campaign":
+            return _cmd_hardcore_campaign(args)
         elif args.command == "experiment":
             return _cmd_experiment(args)
         elif args.command == "data":
@@ -579,6 +619,187 @@ def _cmd_automation(args) -> int:
         tick = controller.run_once() if args.once else controller.run_forever()
     print(tick.model_dump_json(indent=2))
     return 0 if tick.outcome in {"WAITING", "PROGRESSED"} else 2
+
+
+def _cmd_hardcore_campaign(args) -> int:
+    """Operate the isolated raw-multipair dual-lane search supervisor."""
+
+    import hashlib
+
+    from genetic_algorithm.orchestration.hardcore_backend_v1 import (
+        V2HardcoreAttemptBackend,
+    )
+    from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
+        HardcoreCampaignControllerV1,
+        HardcoreCampaignPreflightV1,
+        build_hardcore_campaign_preflight,
+        default_hardcore_campaign_policy,
+        render_hardcore_systemd_user_unit,
+        require_hardcore_campaign_preflight,
+    )
+    from genetic_algorithm.orchestration.runner_v2 import repository_root
+
+    repo_root = repository_root()
+
+    def resolve_config(value: str) -> Path:
+        direct = Path(value)
+        if direct.is_file():
+            return direct.resolve()
+        preset = (
+            repo_root / "genetic_algorithm/config/presets" / f"{value}.yaml"
+        )
+        if not preset.is_file():
+            raise FileNotFoundError(f"Hardcore config not found: {value}")
+        return preset.resolve()
+
+    command = args.hardcore_cmd
+    if command == "status":
+        root = Path(args.automation_root).resolve()
+        path = root / "campaign_status.json"
+        checksum = path.with_name(path.name + ".sha256")
+        if not path.is_file() or not checksum.is_file():
+            print(f"No complete hardcore status found below {root}")
+            return 1
+        expected = checksum.read_text(encoding="ascii").strip()
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            print(f"Hardcore status checksum mismatch: {path}")
+            return 2
+        print(json.dumps(json.loads(path.read_text(encoding="utf-8")), indent=2))
+        return 0
+
+    if command == "stop":
+        root = Path(args.automation_root).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        marker = root / "STOP_HARDCORE_CAMPAIGN"
+        if not marker.exists():
+            marker.write_text(
+                "Hardcore campaign stop requested by CLI operator.\n",
+                encoding="utf-8",
+            )
+        print(f"Generation-boundary stop requested: {marker}")
+        return 0
+
+    if command not in {"start", "preflight", "canary", "service-unit"}:
+        print(
+            "Usage: python -m genetic_algorithm hardcore-campaign "
+            "{preflight|canary|service-unit|start|status|stop}"
+        )
+        return 1
+
+    is_canary = command == "canary" or (
+        command == "preflight" and bool(getattr(args, "canary", False))
+    )
+    default_15m = (
+        "hardcore_multipair_canary_15m_v1"
+        if is_canary
+        else "hardcore_multipair_15m_v1"
+    )
+    default_1h = (
+        "hardcore_multipair_canary_1h_v1"
+        if is_canary
+        else "hardcore_multipair_1h_v1"
+    )
+    config_15m = resolve_config(args.config_15m or default_15m)
+    config_1h = resolve_config(args.config_1h or default_1h)
+    default_root = (
+        repo_root
+        / "genetic_algorithm/data/v2/hardcore"
+        / args.campaign_id
+    ).resolve()
+    automation_root = (
+        Path(args.automation_root).resolve()
+        if args.automation_root
+        else default_root
+    )
+
+    if command == "service-unit":
+        output = Path(args.output).resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            render_hardcore_systemd_user_unit(
+                repo_root=repo_root,
+                automation_root=automation_root,
+                config_15m=config_15m,
+                config_1h=config_1h,
+                campaign_id=args.campaign_id,
+            ),
+            encoding="utf-8",
+        )
+        print(f"Systemd user unit written: {output}")
+        return 0
+
+    state_path = (
+        Path(args.state_db).resolve()
+        if args.state_db
+        else automation_root / "hardcore_state.sqlite3"
+    )
+    policy = default_hardcore_campaign_policy(
+        campaign_id=args.campaign_id,
+        automation_root=automation_root,
+        config_15m=config_15m,
+        config_1h=config_1h,
+        canary=is_canary,
+    )
+    if command == "preflight":
+        report = build_hardcore_campaign_preflight(
+            policy, repo_root=repo_root, state_path=state_path
+        )
+        print(report.model_dump_json(indent=2))
+        return 0 if report.ready else 2
+
+    report = require_hardcore_campaign_preflight(
+        policy, repo_root=repo_root, state_path=state_path
+    )
+    automation_root.mkdir(parents=True, exist_ok=True)
+    preflight_path = automation_root / "start_preflight.json"
+    preflight_payload = (report.model_dump_json(indent=2) + "\n").encode("utf-8")
+    preflight_checksum = preflight_path.with_name(preflight_path.name + ".sha256")
+    if preflight_path.exists() or preflight_checksum.exists():
+        if not preflight_path.is_file() or not preflight_checksum.is_file():
+            raise RuntimeError("existing start preflight is incomplete")
+        expected = preflight_checksum.read_text(encoding="ascii").strip()
+        if hashlib.sha256(preflight_path.read_bytes()).hexdigest() != expected:
+            raise RuntimeError("existing start preflight checksum differs")
+        existing = HardcoreCampaignPreflightV1.model_validate_json(
+            preflight_path.read_bytes()
+        )
+        stable_fields = (
+            "ready",
+            "campaign_id",
+            "policy_hash",
+            "repo_root",
+            "automation_root",
+            "state_path",
+            "git_head",
+            "git_upstream",
+            "git_upstream_head",
+            "config_hashes",
+        )
+        if any(getattr(existing, field) != getattr(report, field) for field in stable_fields):
+            raise RuntimeError("existing start preflight differs from pushed launch proof")
+    else:
+        preflight_path.write_bytes(preflight_payload)
+        preflight_checksum.write_text(
+            hashlib.sha256(preflight_payload).hexdigest() + "\n",
+            encoding="ascii",
+        )
+    with V2HardcoreAttemptBackend(
+        state_path=state_path,
+        automation_root=automation_root,
+        repo_root=repo_root,
+        python_executable=repo_root / ".venv/bin/python",
+    ) as backend:
+        controller = HardcoreCampaignControllerV1(policy=policy, backend=backend)
+        tick = (
+            controller.run_once()
+            if bool(getattr(args, "once", False))
+            else controller.run_forever()
+        )
+    print(tick.model_dump_json(indent=2))
+    # STOPPED is a normal terminal state (deadline, operator stop, resource
+    # guard, or the two-run canary contract). Only a blocked campaign is an
+    # operational failure requiring intervention.
+    return 2 if tick.outcome.value == "BLOCKED" else 0
 
 
 def _cmd_experiment(args) -> int:

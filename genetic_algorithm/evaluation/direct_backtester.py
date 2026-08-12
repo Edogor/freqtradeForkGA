@@ -22,6 +22,8 @@ from typing import Dict, Any, List, Optional
 from unittest.mock import MagicMock, PropertyMock, patch
 from dataclasses import dataclass
 
+import pandas as pd
+
 from genetic_algorithm.core.strategy_gene import timeframe_to_minutes as _timeframe_to_minutes_util
 from genetic_algorithm.evaluation.cache import BacktestCache
 from genetic_algorithm.evaluation.equity_metrics_v2 import (
@@ -296,6 +298,30 @@ class BacktestResult:
         }
 
 
+def exact_backtest_net_return(result: BacktestResult) -> Optional[float]:
+    """Return one deterministic net-return point estimate for all raw paths."""
+
+    def finite_number(value: Any) -> bool:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        )
+
+    if (
+        finite_number(result.starting_balance)
+        and float(result.starting_balance) > 0.0
+    ):
+        starting_balance = float(result.starting_balance)
+        if finite_number(result.final_balance):
+            return float(result.final_balance) / starting_balance - 1.0
+        if finite_number(result.total_profit):
+            return float(result.total_profit) / starting_balance
+    if result.success and finite_number(result.profit_percent):
+        return float(result.profit_percent) / 100.0
+    return None
+
+
 class DirectBacktester:
     """
     Direct backtester that uses FreqTrade's Python API with mocked exchange.
@@ -362,6 +388,28 @@ class DirectBacktester:
 
         # Validate and auto-download data if enabled
         self._validate_and_download_data()
+
+    @staticmethod
+    def _slice_cached_startup_data(
+        raw_data: Dict[str, Any],
+        timerange_obj: Any,
+        required_startup: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Slice max-warmup shared frames to the strategy's exact warmup."""
+
+        startts = getattr(timerange_obj, 'startts', 0)
+        if not startts:
+            return {pair: frame.copy() for pair, frame in raw_data.items()}
+        start_at = pd.Timestamp(int(startts), unit='s', tz='UTC')
+        sliced: Dict[str, Any] = {}
+        for pair, frame in raw_data.items():
+            dates = pd.to_datetime(frame['date'], utc=True)
+            before_start = int((dates < start_at).sum())
+            if before_start < required_startup:
+                return None
+            first_row = before_start - required_startup
+            sliced[pair] = frame.iloc[first_row:].copy()
+        return sliced
 
     def get_available_data_range(self) -> Optional[str]:
         """
@@ -972,12 +1020,17 @@ class DirectBacktester:
                         # Move to end (most-recently-used) for LRU ordering
                         self._bt_data_cache.move_to_end(_cache_key)
                         raw_data, timerange_obj = cached
-                        # Shallow-copy each DataFrame so indicator columns
-                        # from previous strategies don't leak across runs
-                        data = {pair: df.copy() for pair, df in raw_data.items()}
-                        # Restore timerange and required fields on the instance
-                        backtesting.timerange = timerange_obj
-                    else:
+                        data = self._slice_cached_startup_data(
+                            raw_data,
+                            timerange_obj,
+                            backtesting.required_startup,
+                        )
+                        if data is not None:
+                            # Restore timerange and required fields on the instance
+                            backtesting.timerange = timerange_obj
+                        else:
+                            cached = None
+                    if cached is None:
                         data, timerange_obj = backtesting.load_bt_data()
                         # Cache the raw data (before any indicator additions)
                         self._bt_data_cache[_cache_key] = (
@@ -1119,6 +1172,7 @@ class DirectBacktester:
                                     "close_rate",
                                     "open_timestamp",
                                     "close_timestamp",
+                                    "trade_duration",
                                     "fee_open",
                                     "fee_close",
                                     "profit_ratio",

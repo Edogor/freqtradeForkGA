@@ -88,6 +88,7 @@ class TestSharedMemoryThreadSafety:
             ['BTC/USDT'],
             '20260101-20260201',
             '1h',
+            startup_candles=0,
         )
         assert manager.get_metadata()['timeframe'] == '1h'
 

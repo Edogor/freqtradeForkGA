@@ -378,6 +378,52 @@ def test_replay_executes_exact_panel_costs_and_commits_verified_result(tmp_path:
     assert terminal.result_sha256 is not None
 
 
+def test_default_finished_at_is_sampled_after_all_replay_work(tmp_path: Path):
+    policy = _policy()
+    config = _config(policy)
+    data_manifest = _data_manifest(policy)
+    code_manifest = _code_manifest()
+    root = tmp_path / "completion-time"
+    ledger = FinalTestUsageLedgerV2(tmp_path / "final_test.sqlite3")
+    manifest = _manifest(root, config, data_manifest, code_manifest).model_copy(
+        update={
+            "attempt_id": "completion-time",
+            "artifact_root": str(root),
+            "resolved_config_path": str(root / "resolved_config.yaml"),
+        }
+    )
+    replay_clock = {"now": datetime(2026, 7, 21, 13, 1, tzinfo=UTC)}
+    calls = []
+
+    class _AdvancingBacktester(_FakeBacktester):
+        def backtest_strategy(self, code, name, **kwargs):
+            result = super().backtest_strategy(code, name, **kwargs)
+            replay_clock["now"] += timedelta(minutes=1)
+            return result
+
+    factory = lambda scenario_config: _AdvancingBacktester(  # noqa: E731
+        scenario_config, calls, _successful_result()
+    )
+    runner = ShadowReplayRunnerV2(
+        manifest=manifest,
+        resolved_config=config,
+        policy=policy,
+        data_manifest=data_manifest,
+        code_manifest=code_manifest,
+        final_test_ledger=ledger,
+        repo_root=str(tmp_path),
+        backtester_factory=factory,
+        data_manifest_builder=lambda config, policy: data_manifest,
+        code_manifest_builder=lambda root: code_manifest,
+        clock=lambda: replay_clock["now"],
+    )
+
+    result = runner.execute([_candidate()])
+
+    assert len(calls) == 2
+    assert result.finished_at == datetime(2026, 7, 21, 13, 3, tzinfo=UTC)
+
+
 def test_period_mismatch_is_persisted_invalid_and_blocks_candidate(tmp_path: Path):
     policy = _policy()
     config = _config(policy)

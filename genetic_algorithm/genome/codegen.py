@@ -622,8 +622,21 @@ class StrategyGenerator:
         # Short base TFs need many more candles for indicator warmup:
         # 1m → 400 (≈6.7 h), 3m → 200 (≈10 h), 5m → 120 (≈10 h)
         _tf_floors = {'1m': 400, '3m': 200, '5m': 120, '15m': 60}
-        floor = _tf_floors.get(strategy_gene.timeframe, 100)
-        return max(floor, int(max_lookback * 1.1) + 5)
+        configured_floor = self.strategy_constraints.get('startup_candle_floor')
+        floor = int(
+            _tf_floors.get(strategy_gene.timeframe, 100)
+            if configured_floor is None
+            else configured_floor
+        )
+        required = max(floor, int(max_lookback * 1.1) + 5)
+        configured_cap = self.strategy_constraints.get('startup_candle_cap')
+        if configured_cap is not None and required > int(configured_cap):
+            raise ValueError(
+                "strategy requires "
+                f"{required} startup candles, above configured cap "
+                f"{int(configured_cap)}"
+            )
+        return required
 
     def generate_strategy_code(self, strategy_gene: StrategyGene) -> str:
         """

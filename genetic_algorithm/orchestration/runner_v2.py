@@ -90,6 +90,7 @@ def _validate_supported_config(config: Mapping[str, Any]) -> None:
         "safe_v2",
         "automation_island_v2",
         "quality_experiment_v3",
+        "hardcore_multipair_v1",
     }
     if config.get("generic_island_model", {}).get("enabled", False):
         safety = config.get("safety_profile", {})
@@ -97,6 +98,7 @@ def _validate_supported_config(config: Mapping[str, Any]) -> None:
             safety.get("name") not in {
                 "automation_island_v2",
                 "quality_experiment_v3",
+                "hardcore_multipair_v1",
             }
             or not safety.get("enforce", False)
             or not safety.get("shadow_mode", False)

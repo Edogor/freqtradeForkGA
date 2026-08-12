@@ -10,15 +10,28 @@ import logging
 import hashlib
 import math
 from collections import OrderedDict
+from datetime import date
 from typing import Tuple, Dict, Any, List, Optional
 
 from genetic_algorithm.core.strategy_gene import StrategyGene
 from genetic_algorithm.evaluation.activity_metrics import count_active_trade_months
-from genetic_algorithm.evaluation.direct_backtester import DirectBacktester, BacktestResult
+from genetic_algorithm.evaluation.direct_backtester import (
+    BacktestResult,
+    DirectBacktester,
+    exact_backtest_net_return,
+)
 from genetic_algorithm.evaluation.profit_factor_v2 import profit_factor_for_scoring
 from genetic_algorithm.evaluation.fitness_policy_v3 import (
     apply_feasibility_first_v3,
     fitness_policy_v3_from_config,
+)
+from genetic_algorithm.evaluation.raw_multipair_score import (
+    PairScenario,
+    RawMultiPairPanel,
+    score_raw_multipair,
+)
+from genetic_algorithm.evaluation.period_provenance import (
+    validate_exact_period_evidence,
 )
 from genetic_algorithm.strategies.generator import StrategyGenerator
 from genetic_algorithm.utils.timerange import (
@@ -102,6 +115,45 @@ class FitnessEvaluator:
         self.pair_validation_config = config.get('pair_validation', {})
         self.pair_validation_enabled = self.pair_validation_config.get('enabled', False)
         self.validate_top_n_only = self.pair_validation_config.get('validate_top_n_only', 0)
+        self.raw_multipair_score_config = config.get('raw_multipair_score', {})
+        self.raw_multipair_score_enabled = bool(
+            self.raw_multipair_score_config.get('enabled', False)
+        )
+        self.raw_multipair_panel: Optional[RawMultiPairPanel] = None
+        if self.raw_multipair_score_enabled:
+            if self.walk_forward_config.get('enabled', False):
+                raise ValueError(
+                    'raw-multipair-score-v1 forbids walk-forward evaluation'
+                )
+            if (
+                not self.pair_validation_enabled
+                or self.pair_validation_config.get('evaluation_mode')
+                != 'independent_pairs'
+                or self.validate_top_n_only != 0
+            ):
+                raise ValueError(
+                    'raw-multipair-score-v1 requires immediate independent '
+                    'evaluation of every pair'
+                )
+            self.raw_multipair_panel = RawMultiPairPanel(
+                timeframe=str(config.get('backtesting', {}).get('timeframe', '')),
+                development_pairs=tuple(
+                    self.raw_multipair_score_config.get('development_pairs', [])
+                ),
+                validation_pairs=tuple(
+                    self.raw_multipair_score_config.get('validation_pairs', [])
+                ),
+                period_start=date.fromisoformat(
+                    str(self.raw_multipair_score_config.get('period_start'))
+                ),
+                period_end=date.fromisoformat(
+                    str(self.raw_multipair_score_config.get('period_end'))
+                ),
+                fee_rate=float(config.get('backtesting', {}).get('fee', 0.0)),
+                slippage_rate=float(
+                    config.get('backtesting', {}).get('slippage_pct', 0.0)
+                ),
+            )
         
         # Fitness bounds for clamping extreme values
         fitness_bounds = config.get('fitness_bounds', {})
@@ -822,6 +874,12 @@ class FitnessEvaluator:
             "independent_pair_metrics": {
                 pair: {
                     "profit": metrics.get("profit", 0.0),
+                    # Raw score inputs retain their native units: profit is
+                    # percent here and is converted to a decimal ratio only
+                    # when the six-pair contract is materialized.
+                    "avg_profit": metrics.get("avg_profit"),
+                    "period_start": metrics.get("period_start"),
+                    "period_end": metrics.get("period_end"),
                     "num_trades": metrics.get("num_trades", 0),
                     "active_months": metrics.get("active_months", 0),
                     "trades_per_active_month": metrics.get(
@@ -844,6 +902,10 @@ class FitnessEvaluator:
                     "profit_factor_contract_version": metrics.get(
                         "profit_factor_contract_version"
                     ),
+                    "median_holding_hours": metrics.get(
+                        "median_holding_hours"
+                    ),
+                    "p90_holding_hours": metrics.get("p90_holding_hours"),
                 }
                 for pair, metrics in pair_metrics.items()
             },
@@ -897,12 +959,181 @@ class FitnessEvaluator:
 
         summary = self._aggregate_independent_pair_metrics(pair_metrics)
         summary["complexity"] = strategy_gene.calculate_complexity()
+        if self.raw_multipair_score_enabled:
+            # Group values are evidence containers only.  Selection is
+            # performed once over the complete six-pair panel below.
+            return 0.0, summary, None
         fitness = self.calculate_fitness(
             summary,
             strategy_gene,
             apply_pair_coverage=False,
         )
         return fitness, summary, None
+
+    def _score_raw_complete_panel(
+        self,
+        *,
+        train_metrics: Dict[str, Any],
+        val_metrics: Dict[str, Any],
+        strategy_gene: StrategyGene,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Materialize and score exactly six independent pair outcomes."""
+
+        panel = self.raw_multipair_panel
+        if panel is None:
+            raise RuntimeError('raw multi-pair panel was not initialized')
+        raw_by_pair = {
+            **train_metrics.get('independent_pair_metrics', {}),
+            **val_metrics.get('independent_pair_metrics', {}),
+        }
+        scenarios: List[PairScenario] = []
+        for pair in (*panel.development_pairs, *panel.validation_pairs):
+            raw = raw_by_pair.get(pair)
+            if not isinstance(raw, dict):
+                scenarios.append(
+                    PairScenario(
+                        pair=pair,
+                        timeframe=panel.timeframe,
+                        success=False,
+                        trade_count=0,
+                        active_months=0,
+                        technical_error='missing independent pair evidence',
+                    )
+                )
+                continue
+            trades = raw.get('num_trades')
+            active_months = raw.get('active_months')
+            period_evidence = validate_exact_period_evidence(
+                expected_start=panel.period_start,
+                expected_end=panel.period_end,
+                observed_start=raw.get('period_start'),
+                observed_end=raw.get('period_end'),
+                evidence_label=pair,
+                timeframe=panel.timeframe,
+            )
+            if not period_evidence.valid:
+                scenarios.append(
+                    PairScenario(
+                        pair=pair,
+                        timeframe=panel.timeframe,
+                        success=False,
+                        trade_count=0,
+                        active_months=0,
+                        technical_error=(
+                            f'{period_evidence.error_code}: '
+                            f'{period_evidence.error_detail}'
+                        ),
+                    )
+                )
+                continue
+            scenarios.append(
+                PairScenario(
+                    pair=pair,
+                    timeframe=panel.timeframe,
+                    success=True,
+                    trade_count=(
+                        int(trades)
+                        if isinstance(trades, int) and not isinstance(trades, bool)
+                        else trades
+                    ),
+                    active_months=(
+                        int(active_months)
+                        if isinstance(active_months, int)
+                        and not isinstance(active_months, bool)
+                        else active_months
+                    ),
+                    period_start=period_evidence.measured_start,
+                    period_end=period_evidence.measured_end,
+                    net_return=(
+                        raw.get('net_return')
+                        if raw.get('net_return') is not None
+                        else (
+                            float(raw['profit']) / 100.0
+                            if raw.get('profit') is not None
+                            else None
+                        )
+                    ),
+                    net_expectancy=raw.get('avg_profit'),
+                    profit_factor=raw.get('profit_factor'),
+                    profit_factor_censored=raw.get('profit_factor_censored'),
+                    median_holding_hours=raw.get('median_holding_hours'),
+                    p90_holding_hours=raw.get('p90_holding_hours'),
+                    max_drawdown=raw.get('max_drawdown'),
+                    max_drawdown_duration_days=raw.get(
+                        'max_drawdown_duration_days'
+                    ),
+                    max_consecutive_losses=raw.get('max_consecutive_losses'),
+                )
+            )
+
+        result = score_raw_multipair(panel, scenarios)
+        raw_evidence = {scenario.pair: scenario.to_dict() for scenario in scenarios}
+        per_pair_profit = {
+            pair: float(metrics['profit'])
+            for pair, metrics in raw_by_pair.items()
+            if isinstance(metrics, dict)
+            and isinstance(metrics.get('profit'), (int, float))
+            and not isinstance(metrics.get('profit'), bool)
+            and math.isfinite(float(metrics['profit']))
+        }
+        measured_drawdowns = [
+            float(metrics['max_drawdown'])
+            for metrics in raw_by_pair.values()
+            if isinstance(metrics, dict)
+            and isinstance(metrics.get('max_drawdown'), (int, float))
+            and not isinstance(metrics.get('max_drawdown'), bool)
+            and math.isfinite(float(metrics['max_drawdown']))
+        ]
+        base_metrics: Dict[str, Any] = {
+            'raw_multipair_score_version': result.score_version,
+            'raw_multipair_panel_id': result.panel_id,
+            'raw_multipair_status': result.status.value,
+            'raw_multipair_result': result.to_dict(),
+            'raw_pair_metrics': raw_evidence,
+            # Behavioral diversity consumes actual six-pair outcomes.  These
+            # values are descriptive only and never enter raw fitness.
+            'per_pair_profit': per_pair_profit,
+            'max_drawdown': max(measured_drawdowns, default=0.0),
+            'independent_pair_evaluation': True,
+            'training_pairs': ','.join(panel.development_pairs),
+            'validation_pairs': ','.join(panel.validation_pairs),
+            'complexity': strategy_gene.calculate_complexity(),
+            'profit': train_metrics.get('profit', 0.0),
+            'val_profit': val_metrics.get('profit', 0.0),
+            'num_trades': train_metrics.get('num_trades', 0)
+            + val_metrics.get('num_trades', 0),
+            'train_independent_pair_metrics': train_metrics.get(
+                'independent_pair_metrics', {}
+            ),
+            'val_independent_pair_metrics': val_metrics.get(
+                'independent_pair_metrics', {}
+            ),
+        }
+        if not result.is_valid or result.score is None:
+            base_metrics['error'] = (
+                f'raw_multipair_invalid:{result.reason_code}:'
+                f'{result.reason_detail or "unspecified"}'
+            )
+            return 0.0, base_metrics
+        score = float(result.score)
+        base_metrics.update(
+            {
+                'raw_multipair_score': score,
+                # Compatibility fields contain only this same raw score.  No
+                # legacy train/validation fitness is calculated or blended.
+                'train_fitness': score,
+                'val_fitness': score,
+            }
+        )
+        if any(scenario.trade_count == 0 for scenario in scenarios):
+            base_metrics['no_trades'] = True
+        logger.info(
+            '[RAW-MULTIPAIR] %s: score=%.4f panel=%s',
+            strategy_gene.individual_id,
+            score,
+            panel.panel_id,
+        )
+        return score, base_metrics
 
     def _profitable_pair_multiplier(self, per_pair_profit: Dict[str, float]) -> float:
         if not per_pair_profit:
@@ -993,6 +1224,13 @@ class FitnessEvaluator:
                     "error": error,
                 }
 
+            if self.raw_multipair_score_enabled and skip_validation:
+                return 0.0, {
+                    "profit": 0.0,
+                    "num_trades": 0,
+                    "error": "raw_multipair_forbids_deferred_validation",
+                }
+
             train_coverage = self._pair_trade_coverage_multiplier(train_metrics)
             train_profitability = self._profitable_pair_multiplier(
                 train_metrics["per_pair_profit"]
@@ -1053,6 +1291,13 @@ class FitnessEvaluator:
                     "num_trades": 0,
                     "error": error,
                 }
+
+            if self.raw_multipair_score_enabled:
+                return self._score_raw_complete_panel(
+                    train_metrics=train_metrics,
+                    val_metrics=val_metrics,
+                    strategy_gene=strategy_gene,
+                )
 
             train_coverage = self._pair_trade_coverage_multiplier(train_metrics)
             val_coverage = self._pair_trade_coverage_multiplier(val_metrics)
@@ -1762,10 +2007,59 @@ class FitnessEvaluator:
             Dictionary of metrics
         """
         active_months = self._active_months_from_result(result)
+        holding_minutes: List[float] = []
+        for trade in result.trades or []:
+            duration = trade.get('trade_duration') if isinstance(trade, dict) else None
+            if duration is None and isinstance(trade, dict):
+                opened = trade.get('open_timestamp')
+                closed = trade.get('close_timestamp')
+                if (
+                    isinstance(opened, (int, float))
+                    and not isinstance(opened, bool)
+                    and isinstance(closed, (int, float))
+                    and not isinstance(closed, bool)
+                    and math.isfinite(float(opened))
+                    and math.isfinite(float(closed))
+                    and float(closed) >= float(opened)
+                ):
+                    # Freqtrade serializes these timestamps in milliseconds.
+                    duration = (float(closed) - float(opened)) / 60_000.0
+            if (
+                isinstance(duration, (int, float))
+                and not isinstance(duration, bool)
+                and math.isfinite(float(duration))
+                and float(duration) >= 0.0
+            ):
+                holding_minutes.append(float(duration))
+
+        def quantile(values: List[float], probability: float) -> Optional[float]:
+            if not values:
+                return None
+            ordered = sorted(values)
+            location = probability * (len(ordered) - 1)
+            lower = math.floor(location)
+            upper = math.ceil(location)
+            if lower == upper:
+                return ordered[lower]
+            weight = location - lower
+            return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+        median_holding_minutes = quantile(holding_minutes, 0.5)
+        p90_holding_minutes = quantile(holding_minutes, 0.9)
+        # Raw multipair search and strict replay must consume the identical
+        # daily-equity drawdown definition.  Legacy fitness keeps its historic
+        # trade-level field; missing daily evidence in raw mode remains None
+        # and therefore fails closed in raw-multipair-score-v1.
+        max_drawdown = (
+            result.daily_max_drawdown
+            if getattr(self, 'raw_multipair_score_enabled', False)
+            else result.max_drawdown
+        )
         metrics = {
             'profit': result.profit_percent,
+            'net_return': exact_backtest_net_return(result),
             'sharpe_ratio': max(-10.0, min(50.0, result.sharpe_ratio)),  # Clamp to sane display range
-            'max_drawdown': result.max_drawdown,
+            'max_drawdown': max_drawdown,
             'win_rate': result.win_rate,
             'num_trades': result.total_trades,
             'active_months': active_months,
@@ -1780,7 +2074,21 @@ class FitnessEvaluator:
             'sortino_ratio': max(-10.0, min(50.0, result.sortino_ratio)),  # Clamp to sane display range
             # FreqTrade's ``profit_mean`` is already a decimal ratio.
             'avg_profit': result.avg_profit,
+            # Measured period provenance is retained per independent replay;
+            # the complete raw panel refuses both missing and mismatched dates.
+            'period_start': result.backtest_start,
+            'period_end': result.backtest_end,
             'avg_duration': result.avg_duration,
+            'median_holding_hours': (
+                median_holding_minutes / 60.0
+                if median_holding_minutes is not None
+                else None
+            ),
+            'p90_holding_hours': (
+                p90_holding_minutes / 60.0
+                if p90_holding_minutes is not None
+                else None
+            ),
             'trades': result.trades or [],
         }
         

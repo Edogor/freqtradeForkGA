@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import date
 
 from pydantic import Field
 
@@ -12,12 +12,18 @@ from genetic_algorithm.evaluation.confidence_metrics_v2 import (
     InsufficientTradeEvidenceError,
     clustered_trade_expectancy_lcb,
 )
-from genetic_algorithm.evaluation.direct_backtester import BacktestResult
+from genetic_algorithm.evaluation.direct_backtester import (
+    BacktestResult,
+    exact_backtest_net_return,
+)
 from genetic_algorithm.evaluation.equity_metrics_v2 import (
     MARK_TO_MARKET_EQUITY,
     REALIZED_CLOSE_EQUITY,
     EquityDataError,
     moving_block_bootstrap_bounds,
+)
+from genetic_algorithm.evaluation.period_provenance import (
+    validate_exact_period_evidence,
 )
 from genetic_algorithm.orchestration.result_contract import (
     BacktestRecordV2,
@@ -63,23 +69,6 @@ def _active_months(result: BacktestResult) -> int:
     )
 
 
-def _result_period(result: BacktestResult) -> tuple[date, date] | None:
-    if result.backtest_start is None or result.backtest_end is None:
-        return None
-
-    def parse(value: str) -> date:
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
-        return date.fromisoformat(str(value)[:10])
-
-    try:
-        return parse(result.backtest_start), parse(result.backtest_end)
-    except (TypeError, ValueError):
-        return None
-
-
 def adapt_shadow_backtest_result(
     result: BacktestResult,
     context: BacktestContextV2,
@@ -89,21 +78,41 @@ def adapt_shadow_backtest_result(
     trade_bootstrap_block: int = 5,
     expectancy_cluster_days: int = 1,
     bootstrap_confidence: float = 0.95,
+    point_metrics_only: bool = False,
 ) -> BacktestRecordV2:
     """Create a versioned shadow record without granting premature validity.
 
     Daily and trade confidence bounds are deterministic for the manifest seed.
     A scenario becomes ``VALID`` only with reconciled mark-to-market equity,
     sufficient daily/trade evidence, and all required tail measurements.
+
+    ``point_metrics_only`` is reserved for the hardcore raw-multipair replay.
+    It deliberately skips every bootstrap/LCB/ESS calculation and records only
+    deterministic point measurements.  Technical and period failures remain
+    fail-closed, while legacy confidence gates cannot affect raw-score ranking.
     """
 
     bounds = None
     expectancy = None
     error_detail = None
+    period_evidence = validate_exact_period_evidence(
+        expected_start=context.period_start,
+        expected_end=context.period_end,
+        observed_start=result.backtest_start,
+        observed_end=result.backtest_end,
+        evidence_label=context.scenario_id,
+        timeframe=context.timeframe if point_metrics_only else None,
+    )
     if not result.success:
         status = EvaluationStatus.FAIL
         error_code = "BACKTEST_FAILED"
         error_detail = result.error_message
+    elif (result.no_trades or result.total_trades == 0) and not period_evidence.valid:
+        # Period provenance precedes every economic interpretation, including
+        # the intentionally valid raw-score zero-trade case.
+        status = EvaluationStatus.INVALID
+        error_code = period_evidence.error_code
+        error_detail = period_evidence.error_detail
     elif result.no_trades or result.total_trades == 0:
         status = EvaluationStatus.INCONCLUSIVE
         error_code = "NO_TRADES"
@@ -111,17 +120,17 @@ def adapt_shadow_backtest_result(
         status = EvaluationStatus.INVALID
         error_code = "MISSING_EQUITY_EVIDENCE"
         error_detail = result.equity_error_message
-    elif _result_period(result) is None:
+    elif not period_evidence.valid:
         status = EvaluationStatus.INVALID
-        error_code = "MISSING_PERIOD_EVIDENCE"
-        error_detail = "backtest result has no parseable start/end period"
-    elif _result_period(result) != (context.period_start, context.period_end):
-        status = EvaluationStatus.INVALID
-        error_code = "PERIOD_COVERAGE_MISMATCH"
-        error_detail = (
-            f"measured={_result_period(result)}, "
-            f"declared={(context.period_start, context.period_end)}"
-        )
+        error_code = period_evidence.error_code
+        error_detail = period_evidence.error_detail
+    elif point_metrics_only:
+        # The legacy V2 contract reserves VALID for a complete confidence
+        # envelope.  Keep that artifact status explicitly non-authoritative;
+        # the hardcore backend consumes the raw point fields directly and
+        # never uses this status for scoring, ranking or inheritance.
+        status = EvaluationStatus.INCONCLUSIVE
+        error_code = "RAW_POINT_METRICS_ONLY"
     else:
         try:
             bounds = moving_block_bootstrap_bounds(
@@ -208,11 +217,7 @@ def adapt_shadow_backtest_result(
                         status = EvaluationStatus.VALID
                         error_code = None
 
-    net_return = None
-    if result.starting_balance and result.final_balance is not None:
-        net_return = result.final_balance / result.starting_balance - 1.0
-    elif result.success:
-        net_return = result.profit_percent / 100.0
+    net_return = exact_backtest_net_return(result)
 
     metrics = ScenarioMetricsV2(
         scenario_id=context.scenario_id,
@@ -221,6 +226,12 @@ def adapt_shadow_backtest_result(
         role=context.role,
         period_start=context.period_start,
         period_end=context.period_end,
+        measured_period_start=(
+            period_evidence.measured_start if point_metrics_only else None
+        ),
+        measured_period_end=(
+            period_evidence.measured_end if point_metrics_only else None
+        ),
         cost_multiplier=context.cost_multiplier,
         status=status,
         success=result.success,

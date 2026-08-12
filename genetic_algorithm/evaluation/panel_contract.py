@@ -224,11 +224,16 @@ def replay_on_common_panel(
     panel: EvaluationPanel,
     logger: Any,
     fingerprint: Callable[[Any], str] = phenotype_fingerprint,
+    parallel_evaluator: Any = None,
 ) -> list[Any]:
     """Deduplicate and re-evaluate candidates before cross-panel ranking.
 
     The supplied objects are updated in place.  Failed replays retain explicit
     failed-backtest evidence and are excluded from the returned ranking pool.
+    When supplied, ``parallel_evaluator`` evaluates the stable, deduplicated
+    candidate list as one batch.  The scalar evaluator remains the fallback so
+    legacy callers and environments without a worker pool keep identical
+    behaviour.
     """
     if panel.role != PANEL_ROLE_COMMON_REPLAY:
         raise ValueError("Cross-panel ranking requires a COMMON_REPLAY panel")
@@ -242,41 +247,79 @@ def replay_on_common_panel(
         seen.add(key)
         unique.append(candidate)
 
-    successful: list[Any] = []
-    for index, candidate in enumerate(unique):
-        source_fitness = candidate.raw_fitness
-        source_panel_id = getattr(candidate, "fitness_panel_id", None)
-        source_panel_role = getattr(candidate, "fitness_panel_role", None)
-        source_island = candidate.metrics.get(
-            "evaluation_island", candidate.metrics.get("island_name")
-        )
-        try:
-            fitness, metrics = evaluator.evaluate(
-                candidate.strategy_gene,
-                strategy_name=f"CommonReplay_{index}_{candidate.id}",
-            )
-            metrics = dict(metrics or {})
-        except Exception as exc:
-            fitness = 0.0
-            metrics = {
-                "error": f"common replay failed: {exc}",
-                "profit": 0.0,
-                "num_trades": 0,
-                "max_drawdown": 1.0,
-            }
+    source_context = [
+        {
+            "source_fitness": candidate.raw_fitness,
+            "source_panel_id": getattr(candidate, "fitness_panel_id", None),
+            "source_panel_role": getattr(candidate, "fitness_panel_role", None),
+            "source_island": candidate.metrics.get(
+                "evaluation_island", candidate.metrics.get("island_name")
+            ),
+        }
+        for candidate in unique
+    ]
 
-        metrics.update(
+    def evaluate_serially() -> None:
+        for index, candidate in enumerate(unique):
+            try:
+                fitness, metrics = evaluator.evaluate(
+                    candidate.strategy_gene,
+                    strategy_name=f"CommonReplay_{index}_{candidate.id}",
+                )
+                metrics = dict(metrics or {})
+            except Exception as exc:
+                fitness = 0.0
+                metrics = {
+                    "error": f"common replay failed: {exc}",
+                    "profit": 0.0,
+                    "num_trades": 0,
+                    "max_drawdown": 1.0,
+                }
+            candidate.set_fitness(fitness, metrics)
+
+    if parallel_evaluator is None:
+        evaluate_serially()
+    else:
+        # Finalists already carry their local-search evidence.  Clear it
+        # before batching so a cancelled/missing worker result cannot be
+        # mistaken for a successful common-panel replay by evaluate_batch's
+        # unevaluated-candidate cleanup.
+        for candidate in unique:
+            candidate.adopt_unevaluated_genome(candidate)
+        try:
+            parallel_evaluator.evaluate_batch(unique)
+        except Exception as exc:
+            logger.warning(
+                "[COMMON REPLAY] Parallel batch failed (%s); falling back "
+                "to serial evaluation",
+                exc,
+            )
+            # A failed batch may have updated only a prefix.  Re-run the full
+            # stable list serially so the resulting ranking is deterministic.
+            for candidate in unique:
+                candidate.adopt_unevaluated_genome(candidate)
+            evaluate_serially()
+
+    successful: list[Any] = []
+    for candidate, source in zip(unique, source_context):
+        if not candidate.evaluated:
+            candidate.set_fitness(
+                0.0,
+                {
+                    "error": "common replay produced no worker result",
+                    "profit": 0.0,
+                    "num_trades": 0,
+                    "max_drawdown": 1.0,
+                },
+            )
+        candidate.metrics.update(
             {
                 "fitness_panel_id": panel.panel_id,
                 "fitness_panel_role": panel.role,
                 "common_replay": True,
-                "source_fitness": source_fitness,
-                "source_panel_id": source_panel_id,
-                "source_panel_role": source_panel_role,
-                "source_island": source_island,
+                **source,
             }
         )
-        candidate.set_fitness(fitness, metrics)
         candidate.assign_fitness_panel(panel.panel_id, panel.role)
         if candidate.has_comparable_fitness(panel.panel_id):
             successful.append(candidate)
