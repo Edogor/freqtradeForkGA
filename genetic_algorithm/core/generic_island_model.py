@@ -983,6 +983,16 @@ class GenericIslandModelEvolution:
             # a standard GA with pair validation and must not satisfy the
             # top-level requirement that the island coordinator is enabled.
             cfg['safety_profile']['name'] = 'automation_island_child_v2'
+        elif (
+            cfg.get('safety_profile', {}).get('name')
+            == 'hardcore_multipair_v1'
+        ):
+            # The immutable parent contract has already validated the twelve
+            # explicit specialists and the complete six-pair panel.  A child
+            # is a standard GA evaluated by the coordinator's shared pool, so
+            # it must keep every raw-multipair safety invariant while
+            # explicitly disabling recursive island orchestration.
+            cfg['safety_profile']['name'] = 'hardcore_multipair_child_v1'
 
         # Disable per-island parallel evaluation — the island model
         # creates ONE shared ParallelEvaluator to avoid spawning

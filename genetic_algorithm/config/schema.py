@@ -1727,6 +1727,97 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
                     f"{label} requires diversity_recovery.{key}: {expected}"
                 )
     if (
+        safety.get("name") == "hardcore_multipair_child_v1"
+        and safety.get("enforce", True)
+    ):
+        label = "hardcore_multipair_child_v1"
+        expected_dev = ["BTC/USDT", "SOL/USDT", "XRP/USDT"]
+        expected_val = ["BNB/USDT", "ETH/USDT", "PEPE/USDT"]
+        expected_pairs = set(expected_dev) | set(expected_val)
+        if config.get("config_schema_version") != 2:
+            errors.append(f"{label} requires config_schema_version: 2")
+        if ga.get("mode") != "single_objective":
+            errors.append(f"{label} requires genetic_algorithm.mode: single_objective")
+        if not safety.get("shadow_mode", False):
+            errors.append(f"{label} requires shadow_mode: true")
+        if safety.get("automation_eligible", False):
+            errors.append(f"{label} forbids automation_eligible: true")
+        if max_runtime_minutes is None or max_runtime_minutes > 540:
+            errors.append(f"{label} requires max_runtime_minutes <= 540")
+        if ga.get("allow_self_crossover", True):
+            errors.append(f"{label} requires allow_self_crossover: false")
+        if not ga.get("fitness_sharing", False):
+            errors.append(f"{label} requires fitness sharing")
+        expected_immigrants = 1 if safety.get("canary", False) else 2
+        if ga.get("random_immigrants") != expected_immigrants:
+            errors.append(
+                f"{label} requires exactly {expected_immigrants} random immigrants"
+            )
+
+        for path in _HARDCORE_MULTIPAIR_V1_DISABLED_FEATURES:
+            feature = _nested_config(config, path)
+            if feature.get("enabled", False):
+                errors.append(f"{label} forbids {'.'.join(path)}.enabled: true")
+        generic_island = _nested_config(config, ("generic_island_model",))
+        if generic_island.get("enabled", False):
+            errors.append(f"{label} forbids recursive generic_island_model.enabled: true")
+        for path in sorted(
+            set(
+                _recursively_enabled_forbidden_features(
+                    generic_island,
+                    prefix="generic_island_model",
+                )
+            )
+        ):
+            errors.append(f"{label} recursively forbids enabled feature {path}")
+        if _nested_config(config, ("parallel_evaluation",)).get("enabled", False):
+            errors.append(f"{label} requires the coordinator's shared worker pool")
+
+        raw_score = _nested_config(config, ("raw_multipair_score",))
+        if (
+            not raw_score.get("enabled", False)
+            or raw_score.get("policy_version") != "raw-multipair-score-v1"
+            or raw_score.get("development_pairs") != expected_dev
+            or raw_score.get("validation_pairs") != expected_val
+            or raw_score.get("period_start") != "2023-05-09"
+            or raw_score.get("period_end") != "2026-03-26"
+        ):
+            errors.append(f"{label} requires the immutable raw-multipair-score-v1 panel")
+
+        timeframe = bt.get("timeframe")
+        expected_timerange = {
+            "15m": "1683590400-1774568700",
+            "1h": "1683590400-1774566000",
+        }.get(timeframe)
+        if set(bt.get("pairs", [])) != expected_pairs or len(bt.get("pairs", [])) != 6:
+            errors.append(f"{label} requires the fixed six-pair panel")
+        if expected_timerange is None or bt.get("timerange") != expected_timerange:
+            errors.append(f"{label} requires the exact timeframe panel timerange")
+        if bt.get("fee") != 0.001 or bt.get("slippage_pct") != 0.0005:
+            errors.append(f"{label} requires deterministic fee and slippage")
+        if bt.get("fee_noise_std", 0.0) != 0.0:
+            errors.append(f"{label} requires fee_noise_std: 0.0")
+        if bt.get("auto_download_data", False):
+            errors.append(f"{label} forbids automatic data downloads")
+        constraints = _nested_config(config, ("strategy_constraints",))
+        if (
+            constraints.get("startup_candle_floor") != 75
+            or constraints.get("startup_candle_cap") != 75
+        ):
+            errors.append(f"{label} requires the proven 75-candle startup bound")
+
+        pair_validation = _nested_config(config, ("pair_validation",))
+        if not pair_validation.get("enabled", False):
+            errors.append(f"{label} requires pair_validation.enabled: true")
+        if pair_validation.get("evaluation_mode") != "independent_pairs":
+            errors.append(f"{label} requires independent pair evaluation")
+        if pair_validation.get("validate_top_n_only") != 0:
+            errors.append(f"{label} requires validate_top_n_only: 0")
+        if pair_validation.get("training_pairs") != expected_dev:
+            errors.append(f"{label} requires the fixed development pair split")
+        if pair_validation.get("validation_pairs") != expected_val:
+            errors.append(f"{label} requires the fixed validation pair split")
+    if (
         safety.get("name") == "automation_island_child_v2"
         and safety.get("enforce", True)
     ):

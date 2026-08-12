@@ -13,6 +13,10 @@ from genetic_algorithm.config.schema import (
     validate_config,
     validate_resolved_config_v2_or_raise,
 )
+from genetic_algorithm.core.generic_island_model import (
+    GenericIslandConfig,
+    GenericIslandModelEvolution,
+)
 from genetic_algorithm.orchestration.evolution_worker_v2 import (
     _evolution_worker_kind,
     _validate_evolution_contract,
@@ -37,6 +41,10 @@ PRESET_DIR = "genetic_algorithm/config/presets"
 PRODUCTION_PRESETS = (
     f"{PRESET_DIR}/hardcore_multipair_15m_v1.yaml",
     f"{PRESET_DIR}/hardcore_multipair_1h_v1.yaml",
+)
+CANARY_PRESETS = (
+    f"{PRESET_DIR}/hardcore_multipair_canary_15m_v1.yaml",
+    f"{PRESET_DIR}/hardcore_multipair_canary_1h_v1.yaml",
 )
 EXPECTED_PAIRS = {
     "BTC/USDT",
@@ -188,6 +196,35 @@ def test_runner_and_worker_accept_hardcore_profile_without_market_data(preset_pa
     _validate_supported_config(config)
     assert _evolution_worker_kind(config) == "GENERIC_ISLAND_EVOLUTION"
     _validate_evolution_contract(manifest, config, policy, data_manifest)
+
+
+@pytest.mark.parametrize("preset_path", (*PRODUCTION_PRESETS, *CANARY_PRESETS))
+def test_every_materialized_hardcore_subisland_passes_child_safety_contract(
+    preset_path,
+):
+    config = load_config(preset_path)
+    coordinator = object.__new__(GenericIslandModelEvolution)
+    coordinator.config = config
+    coordinator.generations = config["generic_island_model"]["generations"]
+
+    for raw in config["generic_island_model"]["islands"]:
+        island = GenericIslandConfig(
+            name=raw["name"],
+            population_size=raw["population_size"],
+            generations=raw["generations"],
+            seed=raw["seed"],
+            indicator_pool=raw["indicator_pool"],
+            pairs=raw["pairs"],
+            walk_forward_enabled=raw["walk_forward_enabled"],
+        )
+        child = coordinator._build_island_config(island)
+
+        validate_resolved_config_v2_or_raise(child)
+        assert child["safety_profile"]["name"] == "hardcore_multipair_child_v1"
+        assert child["generic_island_model"]["enabled"] is False
+        assert child["parallel_evaluation"]["enabled"] is False
+        assert child["raw_multipair_score"]["enabled"] is True
+        assert set(child["backtesting"]["pairs"]) == EXPECTED_PAIRS
 
 
 def test_shared_cache_slices_max_warmup_to_exact_strategy_warmup():
