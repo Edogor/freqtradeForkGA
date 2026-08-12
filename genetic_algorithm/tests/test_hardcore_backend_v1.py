@@ -401,6 +401,17 @@ def test_strict_replay_rejects_data_evidence_codes_deterministically(error_code)
     assert _classify_failure(error_code, None) == FailureClass.DETERMINISTIC_DATA
 
 
+def test_raw_replay_score_drift_is_not_retried_as_transient():
+    detail = (
+        "raw common-panel replay changed deterministic source scores: "
+        "Gen0_Ind2:source=-55,replay=-56.7"
+    )
+
+    assert _classify_failure("WORKER_EXECUTION_FAILED", detail) == (
+        FailureClass.DETERMINISTIC_CONFIG
+    )
+
+
 def test_technical_zero_trade_record_is_not_converted_to_valid_evidence():
     metrics = SimpleNamespace(
         pair="BTC/USDT",

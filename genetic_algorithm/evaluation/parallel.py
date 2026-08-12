@@ -318,6 +318,7 @@ def _evaluate_strategy_in_worker(
     strategy_index: int,
     nsga2_mode: bool = False,
     objectives_config: List[Dict[str, Any]] = None,
+    strategy_execution_id: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -361,13 +362,18 @@ def _evaluate_strategy_in_worker(
         
         # Reconstruct StrategyGene from dict
         strategy_gene = StrategyGene.from_dict(strategy_gene_dict)
-        # Individual ids are island-local and collide heavily when the top
-        # candidates of all islands are replayed in one parallel batch.  The
-        # id only names the generated strategy class; indicator instance ids
-        # already carry the executable genome identity.  Use the stable batch
-        # index for a collision-free evaluation clone without mutating the
-        # persisted candidate.
-        strategy_gene.individual_id = strategy_index
+        # Individual ids are island-local and collide heavily.  Batch-local
+        # indexes are not sufficient either: the persistent worker pool sees
+        # many three-candidate island batches, and reusing ``Ind0..Ind2`` can
+        # make Python/Freqtrade reuse stale imported bytecode after the file is
+        # replaced.  The parent therefore assigns a monotonic id for the whole
+        # pool lifetime.  It only names the generated evaluation class and
+        # never mutates the persisted genome.
+        strategy_gene.individual_id = (
+            strategy_index
+            if strategy_execution_id is None
+            else strategy_execution_id
+        )
         
         # Evaluate
         fitness, metrics = _worker_evaluator.evaluate(strategy_gene)
@@ -1360,6 +1366,9 @@ class ParallelEvaluator:
         # Persistent pool — created lazily on first evaluate_batch()
         self._executor: Optional[ProcessPoolExecutor] = None
         self._pool_generation_count = 0  # How many batches this pool has served
+        # Generated strategy modules must never be reused within a persistent
+        # worker pool.  Island-local ids and per-batch indexes both repeat.
+        self._next_strategy_execution_id = 0
 
         # Shared OHLCV data manager — created with the pool, cleaned up on shutdown
         self._shared_data_manager = None
@@ -1600,10 +1609,12 @@ class ParallelEvaluator:
             tasks.append({
                 'strategy_gene_dict': ind.strategy_gene.to_dict(),
                 'strategy_index': i,
+                'strategy_execution_id': self._next_strategy_execution_id,
                 'nsga2_mode': self.nsga2_mode,
                 'objectives_config': self.objectives_config,
                 'nsga2_min_trades': nsga2_min_trades,
             })
+            self._next_strategy_execution_id += 1
         
         self._pool_generation_count += 1
         logger.info(f"[PARALLEL] Evaluating {len(tasks)} strategies with {self.num_workers} workers "
@@ -1626,6 +1637,7 @@ class ParallelEvaluator:
                     task['strategy_index'],
                     task['nsga2_mode'],
                     task['objectives_config'],
+                    strategy_execution_id=task['strategy_execution_id'],
                     nsga2_min_trades=task['nsga2_min_trades'],
                 ): task['strategy_index']
                 for task in tasks

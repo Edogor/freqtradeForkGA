@@ -234,7 +234,7 @@ class TestWorkerFunction:
         assert result['success'] is False
         assert result['error'] == 'backtest failed'
 
-    def test_worker_uses_batch_unique_evaluation_id(
+    def test_worker_uses_pool_unique_evaluation_id(
         self, sample_strategy_gene, monkeypatch
     ):
         """Duplicate island-local ids must not share a generated class name."""
@@ -252,11 +252,40 @@ class TestWorkerFunction:
 
         source = sample_strategy_gene.to_dict()
         source['individual_id'] = 0
-        result = _evaluate_strategy_in_worker(source, 17)
+        result = _evaluate_strategy_in_worker(
+            source,
+            17,
+            strategy_execution_id=731,
+        )
 
         assert result['success'] is True
-        assert observed_ids == [17]
+        assert observed_ids == [731]
         assert source['individual_id'] == 0
+
+    def test_batches_never_reuse_generated_strategy_execution_ids(
+        self, minimal_config, sample_individuals
+    ):
+        """A persistent pool needs unique module names across every batch."""
+        evaluator = ParallelEvaluator(minimal_config, num_workers=1)
+        future = Future()
+        future.set_result({
+            'index': 0,
+            'fitness': 0.75,
+            'metrics': {},
+            'success': True,
+        })
+        executor = MagicMock()
+        executor.submit.return_value = future
+        evaluator._check_pool_health = MagicMock(return_value=True)
+        evaluator._get_executor = MagicMock(return_value=executor)
+
+        evaluator.evaluate_batch([sample_individuals[0]])
+        evaluator.evaluate_batch([sample_individuals[0]])
+
+        first = executor.submit.call_args_list[0].kwargs
+        second = executor.submit.call_args_list[1].kwargs
+        assert first['strategy_execution_id'] == 0
+        assert second['strategy_execution_id'] == 1
 
     def test_workers_receive_process_private_strategy_directories(self, tmp_path):
         config_a = {

@@ -680,6 +680,7 @@ def _classify_failure(error_code: str | None, detail: str | None) -> FailureClas
             "RUN REQUEST",
             "REQUEST ISLANDS",
             "LANE PRESET",
+            "RAW COMMON-PANEL REPLAY CHANGED",
         )
     ):
         return FailureClass.DETERMINISTIC_CONFIG
