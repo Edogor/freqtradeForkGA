@@ -81,6 +81,7 @@ genetic_algorithm:
   diversity_threshold: 0.10
   behavioral_distance_weight: 0.25
   allow_self_crossover: false
+  seed_known_archetypes: false
   mode: single_objective
 
 parallel_evaluation:

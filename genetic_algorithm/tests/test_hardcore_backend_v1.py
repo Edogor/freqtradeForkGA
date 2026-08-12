@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,8 @@ from genetic_algorithm.orchestration.hardcore_backend_v1 import (
     _classify_failure,
     _engine_stop_reason,
     _holding_hours,
+    _live_engine_progress,
+    _live_pair_metrics,
     _materialized_config,
     _scenario_from_record,
     _strict_replay_top_n,
@@ -33,6 +36,105 @@ from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
 
 
 NOW = datetime(2026, 8, 12, tzinfo=UTC)
+
+
+def test_live_progress_uses_raw_score_and_checkpoint_plateau(tmp_path):
+    evolution = tmp_path / "evolution"
+    checkpoints = evolution / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    rows = [
+        {
+            "generation": 4,
+            "best_fitness": 99.0,
+            "best_raw_fitness": -7.0,
+        },
+        {
+            "generation": 5,
+            "best_fitness": 12.0,
+            "best_raw_fitness": 8.5,
+        },
+    ]
+    (evolution / "generation_trace_v2.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    (checkpoints / "island_checkpoint_gen5_test.json").write_text(
+        json.dumps(
+            {"common_panel_replay": {"no_improvement_checks": 3}}
+        ),
+        encoding="utf-8",
+    )
+
+    generation, score, plateau = _live_engine_progress(tmp_path)
+
+    assert generation == 6
+    assert score == 8.5
+    assert plateau == 3
+
+
+def test_live_pair_metrics_are_read_from_checkpoint(tmp_path):
+    target = tmp_path / "evolution/checkpoints"
+    target.mkdir(parents=True)
+    pairs = ("BTC/USDT", "SOL/USDT", "XRP/USDT", "BNB/USDT", "ETH/USDT", "PEPE/USDT")
+    raw_pair = {
+        "success": True,
+        "trade_count": 35,
+        "active_months": 20,
+        "net_return": 0.1,
+        "net_expectancy": 0.005,
+        "profit_factor": 1.5,
+        "profit_factor_censored": False,
+        "median_holding_hours": 2.0,
+        "p90_holding_hours": 8.0,
+        "max_drawdown": 0.05,
+        "max_drawdown_duration_days": 20.0,
+        "max_consecutive_losses": 3,
+    }
+    component = {
+        "return_score": 0.5,
+        "expectancy_score": 0.5,
+        "profit_factor_score": 0.5,
+        "activity_score": 0.5,
+        "holding_score": 1.0,
+        "drawdown_risk": 0.2,
+        "drawdown_duration_risk": 0.2,
+        "loss_streak_risk": 0.2,
+        "overtrading_risk": 0.0,
+    }
+    checkpoint = {
+        "island_populations": {
+            "mixed-1": {
+                "individuals": [
+                    {
+                        "evaluated": True,
+                        "raw_fitness": 12.5,
+                        "metrics": {
+                            "raw_multipair_status": "VALID",
+                            "raw_pair_metrics": {
+                                pair: dict(raw_pair) for pair in pairs
+                            },
+                            "raw_multipair_result": {
+                                "timeframe": "15m",
+                                "pair_components": {
+                                    pair: {"components": dict(component)}
+                                    for pair in pairs
+                                },
+                            },
+                        },
+                    }
+                ]
+            }
+        }
+    }
+    (target / "island_checkpoint_gen5_test.json").write_text(
+        json.dumps(checkpoint),
+        encoding="utf-8",
+    )
+
+    metrics = _live_pair_metrics(tmp_path)
+
+    assert [item.pair for item in metrics] == list(pairs)
+    assert all(item.trade_count > 0 for item in metrics)
 
 
 def _request(repo_root: Path, *, recipe: SearchRecipe) -> EvolutionRunRequestV1:

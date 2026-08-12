@@ -29,6 +29,7 @@ import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from concurrent.futures.process import BrokenProcessPool
+from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass
 
@@ -53,6 +54,37 @@ def _metrics_error(metrics: Any) -> Optional[str]:
 def _build_worker_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Return a detached worker config without changing runtime semantics."""
     return copy.deepcopy(config)
+
+
+def _isolate_worker_strategy_directory(
+    config: Dict[str, Any],
+    *,
+    worker_pid: int,
+) -> Path:
+    """Give one worker exclusive ownership of its generated strategy files.
+
+    Candidate ids are local to an island.  A common-panel batch therefore
+    legitimately contains many ``GenN_Ind0`` and ``GenN_Ind1`` candidates.
+    Atomic file replacement prevents partial files, but it does not prevent
+    separate processes from replacing the same complete file before
+    Freqtrade imports it.  A process-private directory removes that race at
+    the filesystem boundary.
+    """
+
+    storage = config.setdefault('storage', {})
+    configured = storage.get('generated_strategy_dir')
+    if configured:
+        base = Path(configured)
+    else:
+        base = (
+            Path(__file__).resolve().parents[2]
+            / 'user_data'
+            / 'strategies'
+            / 'ga_generated'
+        )
+    isolated = base / '_parallel_workers' / f'worker-{worker_pid}'
+    storage['generated_strategy_dir'] = str(isolated)
+    return isolated
 
 
 def _prepopulate_shared_bt_data_cache(
@@ -249,6 +281,10 @@ def _init_worker(config: Dict[str, Any]):
     # execution.  The old post-hoc top-K shortcut evaluated a different
     # algorithm than the sequential path.
     worker_config = _build_worker_config(config)
+    _isolate_worker_strategy_directory(
+        worker_config,
+        worker_pid=_os.getpid(),
+    )
     
     _worker_config = worker_config
     _worker_evaluator = FitnessEvaluator(worker_config)
@@ -325,6 +361,13 @@ def _evaluate_strategy_in_worker(
         
         # Reconstruct StrategyGene from dict
         strategy_gene = StrategyGene.from_dict(strategy_gene_dict)
+        # Individual ids are island-local and collide heavily when the top
+        # candidates of all islands are replayed in one parallel batch.  The
+        # id only names the generated strategy class; indicator instance ids
+        # already carry the executable genome identity.  Use the stable batch
+        # index for a collision-free evaluation clone without mutating the
+        # persisted candidate.
+        strategy_gene.individual_id = strategy_index
         
         # Evaluate
         fitness, metrics = _worker_evaluator.evaluate(strategy_gene)

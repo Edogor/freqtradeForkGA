@@ -22,6 +22,7 @@ from genetic_algorithm.evaluation.parallel import (
     get_recommended_workers,
     _evaluate_strategy_in_worker,
     _init_worker,
+    _isolate_worker_strategy_directory,
     _prepopulate_shared_bt_data_cache,
 )
 from genetic_algorithm.core.strategy_gene import StrategyGene, IndicatorGene, ConditionGene
@@ -232,6 +233,47 @@ class TestWorkerFunction:
 
         assert result['success'] is False
         assert result['error'] == 'backtest failed'
+
+    def test_worker_uses_batch_unique_evaluation_id(
+        self, sample_strategy_gene, monkeypatch
+    ):
+        """Duplicate island-local ids must not share a generated class name."""
+        import genetic_algorithm.evaluation.parallel as parallel_module
+
+        observed_ids = []
+        evaluator = MagicMock()
+
+        def evaluate(gene):
+            observed_ids.append(gene.individual_id)
+            return 1.0, {}
+
+        evaluator.evaluate.side_effect = evaluate
+        monkeypatch.setattr(parallel_module, '_worker_evaluator', evaluator)
+
+        source = sample_strategy_gene.to_dict()
+        source['individual_id'] = 0
+        result = _evaluate_strategy_in_worker(source, 17)
+
+        assert result['success'] is True
+        assert observed_ids == [17]
+        assert source['individual_id'] == 0
+
+    def test_workers_receive_process_private_strategy_directories(self, tmp_path):
+        config_a = {
+            'storage': {'generated_strategy_dir': str(tmp_path / 'generated')}
+        }
+        config_b = {
+            'storage': {'generated_strategy_dir': str(tmp_path / 'generated')}
+        }
+
+        first = _isolate_worker_strategy_directory(config_a, worker_pid=101)
+        second = _isolate_worker_strategy_directory(config_b, worker_pid=202)
+
+        assert first != second
+        assert first.name == 'worker-101'
+        assert second.name == 'worker-202'
+        assert config_a['storage']['generated_strategy_dir'] == str(first)
+        assert config_b['storage']['generated_strategy_dir'] == str(second)
 
     def test_batch_defensively_counts_metrics_error_as_failure(
         self, minimal_config, sample_individuals

@@ -658,6 +658,7 @@ class AttemptPollV1(StrictV2Model):
     observed_at: datetime
     current_generation: int = Field(default=0, ge=0, le=30)
     current_score: float | None = None
+    current_pair_metrics: list[RawPairMetricsV1] = Field(default_factory=list)
     plateau_checks: int = Field(default=0, ge=0, le=4)
     evidence: AttemptEvidenceV1 | None = None
 
@@ -1092,6 +1093,7 @@ class CampaignStatusV1(StrictV2Model):
     active_run_id: str | None = None
     active_generation: int | None = None
     current_score: float | None = None
+    current_pair_metrics: list[RawPairMetricsV1] = Field(default_factory=list)
     global_champion_score: float | None = None
     global_champion_pair_metrics: list[RawPairMetricsV1] = Field(default_factory=list)
     lane_champion_scores: dict[CampaignLane, float | None]
@@ -1948,6 +1950,7 @@ class HardcoreCampaignControllerV1:
             active_run_id=active.request.run_id if active else None,
             active_generation=poll.current_generation if poll else None,
             current_score=poll.current_score if poll else None,
+            current_pair_metrics=poll.current_pair_metrics if poll else [],
             global_champion_score=(
                 lane_state.global_champion_score if lane_state else None
             ),

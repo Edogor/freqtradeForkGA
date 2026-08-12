@@ -379,6 +379,7 @@ class V2HardcoreAttemptBackend:
         self._deliver_pending_stop(state, handle)
         observed = tick.observed_at
         generation, current_score, plateau = _live_engine_progress(handle.artifact_root)
+        current_pair_metrics = _live_pair_metrics(handle.artifact_root)
         if state.status not in _TERMINAL:
             return AttemptPollV1(
                 status=(
@@ -395,6 +396,7 @@ class V2HardcoreAttemptBackend:
                 observed_at=observed,
                 current_generation=generation,
                 current_score=current_score,
+                current_pair_metrics=current_pair_metrics,
                 plateau_checks=plateau,
             )
         evidence = self._load_or_build_evidence(request, state)
@@ -403,6 +405,11 @@ class V2HardcoreAttemptBackend:
             observed_at=max(observed, evidence.finished_at),
             current_generation=evidence.actual_generations,
             current_score=(evidence.candidates[0].score if evidence.candidates else None),
+            current_pair_metrics=(
+                evidence.candidates[0].pair_metrics
+                if evidence.candidates
+                else []
+            ),
             plateau_checks=evidence.plateau_checks,
             evidence=evidence,
         )
@@ -505,10 +512,117 @@ def _live_engine_progress(root: str | Path) -> tuple[int, float | None, int]:
             continue
         if isinstance(row.get("generation"), int):
             generations.append(row["generation"])
-        score = _finite_or_none(row.get("best_fitness"))
+        # The campaign ranks and archives the signed raw multipair score.
+        # ``best_fitness`` is the post-sharing reproduction value and is not
+        # comparable across islands or generations.
+        score = _finite_or_none(row.get("best_raw_fitness"))
         if score is not None:
             scores.append(score)
-    return (max(generations) + 1 if generations else 0, max(scores) if scores else None, 0)
+    plateau_checks = 0
+    checkpoint_path, _checkpoint_hash = _latest_checkpoint(Path(root).resolve())
+    if checkpoint_path is not None:
+        try:
+            checkpoint = json.loads(
+                Path(checkpoint_path).read_text(encoding="utf-8")
+            )
+            common = checkpoint.get("common_panel_replay", {})
+            if isinstance(common, dict):
+                plateau_checks = int(common.get("no_improvement_checks", 0))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            # Live status is observational.  A malformed checkpoint remains
+            # authoritative only when resume/outcome verification reads it.
+            plateau_checks = 0
+    return (
+        max(generations) + 1 if generations else 0,
+        max(scores) if scores else None,
+        plateau_checks,
+    )
+
+
+def _live_pair_metrics(root: str | Path) -> list[RawPairMetricsV1]:
+    """Read the latest measured raw champion from a resumable checkpoint."""
+
+    checkpoint_path, _checkpoint_hash = _latest_checkpoint(Path(root).resolve())
+    if checkpoint_path is None:
+        return []
+    try:
+        checkpoint = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
+        populations = checkpoint.get("island_populations", {})
+        candidates = [
+            item
+            for population in populations.values()
+            for item in population.get("individuals", [])
+            if item.get("evaluated")
+            and _finite_or_none(item.get("raw_fitness")) is not None
+            and item.get("metrics", {}).get("raw_multipair_status") == "VALID"
+        ]
+        if not candidates:
+            return []
+        champion = max(
+            candidates,
+            key=lambda item: float(item["raw_fitness"]),
+        )
+        metrics = champion["metrics"]
+        raw_pairs = metrics.get("raw_pair_metrics", {})
+        result = metrics.get("raw_multipair_result", {})
+        pair_components = result.get("pair_components", {})
+        timeframe = str(result.get("timeframe") or "")
+        panel = RawMultiPairPanel(timeframe=timeframe)
+        rows: list[RawPairMetricsV1] = []
+        for pair in HARDCORE_PANEL_PAIRS:
+            raw = raw_pairs[pair]
+            component = pair_components[pair]["components"]
+            trade_count = int(raw["trade_count"])
+            positive = trade_count > 0
+            rows.append(
+                RawPairMetricsV1(
+                    pair=pair,
+                    role=(
+                        PairRole.DEVELOPMENT
+                        if pair in HARDCORE_PANEL_PAIRS[:3]
+                        else PairRole.VALIDATION
+                    ),
+                    net_return=raw.get("net_return") if positive else None,
+                    net_expectancy=(
+                        raw.get("net_expectancy") if positive else None
+                    ),
+                    profit_factor=raw.get("profit_factor") if positive else None,
+                    profit_factor_censored=(
+                        raw.get("profit_factor_censored") if positive else None
+                    ),
+                    trade_count=trade_count,
+                    active_months=int(raw["active_months"]),
+                    calendar_months=float(panel.calendar_months),
+                    median_holding_hours=(
+                        raw.get("median_holding_hours") if positive else None
+                    ),
+                    p90_holding_hours=(
+                        raw.get("p90_holding_hours") if positive else None
+                    ),
+                    max_drawdown=raw.get("max_drawdown") if positive else None,
+                    max_drawdown_duration_days=(
+                        raw.get("max_drawdown_duration_days")
+                        if positive
+                        else None
+                    ),
+                    max_consecutive_losses=(
+                        raw.get("max_consecutive_losses") if positive else None
+                    ),
+                    normalized_components={
+                        short: float(component[long])
+                        for short, long in _COMPONENT_ALIAS.items()
+                    },
+                )
+            )
+        return rows
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return []
 
 
 def _finite_or_none(value: Any) -> float | None:

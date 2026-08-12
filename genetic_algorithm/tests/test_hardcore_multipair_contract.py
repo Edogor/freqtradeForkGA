@@ -82,6 +82,19 @@ def test_production_preset_is_exact_twelve_island_six_pair_contract(preset_path)
     ]
     assert all(set(island["pairs"]) == EXPECTED_PAIRS for island in islands)
     assert config["pair_validation"]["validate_top_n_only"] == 0
+    assert config["genetic_algorithm"]["seed_known_archetypes"] is False
+
+
+def test_hardcore_profile_rejects_built_in_archetype_seeding():
+    config = load_config(PRODUCTION_PRESETS[0])
+    config["genetic_algorithm"]["seed_known_archetypes"] = True
+
+    errors = _contract_errors(config)
+
+    assert any(
+        "requires fresh islands without built-in archetype seeds" in error
+        for error in errors
+    ), errors
 
 
 @pytest.mark.parametrize(

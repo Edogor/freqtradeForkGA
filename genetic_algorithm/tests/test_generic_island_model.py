@@ -574,6 +574,45 @@ class TestMigrationHelpers:
         unevaluated = [ind for ind in pop.individuals if not ind.evaluated]
         assert len(unevaluated) == 1
 
+    def test_inject_migrants_preserves_signed_negative_elites(self):
+        """An unevaluated offspring is worse than every valid signed score."""
+        config = _minimal_config(num_islands=2)
+        model = _create_model_from_config(config)
+        pop = _make_population([-10.0, -40.0])
+        unevaluated = _make_individual(
+            fitness=None,
+            generation=5,
+            individual_id=77,
+        )
+        pop.individuals.append(unevaluated)
+        model.island_populations['target'] = pop
+
+        migrant = _make_individual(
+            fitness=5.0,
+            generation=4,
+            individual_id=99,
+        )
+        replaced = model._inject_migrants(
+            'target',
+            [migrant],
+            generation=5,
+        )
+
+        assert replaced == 1
+        measured_scores = sorted(
+            ind.raw_fitness
+            for ind in pop.individuals
+            if ind.evaluated and ind.raw_fitness is not None
+        )
+        assert measured_scores == [-40.0, -10.0]
+        injected = [
+            ind
+            for ind in pop.individuals
+            if ind.metrics.get('origin') == 'migrant_from_unknown'
+        ]
+        assert len(injected) == 1
+        assert injected[0].strategy_gene.individual_id == 77
+
     def test_inject_migrants_empty_list(self):
         config = _minimal_config(num_islands=2)
         model = _create_model_from_config(config)
@@ -918,6 +957,42 @@ class TestProductionEvolutionSupervision:
 
         assert model._stop_reason == OUTCOME_TECHNICAL_INVALID
         assert model.common_panel_replay_history[-1]['technical_stop_triggered']
+
+    def test_raw_common_replay_score_drift_is_technical_invalid(self):
+        config = _minimal_config(num_islands=1)
+        config['raw_multipair_score'] = {
+            'enabled': True,
+            'policy_version': 'raw-multipair-score-v1',
+            'development_pairs': ['BTC/USDT', 'SOL/USDT', 'XRP/USDT'],
+            'validation_pairs': ['BNB/USDT', 'ETH/USDT', 'PEPE/USDT'],
+            'period_start': '2023-05-09',
+            'period_end': '2026-03-26',
+        }
+        config['generic_island_model']['common_panel_replay'] = (
+            self._common_replay_config(interval=1)
+        )
+        model = _create_model_from_config(config)
+        candidate = _make_individual(fitness=10.0)
+        candidate.metrics['source_fitness'] = 9.0
+        model._evaluated_generation_elites = {
+            model.island_configs[0].name: [candidate]
+        }
+        panel = MagicMock(panel_id='panel_v1_' + 'a' * 24)
+        model._create_common_replay_evaluator = MagicMock(
+            return_value=(MagicMock(), panel)
+        )
+
+        with patch(
+            'genetic_algorithm.core.generic_island_model.replay_on_common_panel',
+            return_value=[candidate],
+        ):
+            model._maybe_replay_common_panel(0)
+
+        assert model._stop_reason == OUTCOME_TECHNICAL_INVALID
+        event = model.common_panel_replay_history[-1]
+        assert event['technical_stop_triggered'] is True
+        assert event['valid_count'] == 0
+        assert 'source=9' in event['parity_failures'][0]
 
     def test_material_relative_epsilon_and_min_generation(self):
         config = _minimal_config(num_islands=1)

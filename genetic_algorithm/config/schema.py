@@ -113,6 +113,7 @@ DEFAULTS: Dict[str, Any] = {
         "diversity_threshold": 0.15,
         "allow_self_crossover": False,
         "random_immigrants": 5,
+        "seed_known_archetypes": True,
         "mode": "single_objective",
     },
     # === Fitness weights (must sum to ~1.0) ===
@@ -1534,6 +1535,10 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             errors.append(f"{label} requires allow_self_crossover: false")
         if ga.get("random_immigrants") != 2:
             errors.append(f"{label} requires exactly two random immigrants")
+        if ga.get("seed_known_archetypes", True):
+            errors.append(
+                f"{label} requires fresh islands without built-in archetype seeds"
+            )
         if not ga.get("fitness_sharing", False):
             errors.append(f"{label} requires fitness sharing")
 

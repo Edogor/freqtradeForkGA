@@ -2544,7 +2544,17 @@ class GenericIslandModelEvolution:
         # Sort population worst-first
         sorted_inds = sorted(
             pop.individuals,
-            key=lambda x: x.raw_fitness if x.raw_fitness is not None else -1,
+            # Migration is injected into the already-created next generation,
+            # which normally contains measured elites and unevaluated
+            # offspring.  Raw multipair fitness is signed, so using ``-1`` for
+            # missing fitness can rank a valid negative elite below an
+            # unevaluated child.  Unmeasured slots are the replacement target
+            # and must sort before every finite score.
+            key=lambda x: (
+                x.raw_fitness
+                if x.raw_fitness is not None
+                else float('-inf')
+            ),
         )
 
         replaced = 0
@@ -2797,6 +2807,20 @@ class GenericIslandModelEvolution:
                 self, '_shared_parallel_evaluator', None
             ),
         )
+        parity_failures = self._raw_replay_parity_failures(replayed)
+        if parity_failures:
+            self._request_stop(
+                OUTCOME_TECHNICAL_INVALID,
+                'raw common-panel replay changed deterministic source scores: '
+                + '; '.join(parity_failures[:3]),
+            )
+            # One drift proves that the replay batch is not trustworthy.  Do
+            # not salvage apparently matching siblings from the same batch or
+            # allow any of them to reach HOF/strict replay.
+            self.evolution_outcome['common_panel_failed_evaluations'] += (
+                unique_candidate_count
+            )
+            return []
         replayed = [item for item in replayed if self._is_valid_evidence(item)]
         failed_count = max(0, unique_candidate_count - len(replayed))
         self.evolution_outcome['common_panel_valid_evaluations'] += len(replayed)
@@ -2814,6 +2838,49 @@ class GenericIslandModelEvolution:
                 generation=max(0, self.generations - 1),
             )
         return replayed
+
+    def _raw_replay_parity_failures(
+        self,
+        candidates: List[Individual],
+    ) -> List[str]:
+        """Return deterministic score drifts for the immutable raw panel.
+
+        Every raw-multipair search candidate has already been evaluated on the
+        exact same six-pair panel.  Replaying an unchanged phenotype may
+        refresh provenance, but it must not change its raw score.  Treat a
+        drift as technical corruption (for example a generated-strategy file
+        collision) instead of allowing it to steer plateau or archive state.
+        """
+
+        if not self.config.get('raw_multipair_score', {}).get('enabled', False):
+            return []
+        failures: List[str] = []
+        for candidate in candidates:
+            source = candidate.metrics.get('source_fitness')
+            replay = candidate.raw_fitness
+            if source is None or replay is None:
+                continue
+            try:
+                source_value = float(source)
+                replay_value = float(replay)
+            except (TypeError, ValueError, OverflowError):
+                failures.append(f'{candidate.id}:non-numeric score')
+                continue
+            if (
+                not math.isfinite(source_value)
+                or not math.isfinite(replay_value)
+                or not math.isclose(
+                    source_value,
+                    replay_value,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                failures.append(
+                    f'{candidate.id}:source={source_value:.12g},'
+                    f'replay={replay_value:.12g}'
+                )
+        return failures
 
     def _maybe_handle_diversity(self, generation: int) -> None:
         """Recover one broad island collapse, then stop if it persists."""
@@ -3049,6 +3116,33 @@ class GenericIslandModelEvolution:
                 self, '_shared_parallel_evaluator', None
             ),
         )
+        parity_failures = self._raw_replay_parity_failures(replayed)
+        if parity_failures:
+            event = {
+                'generation': generation,
+                'panel_id': panel.panel_id,
+                'candidate_count': unique_candidate_count,
+                'valid_count': 0,
+                'failed_count': len(parity_failures),
+                'best_fitness': None,
+                'median_fitness': None,
+                'improved': False,
+                'material_improvement_threshold': None,
+                'no_improvement_checks': self._common_panel_no_improvement_checks,
+                'early_stop_triggered': False,
+                'technical_stop_triggered': True,
+                'parity_failures': parity_failures,
+            }
+            self.common_panel_replay_history.append(event)
+            self.evolution_outcome['common_panel_failed_evaluations'] += len(
+                parity_failures
+            )
+            self._request_stop(
+                OUTCOME_TECHNICAL_INVALID,
+                'raw common-panel replay changed deterministic source scores: '
+                + '; '.join(parity_failures[:3]),
+            )
+            return
         measured = [item for item in replayed if self._is_valid_evidence(item)]
         failed_count = max(0, unique_candidate_count - len(measured))
         self.evolution_outcome['common_panel_valid_evaluations'] += len(measured)

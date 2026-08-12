@@ -1063,8 +1063,18 @@ class GeneticAlgorithm:
                 f"[WARM-START] Injected {warm_injected} strategies from previous experiment"
             )
 
-        # Seed 15% of population with known-good archetype strategies
-        seed_count = max(1, int(self.population_size * 0.15))
+        # Legacy runs seed 15% of the population with known-good archetypes.
+        # Production multipair islands explicitly disable this so nine fresh
+        # islands are genuinely random and archive inheritance remains the
+        # only cross-run initialization channel.
+        seed_count = (
+            max(1, int(self.population_size * 0.15))
+            if self.config.get('genetic_algorithm', {}).get(
+                'seed_known_archetypes',
+                True,
+            )
+            else 0
+        )
         seed_start_id = 0
 
         # Re-inject hall of fame members (up to inject_count)
@@ -1087,14 +1097,26 @@ class GeneticAlgorithm:
         try:
             from genetic_algorithm.core.seed_strategies import create_seed_population
 
-            seed_genes = create_seed_population(
-                generation=0, count=seed_count, config=self.config, start_id=seed_start_id
+            seed_genes = (
+                create_seed_population(
+                    generation=0,
+                    count=seed_count,
+                    config=self.config,
+                    start_id=seed_start_id,
+                )
+                if seed_count > 0
+                else []
             )
             for gene in seed_genes:
                 individual = Individual(strategy_gene=gene)
                 population.add_individual(individual)
                 seed_start_id += 1
-            self.logger.info(f"Seeded {len(seed_genes)} strategies from known archetypes")
+            if seed_genes:
+                self.logger.info(
+                    f"Seeded {len(seed_genes)} strategies from known archetypes"
+                )
+            else:
+                self.logger.info("Known archetype seeding disabled")
         except Exception as e:
             self.logger.warning(f"Failed to seed population: {e}. Using all random strategies.")
             seed_start_id = 0
