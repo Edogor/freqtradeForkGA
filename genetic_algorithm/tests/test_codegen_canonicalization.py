@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 from genetic_algorithm.engine.operators.mutation import _mutate_condition_threshold
 from genetic_algorithm.genome.codegen import StrategyGenerator
 from genetic_algorithm.genome.gene import ConditionGene, IndicatorGene, StrategyGene
@@ -79,6 +81,31 @@ def test_codegen_cache_hit_repairs_genome_before_fingerprinting(monkeypatch):
     assert first.strategy_fingerprint() == second.strategy_fingerprint()
     assert first_code == second_code
     assert StrategyGene.from_dict_exact(second.to_dict()).to_dict() == second.to_dict()
+
+
+def test_codegen_repair_is_deterministic_across_replay_rng_states():
+    """Worker replay must compile the same repaired executable phenotype."""
+    original = StrategyGene(
+        generation=4,
+        individual_id=7,
+        indicators=[
+            IndicatorGene("OBV", {}, instance_id="OBV_0"),
+            IndicatorGene("VWAP", {"period": 22}, instance_id="VWAP_0"),
+        ],
+        entry_conditions=[ConditionGene("VWAP_0", "cross_above", 0)],
+        exit_conditions=[ConditionGene("VWAP_0", "cross_below", 0)],
+        timeframe="1h",
+    )
+    first = StrategyGene.from_dict_exact(original.to_dict())
+    second = StrategyGene.from_dict_exact(original.to_dict())
+
+    random.seed(11)
+    StrategyGenerator(_config()).generate_strategy_code(first)
+    random.seed(982451653)
+    StrategyGenerator(_config()).generate_strategy_code(second)
+
+    assert first.to_dict() == second.to_dict()
+    assert first.strategy_fingerprint() == second.strategy_fingerprint()
 
 
 def test_codegen_eliminates_duplicate_compiled_supertrend_terms():

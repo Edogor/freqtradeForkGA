@@ -997,6 +997,13 @@ def _build_attempt_evidence(request, state) -> AttemptEvidenceV1:
     candidates = sorted(candidates, key=lambda item: item.score, reverse=True)
     error_code = state.error_code or (result.error_code if result is not None else None)
     error_detail = state.error_detail or (result.error_detail if result is not None else None)
+    engine_detail = str(engine.get("detail") or "") if engine is not None else ""
+    if "raw common-panel replay changed" in engine_detail.lower():
+        # The outer worker contract collapses an empty finalist set into a
+        # generic IslandResultContractError.  Preserve the authoritative
+        # engine cause so deterministic score corruption suspends the lane
+        # instead of consuming the one transient checkpoint retry.
+        error_detail = engine_detail
     graceful_marker = worker_root / "runtime" / "graceful_stop.json"
     if graceful_marker.is_file() and candidates:
         try:

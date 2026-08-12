@@ -5,6 +5,8 @@ Generates random trading strategies and converts genetic
 representations to FreqTrade strategy code.
 """
 
+import hashlib
+import json
 import random
 import logging
 from typing import Dict, Any, List, Literal, Optional
@@ -648,51 +650,72 @@ class StrategyGenerator:
         Returns:
             Python code as string
         """
-        # Canonicalize existing IDs first.  In particular, this reconnects
-        # serialized condition references before the legacy repair path checks
-        # for genuinely missing indicators.
-        strategy_gene.assign_instance_ids()
-
-        # Ensure all indicators referenced in conditions actually exist.  This
-        # remains a safety net for malformed legacy mutation/crossover output.
-        strategy_gene.ensure_indicators_for_conditions(self.indicator_config)
-
-        # Re-assign after ensuring indicators exist so any added indicator and
-        # its formerly unresolved condition receive the same canonical ID.
-        strategy_gene.assign_instance_ids()
-
-        # Repair the executable condition minimum before fingerprinting.  The
-        # generator cache is keyed by the genome, so mutating a gene after the
-        # cache lookup can return repaired code for an unrepaired genome on a
-        # later cache hit.  Keeping repair on this side of the fingerprint
-        # binds the cached phenotype to the exact StrategyGene that produced it.
-        min_entry = self.indicator_config.get('min_entry_conditions', 2)
-        min_exit = self.indicator_config.get('min_exit_conditions', 1)
-
-        valid_entry_count = sum(
-            1 for c in strategy_gene.entry_conditions
-            if self._condition_has_valid_indicator(c, strategy_gene.indicators)
+        # Legacy producer repair creates indicators/conditions using random
+        # factories.  Evaluation operates on a deserialized worker copy, so a
+        # random repair would produce a different executable phenotype when
+        # the unchanged genome is replayed.  Seed repair from semantic genome
+        # content (never generation/individual identity), then restore the
+        # worker RNG so code generation cannot perturb evolutionary randomness.
+        repair_payload = strategy_gene.to_dict()
+        repair_payload.pop('generation', None)
+        repair_payload.pop('individual_id', None)
+        repair_seed = int.from_bytes(
+            hashlib.sha256(
+                json.dumps(
+                    repair_payload,
+                    sort_keys=True,
+                    separators=(',', ':'),
+                    default=str,
+                ).encode('utf-8')
+            ).digest()[:8],
+            'big',
         )
-        valid_exit_count = sum(
-            1 for c in strategy_gene.exit_conditions
-            if self._condition_has_valid_indicator(c, strategy_gene.indicators)
-        )
+        random_state = random.getstate()
+        random.seed(repair_seed)
+        try:
+            # Canonicalize existing IDs first.  In particular, this reconnects
+            # serialized condition references before the legacy repair path checks
+            # for genuinely missing indicators.
+            strategy_gene.assign_instance_ids()
 
-        if valid_entry_count < min_entry:
-            needed = min_entry - valid_entry_count
-            logger.info(f"Pre-code-gen fix: only {valid_entry_count} valid entry conditions, "
-                       f"adding {needed} to reach min {min_entry}")
-            self._add_replacement_conditions(strategy_gene, needed, is_entry=True)
+            # Ensure all indicators referenced in conditions actually exist.  This
+            # remains a safety net for malformed legacy mutation/crossover output.
+            strategy_gene.ensure_indicators_for_conditions(self.indicator_config)
 
-        if valid_exit_count < min_exit:
-            needed = min_exit - valid_exit_count
-            logger.info(f"Pre-code-gen fix: only {valid_exit_count} valid exit conditions, "
-                       f"adding {needed} to reach min {min_exit}")
-            self._add_replacement_conditions(strategy_gene, needed, is_entry=False)
+            # Re-assign after ensuring indicators exist so any added indicator and
+            # its formerly unresolved condition receive the same canonical ID.
+            strategy_gene.assign_instance_ids()
 
-        # Top-ups are producer mutations and must be canonical before their
-        # fingerprint is used for cache lookup or persisted by V2 export.
-        strategy_gene.assign_instance_ids()
+            # Repair the executable condition minimum before fingerprinting.
+            min_entry = self.indicator_config.get('min_entry_conditions', 2)
+            min_exit = self.indicator_config.get('min_exit_conditions', 1)
+
+            valid_entry_count = sum(
+                1 for c in strategy_gene.entry_conditions
+                if self._condition_has_valid_indicator(c, strategy_gene.indicators)
+            )
+            valid_exit_count = sum(
+                1 for c in strategy_gene.exit_conditions
+                if self._condition_has_valid_indicator(c, strategy_gene.indicators)
+            )
+
+            if valid_entry_count < min_entry:
+                needed = min_entry - valid_entry_count
+                logger.info(f"Pre-code-gen fix: only {valid_entry_count} valid entry conditions, "
+                           f"adding {needed} to reach min {min_entry}")
+                self._add_replacement_conditions(strategy_gene, needed, is_entry=True)
+
+            if valid_exit_count < min_exit:
+                needed = min_exit - valid_exit_count
+                logger.info(f"Pre-code-gen fix: only {valid_exit_count} valid exit conditions, "
+                           f"adding {needed} to reach min {min_exit}")
+                self._add_replacement_conditions(strategy_gene, needed, is_entry=False)
+
+            # Top-ups are producer mutations and must be canonical before their
+            # fingerprint is used for cache lookup or persisted by V2 export.
+            strategy_gene.assign_instance_ids()
+        finally:
+            random.setstate(random_state)
         
         strategy_name = f"GAStrategy_Gen{strategy_gene.generation}_Ind{strategy_gene.individual_id}"
 
