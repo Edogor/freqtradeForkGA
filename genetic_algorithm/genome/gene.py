@@ -236,7 +236,9 @@ class StrategyGene:
         import hashlib
         import json
 
-        d = self.to_dict()
+        canonical = _copy.deepcopy(self)
+        canonical.canonicalize_executable_structure()
+        d = canonical.to_dict()
         d.pop("generation", None)
         d.pop("individual_id", None)
         d.pop("self_mutation_rate", None)
@@ -610,6 +612,151 @@ class StrategyGene:
                     removed += 1
             setattr(self, attr, unique)
         return removed
+
+    def simplify_redundant_conditions(self) -> int:
+        """Remove boolean comparison terms that cannot change the signal.
+
+        Conditions are compiled as all ``AND`` terms plus one grouped ``OR``
+        clause.  For the same indicator and direction, ``x > 0.02`` implies
+        ``x > 0.01`` (and conversely ``x < 0.01`` implies ``x < 0.02``).
+        Keeping both wastes genes and can make a nominal two-condition entry
+        an executable one-condition entry.  Only plain inequalities are
+        reduced here; crossing and lookback operators retain their temporal
+        semantics.
+        """
+
+        removed = 0
+        for attr in (
+            "entry_conditions",
+            "exit_conditions",
+            "short_entry_conditions",
+            "short_exit_conditions",
+        ):
+            original = list(getattr(self, attr))
+            if len(original) < 2:
+                continue
+
+            and_terms = [item for item in original if item.logic.upper() != "OR"]
+            or_terms = [item for item in original if item.logic.upper() == "OR"]
+            and_terms = self._reduce_comparison_group(and_terms, conjunction=True)
+            or_terms = self._reduce_comparison_group(or_terms, conjunction=False)
+
+            # If a required AND term guarantees any member of the OR clause,
+            # the complete OR clause is tautological under the AND terms.
+            if or_terms and any(
+                self._comparison_implies(required, alternative)
+                for required in and_terms
+                for alternative in or_terms
+            ):
+                or_terms = []
+            elif or_terms:
+                # Conversely, an AND term is redundant when every possible OR
+                # branch already guarantees it: A & (B | C) == (B | C) when
+                # both B and C imply A.
+                and_terms = [
+                    required
+                    for required in and_terms
+                    if not all(
+                        self._comparison_implies(alternative, required)
+                        for alternative in or_terms
+                    )
+                ]
+
+            if not and_terms and len(or_terms) == 1:
+                or_terms[0].logic = "AND"
+
+            simplified = and_terms + or_terms
+            removed += len(original) - len(simplified)
+            setattr(self, attr, simplified)
+        return removed
+
+    @staticmethod
+    def _reduce_comparison_group(
+        conditions: List[ConditionGene], *, conjunction: bool
+    ) -> List[ConditionGene]:
+        result: List[ConditionGene] = []
+        positions: Dict[tuple[str, str, int], int] = {}
+        for condition in conditions:
+            if condition.operator not in {">", "<"}:
+                result.append(condition)
+                continue
+            key = (condition.indicator, condition.operator, condition.lookback)
+            position = positions.get(key)
+            if position is None:
+                positions[key] = len(result)
+                result.append(condition)
+                continue
+            incumbent = result[position]
+            if condition.operator == ">":
+                replace = (
+                    condition.threshold > incumbent.threshold
+                    if conjunction
+                    else condition.threshold < incumbent.threshold
+                )
+            else:
+                replace = (
+                    condition.threshold < incumbent.threshold
+                    if conjunction
+                    else condition.threshold > incumbent.threshold
+                )
+            if replace:
+                result[position] = condition
+        return result
+
+    @staticmethod
+    def _comparison_implies(required: ConditionGene, alternative: ConditionGene) -> bool:
+        if (
+            required.indicator != alternative.indicator
+            or required.operator != alternative.operator
+            or required.operator not in {">", "<"}
+            or required.lookback != alternative.lookback
+        ):
+            return False
+        if required.operator == ">":
+            return required.threshold >= alternative.threshold
+        return required.threshold <= alternative.threshold
+
+    def prune_unreferenced_indicators(self) -> int:
+        """Drop indicators which have no executable condition reference."""
+
+        referenced = {
+            condition.indicator
+            for condition in (
+                self.entry_conditions
+                + self.exit_conditions
+                + self.short_entry_conditions
+                + self.short_exit_conditions
+            )
+        }
+        original = list(self.indicators)
+        self.indicators = [
+            indicator
+            for indicator in original
+            if indicator.instance_id in referenced or indicator.type in referenced
+        ]
+        removed = len(original) - len(self.indicators)
+        used_timeframes = {
+            indicator.timeframe
+            for indicator in self.indicators
+            if indicator.timeframe is not None
+        }
+        self.informative_timeframes = [
+            timeframe
+            for timeframe in self.informative_timeframes
+            if timeframe in used_timeframes
+        ]
+        return removed
+
+    def canonicalize_executable_structure(self) -> tuple[int, int]:
+        """Canonicalize references and remove semantically neutral structure."""
+
+        self.assign_instance_ids()
+        removed_conditions = self.simplify_redundant_conditions()
+        removed_indicators = self.prune_unreferenced_indicators()
+        if not self.indicators:
+            raise ValueError("canonical strategy must retain a referenced indicator")
+        self.assign_instance_ids()
+        return removed_conditions, removed_indicators
 
     def assign_instance_ids(self) -> None:
         """

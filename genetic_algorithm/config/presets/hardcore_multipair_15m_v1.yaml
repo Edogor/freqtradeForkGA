@@ -30,6 +30,7 @@ backtesting:
 
 strategy_constraints:
   timeframes: [15m]
+  canonicalize_executable_genome: true
   # Maximum allowed genome lookback is MACD(50+14) plus the codegen buffer.
   # 75 also fits the fixed PEPE 1h pre-listing history used by the sister lane.
   startup_candle_floor: 75
@@ -39,7 +40,7 @@ strategy_constraints:
 
 raw_multipair_score:
   enabled: true
-  policy_version: raw-multipair-score-v1
+  policy_version: raw-multipair-score-v2
   development_pairs: [BTC/USDT, SOL/USDT, XRP/USDT]
   validation_pairs: [BNB/USDT, ETH/USDT, PEPE/USDT]
   period_start: "2023-05-09"

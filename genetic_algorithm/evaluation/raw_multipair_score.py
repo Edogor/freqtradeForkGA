@@ -1,6 +1,6 @@
 """Production scoring contract for the hardcore six-pair search.
 
-``raw-multipair-score-v1`` deliberately consumes point estimates from six
+``raw-multipair-score-v2`` deliberately consumes point estimates from six
 independent pair backtests.  It does not consume confidence bounds, effective
 sample sizes, Sharpe/Sortino ratios, gate results, or any temporal validation
 output.  Cross-pair validation is the only generalisation signal in this
@@ -24,7 +24,7 @@ from statistics import median
 from typing import Any
 
 
-RAW_MULTIPAIR_SCORE_VERSION = "raw-multipair-score-v1"
+RAW_MULTIPAIR_SCORE_VERSION = "raw-multipair-score-v2"
 
 HARDCORE_DEVELOPMENT_PAIRS = (
     "BTC/USDT",
@@ -52,8 +52,13 @@ EXPECTANCY_SCALE = 0.005
 PROFIT_FACTOR_CAP = 3.0
 PROFIT_FACTOR_SCALE = 0.5
 PROFIT_FACTOR_FULL_CREDIT_TRADES = 30
-ACTIVITY_TARGET_TRADES_PER_MONTH = 8.0
+ACTIVITY_TARGET_TRADES_PER_MONTH: Mapping[str, float] = {
+    "15m": 17.0,
+    "1h": 10.0,
+}
 ACTIVITY_TARGET_ACTIVE_MONTH_RATIO = 0.75
+ACTIVITY_TRADE_RATE_WEIGHT = 0.55
+ACTIVITY_MONTH_COVERAGE_WEIGHT = 0.45
 HOLDING_MEDIAN_TARGET_HOURS = 24.0
 HOLDING_P90_TARGET_HOURS = 72.0
 MAX_DRAWDOWN_SCALE = 0.20
@@ -77,8 +82,10 @@ COMPONENT_NAMES = (
 COMPONENT_WEIGHTS: Mapping[str, float] = {
     "return_score": 0.25,
     "expectancy_score": 0.15,
-    "profit_factor_score": 0.15,
-    "activity_score": 0.15,
+    # Return and expectancy remain the dominant objective.  PF is deliberately
+    # smaller because a large PF can be produced by only a handful of trades.
+    "profit_factor_score": 0.10,
+    "activity_score": 0.20,
     "holding_score": 0.05,
     "drawdown_risk": -0.12,
     "drawdown_duration_risk": -0.07,
@@ -111,7 +118,7 @@ class RawMultiPairPanel:
 
     def __post_init__(self) -> None:
         if self.timeframe not in HARDCORE_TIMEFRAMES:
-            raise ValueError("raw-multipair-score-v1 supports only 15m and 1h timeframes")
+            raise ValueError("raw-multipair-score-v2 supports only 15m and 1h timeframes")
 
         development = _canonical_pairs(self.development_pairs, "development_pairs")
         validation = _canonical_pairs(self.validation_pairs, "validation_pairs")
@@ -164,7 +171,7 @@ class RawMultiPairPanel:
 
         payload = json.dumps(self._identity_descriptor(), sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
-        return f"raw_multipair_panel_v1_{digest}"
+        return f"raw_multipair_panel_v2_{digest}"
 
     def _identity_descriptor(self) -> dict[str, Any]:
         return {
@@ -487,7 +494,7 @@ def _score_pair(
                 return_score=-1.0,
                 expectancy_score=-1.0,
                 profit_factor_score=-1.0,
-                activity_score=0.0,
+                activity_score=-1.0,
                 holding_score=0.0,
                 drawdown_risk=0.0,
                 drawdown_duration_risk=0.0,
@@ -558,9 +565,22 @@ def _score_pair(
     )
     trades_per_month = trade_count / panel.calendar_months
     active_month_ratio = active_months / panel.calendar_months
-    activity = min(1.0, trades_per_month / ACTIVITY_TARGET_TRADES_PER_MONTH) * min(
-        1.0, active_month_ratio / ACTIVITY_TARGET_ACTIVE_MONTH_RATIO
+    trade_rate_progress = min(
+        1.0,
+        trades_per_month / ACTIVITY_TARGET_TRADES_PER_MONTH[panel.timeframe],
     )
+    month_coverage_progress = min(
+        1.0,
+        active_month_ratio / ACTIVITY_TARGET_ACTIVE_MONTH_RATIO,
+    )
+    # Signed activity makes inactivity an actual cost instead of merely the
+    # absence of a bonus.  The additive blend also provides a useful gradient
+    # when only one of rate or month coverage improves.
+    activity_progress = (
+        ACTIVITY_TRADE_RATE_WEIGHT * trade_rate_progress
+        + ACTIVITY_MONTH_COVERAGE_WEIGHT * month_coverage_progress
+    )
+    activity = 2.0 * activity_progress - 1.0
     holding = 0.5 * _threshold_reward(
         median_holding, HOLDING_MEDIAN_TARGET_HOURS
     ) + 0.5 * _threshold_reward(p90_holding, HOLDING_P90_TARGET_HOURS)
@@ -595,8 +615,10 @@ def _effective_profit_factor(
     trade_count: int,
 ) -> float:
     capped = min(PROFIT_FACTOR_CAP, value)
-    if not censored or capped <= 1.0:
+    if capped <= 1.0:
         return capped
+    # Apply evidence damping to every profitable PF, not only the censored
+    # no-loss case.  A finite PF based on nine trades is still thin evidence.
     evidence = min(1.0, trade_count / PROFIT_FACTOR_FULL_CREDIT_TRADES)
     return 1.0 + (capped - 1.0) * evidence
 

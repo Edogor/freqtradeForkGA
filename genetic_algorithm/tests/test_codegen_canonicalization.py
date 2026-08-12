@@ -159,3 +159,39 @@ def test_supertrend_threshold_mutation_removes_neutral_drift():
     assert condition.threshold == 0
     assert condition.threshold_upper == 0.0
     assert mutations_applied == []
+
+
+def test_semantic_canonicalization_removes_implied_condition_and_unused_genes():
+    gene = StrategyGene(
+        generation=0,
+        individual_id=0,
+        indicators=[
+            IndicatorGene("ATR", {"period": 10}, instance_id="ATR_0"),
+            IndicatorGene("CMF", {"period": 14}, instance_id="CMF_0"),
+            IndicatorGene("KAMA", {"period": 13}, instance_id="KAMA_0"),
+        ],
+        entry_conditions=[
+            ConditionGene("ATR_0", ">", 0.019, logic="OR"),
+            ConditionGene("ATR_0", ">", 0.020, logic="AND"),
+        ],
+        exit_conditions=[ConditionGene("ATR_0", "<", 0.005)],
+        timeframe="15m",
+    )
+    equivalent = StrategyGene(
+        generation=99,
+        individual_id=99,
+        indicators=[IndicatorGene("ATR", {"period": 10}, instance_id="ATR_0")],
+        entry_conditions=[ConditionGene("ATR_0", ">", 0.020, logic="AND")],
+        exit_conditions=[ConditionGene("ATR_0", "<", 0.005)],
+        timeframe="15m",
+    )
+
+    removed_conditions, removed_indicators = gene.canonicalize_executable_structure()
+
+    assert removed_conditions == 1
+    assert removed_indicators == 2
+    assert [(item.indicator, item.operator, item.threshold) for item in gene.entry_conditions] == [
+        ("ATR_0", ">", 0.020)
+    ]
+    assert [item.type for item in gene.indicators] == ["ATR"]
+    assert gene.strategy_fingerprint() == equivalent.strategy_fingerprint()

@@ -8,7 +8,7 @@ attempt evidence; this controller owns lane alternation, retry/suspension,
 archives, recipes and the final ``evolution_outcome.json`` decision artifact.
 
 The controller is intentionally unaware of LCB/UCB, ESS, Sharpe, Sortino and
-legacy promotion gates.  Its only quality input is ``raw-multipair-score-v1``.
+legacy promotion gates.  Its only quality input is ``raw-multipair-score-v2``.
 """
 
 from __future__ import annotations
@@ -31,12 +31,14 @@ from typing import Any, Literal, Protocol
 from pydantic import Field, model_validator
 
 from genetic_algorithm.config.schema import load_config
-from genetic_algorithm.evaluation.raw_multipair_score import RawMultiPairPanel
+from genetic_algorithm.evaluation.raw_multipair_score import (
+    RAW_MULTIPAIR_SCORE_VERSION,
+    RawMultiPairPanel,
+)
 from genetic_algorithm.orchestration.artifact_store_v2 import canonical_config_hash
 from genetic_algorithm.orchestration.result_contract import StrictV2Model
 
 
-RAW_MULTIPAIR_SCORE_VERSION = "raw-multipair-score-v1"
 HARDCORE_CAMPAIGN_VERSION = "hardcore-multipair-campaign-v1"
 HARDCORE_PANEL_PAIRS = (
     "BTC/USDT",
@@ -310,7 +312,7 @@ class CandidateSnapshotV1(StrictV2Model):
 
     candidate_id: str = Field(min_length=1)
     phenotype_hash: str = Field(min_length=64, max_length=64)
-    score_version: Literal["raw-multipair-score-v1"] = RAW_MULTIPAIR_SCORE_VERSION
+    score_version: Literal["raw-multipair-score-v2"] = RAW_MULTIPAIR_SCORE_VERSION
     score: float
     timeframe: CampaignLane
     panel_id: str = Field(min_length=1)
@@ -576,7 +578,7 @@ class EvolutionRunRequestV1(StrictV2Model):
     resolved_config_sha256: str = Field(min_length=64, max_length=64)
     search_seed: int = Field(ge=0, lt=2**32)
     panel_id: str = Field(min_length=1)
-    score_version: Literal["raw-multipair-score-v1"] = RAW_MULTIPAIR_SCORE_VERSION
+    score_version: Literal["raw-multipair-score-v2"] = RAW_MULTIPAIR_SCORE_VERSION
     previous_global_score: float | None = None
     islands: list[IslandBlueprintV1] = Field(min_length=12, max_length=12)
     resume_checkpoint_path: str | None = None
@@ -1127,7 +1129,7 @@ class CampaignFinalReportV1(StrictV2Model):
     started_at: datetime
     finished_at: datetime
     stop_reason: str
-    score_version: Literal["raw-multipair-score-v1"] = RAW_MULTIPAIR_SCORE_VERSION
+    score_version: Literal["raw-multipair-score-v2"] = RAW_MULTIPAIR_SCORE_VERSION
     live_ready: Literal[False] = False
     lanes: dict[CampaignLane, LaneFinalReportV1]
 

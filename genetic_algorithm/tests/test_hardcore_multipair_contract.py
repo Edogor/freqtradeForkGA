@@ -83,6 +83,8 @@ def test_production_preset_is_exact_twelve_island_six_pair_contract(preset_path)
     assert all(set(island["pairs"]) == EXPECTED_PAIRS for island in islands)
     assert config["pair_validation"]["validate_top_n_only"] == 0
     assert config["genetic_algorithm"]["seed_known_archetypes"] is False
+    assert config["raw_multipair_score"]["policy_version"] == "raw-multipair-score-v2"
+    assert config["strategy_constraints"]["canonicalize_executable_genome"] is True
 
 
 def test_hardcore_profile_rejects_built_in_archetype_seeding():
@@ -132,6 +134,15 @@ def test_hardcore_profile_requires_raw_multipair_score():
     assert any(
         "requires raw_multipair_score.enabled: true" in error for error in errors
     )
+
+
+def test_hardcore_profile_requires_executable_genome_canonicalization():
+    config = load_config(PRODUCTION_PRESETS[0])
+    config["strategy_constraints"]["canonicalize_executable_genome"] = False
+
+    errors = _contract_errors(config)
+
+    assert any("requires executable-genome canonicalization" in error for error in errors)
 
 
 @pytest.mark.parametrize(

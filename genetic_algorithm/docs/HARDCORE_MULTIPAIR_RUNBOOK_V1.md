@@ -4,6 +4,13 @@ This campaign is a search system. Its best artifacts are labelled
 `SEARCH_CHAMPION`; neither a canary nor the seven-day run makes a strategy
 paper- or live-ready.
 
+The active fitness contract is `raw-multipair-score-v2`.  It targets 17 trades
+per pair and calendar month on 15m and 10 on 1h.  Activity contributes 20% and
+is signed, so sparse trading is penalized rather than merely missing a bonus.
+Return plus expectancy retain 40%; profitable PF contributes 10% and is
+damped below 30 trades even when it is finite.  The two score versions are not
+comparable and v1 archives must never seed a v2 campaign.
+
 ## Launch contract
 
 Both the canary and production launch fail closed unless the worktree is clean

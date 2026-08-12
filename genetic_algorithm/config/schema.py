@@ -181,6 +181,7 @@ DEFAULTS: Dict[str, Any] = {
         "timeframes": ["5m", "15m", "1h"],
         "startup_candle_floor": None,
         "startup_candle_cap": None,
+        "canonicalize_executable_genome": False,
         "stoploss_range": [-0.20, -0.05],
         "roi_range": [0.01, 0.10],
         "max_open_trades_range": [1, 5],
@@ -392,7 +393,7 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
     # statistic, gate state or deferred validation may influence selection.
     "raw_multipair_score": {
         "enabled": False,
-        "policy_version": "raw-multipair-score-v1",
+        "policy_version": "raw-multipair-score-v2",
         "development_pairs": ["BTC/USDT", "SOL/USDT", "XRP/USDT"],
         "validation_pairs": ["BNB/USDT", "ETH/USDT", "PEPE/USDT"],
         "period_start": "2023-05-09",
@@ -1037,9 +1038,9 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
     raw_score = _nested_config(config, ("raw_multipair_score",))
     if raw_score.get("enabled", False):
-        if raw_score.get("policy_version") != "raw-multipair-score-v1":
+        if raw_score.get("policy_version") != "raw-multipair-score-v2":
             errors.append(
-                "raw_multipair_score.policy_version must be raw-multipair-score-v1"
+                "raw_multipair_score.policy_version must be raw-multipair-score-v2"
             )
         development_pairs = raw_score.get("development_pairs", [])
         validation_pairs = raw_score.get("validation_pairs", [])
@@ -1597,8 +1598,8 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         raw_score = _nested_config(config, ("raw_multipair_score",))
         if not raw_score.get("enabled", False):
             errors.append(f"{label} requires raw_multipair_score.enabled: true")
-        if raw_score.get("policy_version") != "raw-multipair-score-v1":
-            errors.append(f"{label} requires raw-multipair-score-v1")
+        if raw_score.get("policy_version") != "raw-multipair-score-v2":
+            errors.append(f"{label} requires raw-multipair-score-v2")
         if raw_score.get("development_pairs") != expected_dev:
             errors.append(f"{label} requires the fixed development pair group")
         if raw_score.get("validation_pairs") != expected_val:
@@ -1635,6 +1636,8 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             errors.append(
                 f"{label} requires the proven 75-candle startup floor/cap"
             )
+        if constraints.get("canonicalize_executable_genome") is not True:
+            errors.append(f"{label} requires executable-genome canonicalization")
 
         promotion = _nested_config(config, ("promotion_v2",))
         scenarios = promotion.get("required_scenarios", [])
@@ -1781,13 +1784,13 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         raw_score = _nested_config(config, ("raw_multipair_score",))
         if (
             not raw_score.get("enabled", False)
-            or raw_score.get("policy_version") != "raw-multipair-score-v1"
+            or raw_score.get("policy_version") != "raw-multipair-score-v2"
             or raw_score.get("development_pairs") != expected_dev
             or raw_score.get("validation_pairs") != expected_val
             or raw_score.get("period_start") != "2023-05-09"
             or raw_score.get("period_end") != "2026-03-26"
         ):
-            errors.append(f"{label} requires the immutable raw-multipair-score-v1 panel")
+            errors.append(f"{label} requires the immutable raw-multipair-score-v2 panel")
 
         timeframe = bt.get("timeframe")
         expected_timerange = {
@@ -1810,6 +1813,8 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             or constraints.get("startup_candle_cap") != 75
         ):
             errors.append(f"{label} requires the proven 75-candle startup bound")
+        if constraints.get("canonicalize_executable_genome") is not True:
+            errors.append(f"{label} requires executable-genome canonicalization")
 
         pair_validation = _nested_config(config, ("pair_validation",))
         if not pair_validation.get("enabled", False):

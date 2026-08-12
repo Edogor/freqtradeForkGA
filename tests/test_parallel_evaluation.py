@@ -328,6 +328,40 @@ class TestWorkerFunction:
         assert result.failed == 1
         assert individual.metrics['error'] == 'worker-reported failure'
 
+    def test_batch_adopts_worker_canonical_genome_without_changing_identity(
+        self, minimal_config, sample_individuals
+    ):
+        """The coordinator must evolve the exact phenotype the worker measured."""
+
+        evaluator = ParallelEvaluator(minimal_config, num_workers=1)
+        individual = sample_individuals[0]
+        original_generation = individual.strategy_gene.generation
+        original_id = individual.strategy_gene.individual_id
+        canonical = individual.strategy_gene.copy()
+        canonical.indicators = canonical.indicators[:1]
+        canonical.assign_instance_ids()
+        canonical.individual_id = 987654
+
+        future = Future()
+        future.set_result({
+            'index': 0,
+            'fitness': 0.75,
+            'metrics': {},
+            'success': True,
+            'canonical_strategy_gene': canonical.to_dict(),
+        })
+        executor = MagicMock()
+        executor.submit.return_value = future
+        evaluator._check_pool_health = MagicMock(return_value=True)
+        evaluator._get_executor = MagicMock(return_value=executor)
+
+        result = evaluator.evaluate_batch([individual])
+
+        assert result.successful == 1
+        assert [item.type for item in individual.strategy_gene.indicators] == ['RSI']
+        assert individual.strategy_gene.generation == original_generation
+        assert individual.strategy_gene.individual_id == original_id
+
     def test_independent_pair_shared_cache_survives_multiple_candidates(self):
         """All six singleton overrides reuse shared OHLCV across candidates."""
         development_pairs = ['BTC/USDT', 'SOL/USDT', 'XRP/USDT']

@@ -384,6 +384,10 @@ def _evaluate_strategy_in_worker(
             'fitness': fitness,
             'metrics': metrics,
             'success': evaluation_error is None,
+            # Code generation canonicalizes redundant conditions and neutral
+            # indicators.  Return that exact executable genome so the parent
+            # evolves what was measured rather than the pre-repair payload.
+            'canonical_strategy_gene': strategy_gene.to_dict(),
         }
 
         if evaluation_error is not None:
@@ -1605,16 +1609,18 @@ class ParallelEvaluator:
         # Prepare tasks: serialize strategies to dicts for pickling
         tasks = []
         nsga2_min_trades = self.config.get('nsga2', {}).get('min_trades', 0)
+        next_execution_id = getattr(self, '_next_strategy_execution_id', 0)
         for i, ind in enumerate(individuals):
             tasks.append({
                 'strategy_gene_dict': ind.strategy_gene.to_dict(),
                 'strategy_index': i,
-                'strategy_execution_id': self._next_strategy_execution_id,
+                'strategy_execution_id': next_execution_id,
                 'nsga2_mode': self.nsga2_mode,
                 'objectives_config': self.objectives_config,
                 'nsga2_min_trades': nsga2_min_trades,
             })
-            self._next_strategy_execution_id += 1
+            next_execution_id += 1
+        self._next_strategy_execution_id = next_execution_id
         
         self._pool_generation_count += 1
         logger.info(f"[PARALLEL] Evaluating {len(tasks)} strategies with {self.num_workers} workers "
@@ -1652,6 +1658,14 @@ class ParallelEvaluator:
                     
                     result_error = _metrics_error(result.get('metrics'))
                     if result['success'] and result_error is None:
+                        canonical_payload = result.get('canonical_strategy_gene')
+                        if canonical_payload is not None:
+                            from genetic_algorithm.core.strategy_gene import StrategyGene
+
+                            canonical_gene = StrategyGene.from_dict_exact(canonical_payload)
+                            canonical_gene.generation = ind.strategy_gene.generation
+                            canonical_gene.individual_id = ind.strategy_gene.individual_id
+                            ind.strategy_gene = canonical_gene
                         ind.set_fitness(result['fitness'], result['metrics'])
                         
                         # Set objectives for NSGA-II

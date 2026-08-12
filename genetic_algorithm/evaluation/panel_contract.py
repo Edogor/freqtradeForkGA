@@ -208,7 +208,11 @@ def build_evaluation_panel(
 
 def phenotype_fingerprint(strategy_gene: Any) -> str:
     """Hash executable genome semantics while ignoring transient identifiers."""
-    payload = copy.deepcopy(strategy_gene.to_dict())
+    canonical_gene = copy.deepcopy(strategy_gene)
+    canonicalize = getattr(canonical_gene, "canonicalize_executable_structure", None)
+    if callable(canonicalize):
+        canonicalize()
+    payload = canonical_gene.to_dict()
     payload.pop("generation", None)
     payload.pop("individual_id", None)
     canonical = json.dumps(

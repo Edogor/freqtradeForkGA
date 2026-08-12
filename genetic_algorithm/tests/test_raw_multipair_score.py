@@ -1,4 +1,4 @@
-"""Focused contract tests for raw-multipair-score-v1."""
+"""Focused contract tests for raw-multipair-score-v2."""
 
 from __future__ import annotations
 
@@ -35,7 +35,8 @@ def _scenario(pair: str, timeframe: str = "15m", **overrides) -> PairScenario:
         "timeframe": timeframe,
         "success": True,
         # The immutable panel has 35 inclusive calendar-month buckets.
-        "trade_count": 280,
+        # Full 15m activity credit: 17 trades/month across 35 months.
+        "trade_count": 595,
         "active_months": 27,
         "net_return": 0.10,
         "net_expectancy": 0.005,
@@ -66,7 +67,7 @@ def test_exact_balanced_formula_for_identical_pairs():
     result = score_raw_multipair(_panel(), _scenarios())
 
     unit = math.tanh(1.0)
-    expected = 100.0 * (0.32 * unit + 0.20)
+    expected = 100.0 * (0.27 * unit + 0.25)
     assert result.status is RawMultiPairStatus.VALID
     assert result.score_version == RAW_MULTIPAIR_SCORE_VERSION
     assert result.score == pytest.approx(expected)
@@ -192,9 +193,9 @@ def test_zero_trade_scenarios_are_valid_but_harsh():
     result = score_raw_multipair(_panel(), zero)
 
     assert result.status is RawMultiPairStatus.VALID
-    assert result.score == pytest.approx(-55.0)
+    assert result.score == pytest.approx(-70.0)
     assert all(item.zero_trades for item in result.pair_components)
-    assert all(item.components.activity_score == 0.0 for item in result.pair_components)
+    assert all(item.components.activity_score == -1.0 for item in result.pair_components)
     assert all(item.components.return_score == -1.0 for item in result.pair_components)
 
 
@@ -248,7 +249,7 @@ def test_technical_worker_failure_is_distinct_from_negative_fitness():
     assert "worker exited 137" in (failed.reason_detail or "")
 
 
-def test_censored_profit_factor_is_capped_and_discounted_by_trade_evidence():
+def test_profit_factor_is_capped_and_discounted_by_trade_evidence_even_when_finite():
     low_evidence = score_raw_multipair(
         _panel(),
         _replace_pair(
@@ -273,22 +274,25 @@ def test_censored_profit_factor_is_capped_and_discounted_by_trade_evidence():
             max_consecutive_losses=0,
         ),
     )
-    uncensored_cap = score_raw_multipair(
+    uncensored_low_evidence = score_raw_multipair(
         _panel(),
         _replace_pair(
             _scenarios(),
             "BTC/USDT",
+            trade_count=3,
+            active_months=1,
             profit_factor=10.0,
             profit_factor_censored=False,
+            max_consecutive_losses=0,
         ),
     )
 
     low = low_evidence.pair_component_map()["BTC/USDT"]
     full = full_evidence.pair_component_map()["BTC/USDT"]
-    uncensored = uncensored_cap.pair_component_map()["BTC/USDT"]
+    uncensored = uncensored_low_evidence.pair_component_map()["BTC/USDT"]
     assert low.effective_profit_factor == pytest.approx(1.2)
     assert full.effective_profit_factor == pytest.approx(3.0)
-    assert uncensored.effective_profit_factor == pytest.approx(3.0)
+    assert uncensored.effective_profit_factor == pytest.approx(1.2)
     assert low.components.profit_factor_score < full.components.profit_factor_score
 
 
@@ -301,7 +305,35 @@ def test_activity_requires_trade_rate_and_active_month_coverage():
 
     assert full.pair_component_map()["BTC/USDT"].components.activity_score == 1.0
     sparse = sparse_months.pair_component_map()["BTC/USDT"].components.activity_score
-    assert sparse == pytest.approx((14 / 35) / 0.75)
+    expected_progress = 0.55 + 0.45 * ((14 / 35) / 0.75)
+    assert sparse == pytest.approx(2.0 * expected_progress - 1.0)
+
+
+def test_activity_targets_are_timeframe_specific_and_sparse_activity_is_negative():
+    scenarios_15m = [
+        replace(scenario, trade_count=17 * 35, active_months=27)
+        for scenario in _scenarios("15m")
+    ]
+    scenarios_1h = [
+        replace(scenario, trade_count=10 * 35, active_months=27)
+        for scenario in _scenarios("1h")
+    ]
+    full_15m = score_raw_multipair(_panel("15m"), scenarios_15m)
+    full_1h = score_raw_multipair(_panel("1h"), scenarios_1h)
+    sparse = score_raw_multipair(
+        _panel("15m"),
+        _replace_pair(
+            scenarios_15m,
+            "BTC/USDT",
+            trade_count=9,
+            active_months=5,
+            max_consecutive_losses=1,
+        ),
+    )
+
+    assert full_15m.pair_component_map()["BTC/USDT"].components.activity_score == 1.0
+    assert full_1h.pair_component_map()["BTC/USDT"].components.activity_score == 1.0
+    assert sparse.pair_component_map()["BTC/USDT"].components.activity_score < 0.0
 
 
 def test_holding_reward_declines_after_both_daytrading_targets():

@@ -75,6 +75,7 @@ from genetic_algorithm.evaluation.fitness import FitnessEvaluator
 from genetic_algorithm.evaluation.panel_contract import (
     PANEL_ROLE_COMMON_REPLAY,
     build_evaluation_panel,
+    phenotype_fingerprint,
     replay_on_common_panel,
 )
 from genetic_algorithm.orchestration.generation_trace_v2 import GenerationTraceWriterV2
@@ -670,7 +671,7 @@ class GenericIslandModelEvolution:
         raw_pair_metrics = individual.metrics.get('raw_pair_metrics')
         return (
             individual.metrics.get('raw_multipair_score_version')
-            == 'raw-multipair-score-v1'
+            == 'raw-multipair-score-v2'
             and individual.metrics.get('raw_multipair_status') == 'VALID'
             and isinstance(raw_pair_metrics, dict)
             and set(raw_pair_metrics) == expected_pairs
@@ -2717,12 +2718,7 @@ class GenericIslandModelEvolution:
     def _gene_hash(ind: Individual) -> str:
         """Compute a hash of an individual's strategy gene for deduplication."""
         try:
-            gene_dict = ind.strategy_gene.to_dict()
-            # Remove volatile fields
-            gene_dict.pop('generation', None)
-            gene_dict.pop('individual_id', None)
-            serialized = json.dumps(gene_dict, sort_keys=True, default=str)
-            return hashlib.sha256(serialized.encode()).hexdigest()
+            return phenotype_fingerprint(ind.strategy_gene)
         except Exception:
             logger.warning(f"[ISLAND] Gene hashing failed for individual {getattr(ind, 'id', '?')}", exc_info=True)
             return str(id(ind))

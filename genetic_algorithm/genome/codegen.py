@@ -188,38 +188,7 @@ class StrategyGenerator:
                 strategy.indicators, is_entry=False, side='short'
             )
         
-        # Assign unique instance IDs to all indicators
-        strategy.assign_instance_ids()
-        
-        # Enforce min_entry_conditions — random generation can under-produce
-        min_entry = self.indicator_config.get('min_entry_conditions', 2)
-        max_attempts = min_entry * 20  # Prevent infinite loop when indicators can't generate entry conditions
-        attempts = 0
-        while len(strategy.entry_conditions) < min_entry and attempts < max_attempts:
-            attempts += 1
-            valid_inds = [ind for ind in strategy.indicators
-                         if ind.type in ['RSI', 'MACD', 'STOCH', 'CCI', 'ADX', 'BBANDS', 'EMA', 'SMA',
-                                          'SUPERTREND', 'ICHIMOKU', 'DONCHIAN', 'VWAP', 'PSAR', 'CMF', 'VROC',
-                                          'CDL_ENGULFING', 'CDL_HAMMER', 'CDL_DOJI', 'CDL_MORNINGSTAR',
-                                          'CDL_EVENINGSTAR', 'CDL_SHOOTINGSTAR', 'CDL_HARAMI']]
-            if not valid_inds:
-                break
-            ind = random.choice(valid_inds)
-            cond = self._generate_condition_for_indicator(ind, is_entry=True)
-            if cond:
-                # Avoid duplicates
-                existing = {(c.indicator, c.operator, str(c.threshold)) for c in strategy.entry_conditions}
-                key = (cond.indicator, cond.operator, str(cond.threshold))
-                if key not in existing:
-                    cond.logic = 'AND'
-                    strategy.entry_conditions.append(cond)
-                else:
-                    break  # Can't add more unique conditions
-
-        # The minimum-condition top-up above creates conditions from bare type
-        # names.  Canonicalize once more so every newly generated gene already
-        # satisfies the serialization contract before its first evaluation.
-        strategy.assign_instance_ids()
+        self._repair_executable_structure(strategy)
 
         return strategy
     
@@ -640,6 +609,65 @@ class StrategyGenerator:
             )
         return required
 
+    def _repair_executable_structure(self, strategy_gene: StrategyGene) -> None:
+        """Make persisted structure match the boolean strategy we execute."""
+
+        strategy_gene.assign_instance_ids()
+        strategy_gene.ensure_indicators_for_conditions(self.indicator_config)
+        strategy_gene.assign_instance_ids()
+
+        strict_semantics = self.strategy_constraints.get(
+            'canonicalize_executable_genome', False
+        )
+        if not strict_semantics:
+            min_entry = int(self.indicator_config.get('min_entry_conditions', 2))
+            min_exit = int(self.indicator_config.get('min_exit_conditions', 1))
+            if len(strategy_gene.entry_conditions) < min_entry:
+                self._add_replacement_conditions(
+                    strategy_gene,
+                    min_entry - len(strategy_gene.entry_conditions),
+                    is_entry=True,
+                )
+            if len(strategy_gene.exit_conditions) < min_exit:
+                self._add_replacement_conditions(
+                    strategy_gene,
+                    min_exit - len(strategy_gene.exit_conditions),
+                    is_entry=False,
+                )
+            strategy_gene.assign_instance_ids()
+            return
+
+        minima = (
+            ('entry_conditions', True, self.indicator_config.get('min_entry_conditions', 2)),
+            ('exit_conditions', False, self.indicator_config.get('min_exit_conditions', 1)),
+        )
+        for attr, is_entry, minimum in minima:
+            # A top-up can itself be implied by an existing inequality.  Retry
+            # after semantic reduction so the configured minimum describes
+            # executable terms rather than merely serialized objects.
+            for _ in range(max(1, int(minimum) * 4)):
+                strategy_gene.simplify_redundant_conditions()
+                conditions = getattr(strategy_gene, attr)
+                if len(conditions) >= int(minimum):
+                    break
+                self._add_replacement_conditions(
+                    strategy_gene,
+                    int(minimum) - len(conditions),
+                    is_entry=is_entry,
+                )
+                strategy_gene.assign_instance_ids()
+
+        strategy_gene.simplify_redundant_conditions()
+        min_entry = int(self.indicator_config.get('min_entry_conditions', 2))
+        min_exit = int(self.indicator_config.get('min_exit_conditions', 1))
+        if (
+            len(strategy_gene.entry_conditions) < min_entry
+            or len(strategy_gene.exit_conditions) < min_exit
+        ):
+            raise ValueError("could not construct the configured number of executable conditions")
+        strategy_gene.prune_unreferenced_indicators()
+        strategy_gene.assign_instance_ids()
+
     def generate_strategy_code(self, strategy_gene: StrategyGene) -> str:
         """
         Convert a StrategyGene to FreqTrade Python code.
@@ -673,47 +701,7 @@ class StrategyGenerator:
         random_state = random.getstate()
         random.seed(repair_seed)
         try:
-            # Canonicalize existing IDs first.  In particular, this reconnects
-            # serialized condition references before the legacy repair path checks
-            # for genuinely missing indicators.
-            strategy_gene.assign_instance_ids()
-
-            # Ensure all indicators referenced in conditions actually exist.  This
-            # remains a safety net for malformed legacy mutation/crossover output.
-            strategy_gene.ensure_indicators_for_conditions(self.indicator_config)
-
-            # Re-assign after ensuring indicators exist so any added indicator and
-            # its formerly unresolved condition receive the same canonical ID.
-            strategy_gene.assign_instance_ids()
-
-            # Repair the executable condition minimum before fingerprinting.
-            min_entry = self.indicator_config.get('min_entry_conditions', 2)
-            min_exit = self.indicator_config.get('min_exit_conditions', 1)
-
-            valid_entry_count = sum(
-                1 for c in strategy_gene.entry_conditions
-                if self._condition_has_valid_indicator(c, strategy_gene.indicators)
-            )
-            valid_exit_count = sum(
-                1 for c in strategy_gene.exit_conditions
-                if self._condition_has_valid_indicator(c, strategy_gene.indicators)
-            )
-
-            if valid_entry_count < min_entry:
-                needed = min_entry - valid_entry_count
-                logger.info(f"Pre-code-gen fix: only {valid_entry_count} valid entry conditions, "
-                           f"adding {needed} to reach min {min_entry}")
-                self._add_replacement_conditions(strategy_gene, needed, is_entry=True)
-
-            if valid_exit_count < min_exit:
-                needed = min_exit - valid_exit_count
-                logger.info(f"Pre-code-gen fix: only {valid_exit_count} valid exit conditions, "
-                           f"adding {needed} to reach min {min_exit}")
-                self._add_replacement_conditions(strategy_gene, needed, is_entry=False)
-
-            # Top-ups are producer mutations and must be canonical before their
-            # fingerprint is used for cache lookup or persisted by V2 export.
-            strategy_gene.assign_instance_ids()
+            self._repair_executable_structure(strategy_gene)
         finally:
             random.setstate(random_state)
         
