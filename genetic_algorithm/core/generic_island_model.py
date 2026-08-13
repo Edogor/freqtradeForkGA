@@ -671,7 +671,7 @@ class GenericIslandModelEvolution:
         raw_pair_metrics = individual.metrics.get('raw_pair_metrics')
         return (
             individual.metrics.get('raw_multipair_score_version')
-            == 'raw-multipair-score-v2'
+            == 'raw-multipair-score-v3'
             and individual.metrics.get('raw_multipair_status') == 'VALID'
             and isinstance(raw_pair_metrics, dict)
             and set(raw_pair_metrics) == expected_pairs

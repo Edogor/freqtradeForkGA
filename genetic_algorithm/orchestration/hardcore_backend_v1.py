@@ -3,7 +3,7 @@
 The adapter intentionally reuses the canonical manifest, data/code fencing,
 SQLite leases, process guard and Generic-Island worker.  It does not use V2
 wave planning or promotion ranking.  A completed worker result is converted
-back to the sole campaign decision input, ``raw-multipair-score-v2``.
+back to the sole campaign decision input, ``raw-multipair-score-v3``.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Focused contract tests for raw-multipair-score-v2."""
+"""Focused contract tests for raw-multipair-score-v3."""
 
 from __future__ import annotations
 
@@ -35,15 +35,17 @@ def _scenario(pair: str, timeframe: str = "15m", **overrides) -> PairScenario:
         "timeframe": timeframe,
         "success": True,
         # The immutable panel has 35 inclusive calendar-month buckets.
-        # Full 15m activity credit: 17 trades/month across 35 months.
-        "trade_count": 595,
-        "active_months": 27,
-        "net_return": 0.10,
+        # Full v3 activity credit is a soft 1,000 trades per pair with at
+        # least 90% active-month coverage over the immutable panel.
+        "trade_count": 1000,
+        "active_months": 32,
+        # Three percent simple net-return velocity per panel week.
+        "net_return": 0.03 * _panel(timeframe).calendar_weeks,
         "net_expectancy": 0.005,
         "profit_factor": 1.5,
         "profit_factor_censored": False,
-        "median_holding_hours": 24.0,
-        "p90_holding_hours": 72.0,
+        "median_holding_hours": 8.0 if timeframe == "15m" else 12.0,
+        "p90_holding_hours": 24.0 if timeframe == "15m" else 36.0,
         "max_drawdown": 0.20,
         "max_drawdown_duration_days": 120.0,
         "max_consecutive_losses": 10,
@@ -67,7 +69,7 @@ def test_exact_balanced_formula_for_identical_pairs():
     result = score_raw_multipair(_panel(), _scenarios())
 
     unit = math.tanh(1.0)
-    expected = 100.0 * (0.27 * unit + 0.25)
+    expected = 100.0 * (0.32 * unit)
     assert result.status is RawMultiPairStatus.VALID
     assert result.score_version == RAW_MULTIPAIR_SCORE_VERSION
     assert result.score == pytest.approx(expected)
@@ -75,8 +77,8 @@ def test_exact_balanced_formula_for_identical_pairs():
     assert result.aggregate_components.return_score == pytest.approx(unit)
     assert result.aggregate_components.expectancy_score == pytest.approx(unit)
     assert result.aggregate_components.profit_factor_score == pytest.approx(unit)
-    assert result.aggregate_components.activity_score == pytest.approx(1.0)
-    assert result.aggregate_components.holding_score == pytest.approx(1.0)
+    assert result.aggregate_components.activity_score == pytest.approx(0.0)
+    assert result.aggregate_components.holding_score == pytest.approx(0.0)
     assert result.aggregate_components.drawdown_risk == pytest.approx(unit)
     assert result.aggregate_components.drawdown_duration_risk == pytest.approx(unit)
     assert result.aggregate_components.loss_streak_risk == pytest.approx(unit)
@@ -130,8 +132,10 @@ def test_validation_worst_pair_has_more_influence_than_development_worst_pair():
     assert development_bad.score is not None and validation_bad.score is not None
     assert validation_bad.score < development_bad.score
     # Difference from 0.4/0.6 group weighting, with the same 0.6 worst-pair term.
+    panel = _panel()
+    bad_return_component = math.tanh((-0.10 / panel.calendar_weeks) / 0.03)
     assert development_bad.score - validation_bad.score == pytest.approx(
-        100.0 * 0.25 * 0.24 * math.tanh(1.0)
+        100.0 * 0.40 * 0.12 * (math.tanh(1.0) - bad_return_component)
     )
 
 
@@ -193,7 +197,7 @@ def test_zero_trade_scenarios_are_valid_but_harsh():
     result = score_raw_multipair(_panel(), zero)
 
     assert result.status is RawMultiPairStatus.VALID
-    assert result.score == pytest.approx(-70.0)
+    assert result.score == pytest.approx(-90.0)
     assert all(item.zero_trades for item in result.pair_components)
     assert all(item.components.activity_score == -1.0 for item in result.pair_components)
     assert all(item.components.return_score == -1.0 for item in result.pair_components)
@@ -206,7 +210,7 @@ def test_zero_trade_scenarios_are_valid_but_harsh():
         ({"net_return": math.nan}, "NONFINITE_METRIC"),
         ({"profit_factor": math.inf}, "NONFINITE_METRIC"),
         ({"active_months": 0}, "INVALID_METRIC"),
-        ({"p90_holding_hours": 12.0}, "INVALID_METRIC"),
+        ({"p90_holding_hours": 4.0}, "INVALID_METRIC"),
     ],
 )
 def test_missing_nonfinite_and_inconsistent_evidence_is_invalid(changes, reason):
@@ -303,19 +307,19 @@ def test_activity_requires_trade_rate_and_active_month_coverage():
         _replace_pair(_scenarios(), "BTC/USDT", active_months=14),
     )
 
-    assert full.pair_component_map()["BTC/USDT"].components.activity_score == 1.0
+    assert full.pair_component_map()["BTC/USDT"].components.activity_score == 0.0
     sparse = sparse_months.pair_component_map()["BTC/USDT"].components.activity_score
-    expected_progress = 0.55 + 0.45 * ((14 / 35) / 0.75)
-    assert sparse == pytest.approx(2.0 * expected_progress - 1.0)
+    expected_progress = math.sqrt((14 / 35) / 0.90)
+    assert sparse == pytest.approx(expected_progress - 1.0)
 
 
-def test_activity_targets_are_timeframe_specific_and_sparse_activity_is_negative():
+def test_activity_target_is_one_thousand_per_pair_and_sparse_activity_is_negative():
     scenarios_15m = [
-        replace(scenario, trade_count=17 * 35, active_months=27)
+        replace(scenario, trade_count=1000, active_months=32)
         for scenario in _scenarios("15m")
     ]
     scenarios_1h = [
-        replace(scenario, trade_count=10 * 35, active_months=27)
+        replace(scenario, trade_count=1000, active_months=32)
         for scenario in _scenarios("1h")
     ]
     full_15m = score_raw_multipair(_panel("15m"), scenarios_15m)
@@ -331,9 +335,66 @@ def test_activity_targets_are_timeframe_specific_and_sparse_activity_is_negative
         ),
     )
 
-    assert full_15m.pair_component_map()["BTC/USDT"].components.activity_score == 1.0
-    assert full_1h.pair_component_map()["BTC/USDT"].components.activity_score == 1.0
+    assert full_15m.pair_component_map()["BTC/USDT"].components.activity_score == 0.0
+    assert full_1h.pair_component_map()["BTC/USDT"].components.activity_score == 0.0
     assert sparse.pair_component_map()["BTC/USDT"].components.activity_score < 0.0
+
+
+def test_activity_is_continuous_and_never_becomes_a_loss_hiding_bonus():
+    below = score_raw_multipair(
+        _panel(),
+        _replace_pair(_scenarios(), "BTC/USDT", trade_count=999),
+    ).pair_component_map()["BTC/USDT"].components.activity_score
+    at_target = score_raw_multipair(
+        _panel(),
+        _replace_pair(_scenarios(), "BTC/USDT", trade_count=1000),
+    ).pair_component_map()["BTC/USDT"].components.activity_score
+    above = score_raw_multipair(
+        _panel(),
+        _replace_pair(_scenarios(), "BTC/USDT", trade_count=1500),
+    ).pair_component_map()["BTC/USDT"].components.activity_score
+
+    assert below < at_target
+    assert below == pytest.approx(math.sqrt(0.999) - 1.0)
+    assert at_target == 0.0
+    assert above == 0.0
+
+
+def test_three_percent_weekly_is_soft_return_reference_without_total_return_saturation():
+    panel = _panel()
+    at_reference = score_raw_multipair(panel, _scenarios())
+    old_total_scale = score_raw_multipair(
+        panel,
+        [replace(scenario, net_return=0.10) for scenario in _scenarios()],
+    )
+
+    assert at_reference.aggregate_components is not None
+    assert old_total_scale.aggregate_components is not None
+    assert at_reference.aggregate_components.return_score == pytest.approx(math.tanh(1.0))
+    assert old_total_scale.aggregate_components.return_score == pytest.approx(
+        math.tanh((0.10 / panel.calendar_weeks) / 0.03)
+    )
+    assert old_total_scale.aggregate_components.return_score < 0.03
+
+
+def test_sparse_profitable_candidate_loses_to_equally_profitable_frequent_candidate():
+    frequent = score_raw_multipair(_panel(), _scenarios())
+    sparse = score_raw_multipair(
+        _panel(),
+        [
+            replace(
+                scenario,
+                trade_count=35,
+                active_months=20,
+                max_consecutive_losses=min(scenario.max_consecutive_losses or 0, 35),
+            )
+            for scenario in _scenarios()
+        ],
+    )
+
+    assert frequent.is_valid and sparse.is_valid
+    assert frequent.score is not None and sparse.score is not None
+    assert frequent.score > sparse.score
 
 
 def test_holding_reward_declines_after_both_daytrading_targets():
@@ -348,8 +409,29 @@ def test_holding_reward_declines_after_both_daytrading_targets():
         ),
     )
 
-    assert at_target.pair_component_map()["BTC/USDT"].components.holding_score == 1.0
-    assert too_long.pair_component_map()["BTC/USDT"].components.holding_score == 0.5
+    assert at_target.pair_component_map()["BTC/USDT"].components.holding_score == 0.0
+    assert too_long.pair_component_map()["BTC/USDT"].components.holding_score == pytest.approx(
+        -5.0 / 6.0
+    )
+
+
+def test_frequent_break_even_with_fast_holding_remains_neutral_without_risk():
+    scenarios = [
+        replace(
+            scenario,
+            net_return=0.0,
+            net_expectancy=0.0,
+            profit_factor=1.0,
+            max_drawdown=0.0,
+            max_drawdown_duration_days=0.0,
+            max_consecutive_losses=0,
+        )
+        for scenario in _scenarios()
+    ]
+    result = score_raw_multipair(_panel(), scenarios)
+
+    assert result.is_valid
+    assert result.score == pytest.approx(0.0)
 
 
 def test_overtrading_penalty_starts_strictly_above_sixty_per_month():

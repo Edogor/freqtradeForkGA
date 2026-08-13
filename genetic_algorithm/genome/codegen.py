@@ -250,10 +250,14 @@ class StrategyGenerator:
         max_conds = self.indicator_config.get('max_entry_conditions', 4) if is_entry else 3
         num_conditions = random.randint(min(min_conds, len(valid_indicators)), min(max_conds, len(valid_indicators)))
         
-        # Use AND logic by default to create more selective (higher-quality) entry signals.
-        # The fitness function's trade count penalty handles zero-trade strategies.
-        # OR logic made entries too permissive, generating many low-quality trades.
-        primary_logic = 'AND'
+        # Choose the initial boolean topology per condition list.  The legacy
+        # default remains an all-AND conjunction.  High-frequency search
+        # profiles can expose full OR clauses without prescribing any
+        # indicator or threshold; subsequent mutations may still mix logic.
+        or_probability = float(
+            self.indicator_config.get('initial_or_probability', 0.0)
+        )
+        primary_logic = 'OR' if random.random() < or_probability else 'AND'
         
         for _ in range(num_conditions):
             # Pick a random indicator

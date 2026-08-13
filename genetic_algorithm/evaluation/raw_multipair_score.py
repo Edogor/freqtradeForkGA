@@ -1,6 +1,6 @@
 """Production scoring contract for the hardcore six-pair search.
 
-``raw-multipair-score-v2`` deliberately consumes point estimates from six
+``raw-multipair-score-v3`` deliberately consumes point estimates from six
 independent pair backtests.  It does not consume confidence bounds, effective
 sample sizes, Sharpe/Sortino ratios, gate results, or any temporal validation
 output.  Cross-pair validation is the only generalisation signal in this
@@ -24,7 +24,7 @@ from statistics import median
 from typing import Any
 
 
-RAW_MULTIPAIR_SCORE_VERSION = "raw-multipair-score-v2"
+RAW_MULTIPAIR_SCORE_VERSION = "raw-multipair-score-v3"
 
 HARDCORE_DEVELOPMENT_PAIRS = (
     "BTC/USDT",
@@ -47,20 +47,29 @@ VALIDATION_GROUP_WEIGHT = 0.6
 WORST_PAIR_WEIGHT = 0.6
 GROUP_MEDIAN_WEIGHT = 0.4
 
-RETURN_SCALE = 0.10
+# Profit is measured as simple net-return velocity over the immutable panel.
+# The former v2 scale used ten percent *total* return, which was almost fully
+# saturated by a strategy earning only a few percent per year.  Three percent
+# per week is an intentionally ambitious soft reference, not a qualification
+# gate: tanh remains continuous above and below it.
+TARGET_WEEKLY_NET_RETURN = 0.03
 EXPECTANCY_SCALE = 0.005
 PROFIT_FACTOR_CAP = 3.0
 PROFIT_FACTOR_SCALE = 0.5
 PROFIT_FACTOR_FULL_CREDIT_TRADES = 30
-ACTIVITY_TARGET_TRADES_PER_MONTH: Mapping[str, float] = {
-    "15m": 17.0,
-    "1h": 10.0,
+# Roughly one thousand trades per pair over this 35-month panel is the desired
+# high-frequency daytrading region.  It is deliberately a soft saturation
+# point: candidates below it remain valid and receive a smooth gradient.
+ACTIVITY_TARGET_TRADES_PER_PAIR = 1000.0
+ACTIVITY_TARGET_ACTIVE_MONTH_RATIO = 0.90
+HOLDING_MEDIAN_TARGET_HOURS: Mapping[str, float] = {
+    "15m": 8.0,
+    "1h": 12.0,
 }
-ACTIVITY_TARGET_ACTIVE_MONTH_RATIO = 0.75
-ACTIVITY_TRADE_RATE_WEIGHT = 0.55
-ACTIVITY_MONTH_COVERAGE_WEIGHT = 0.45
-HOLDING_MEDIAN_TARGET_HOURS = 24.0
-HOLDING_P90_TARGET_HOURS = 72.0
+HOLDING_P90_TARGET_HOURS: Mapping[str, float] = {
+    "15m": 24.0,
+    "1h": 36.0,
+}
 MAX_DRAWDOWN_SCALE = 0.20
 DRAWDOWN_DURATION_SCALE_DAYS = 120.0
 LOSS_STREAK_SCALE = 10.0
@@ -80,12 +89,13 @@ COMPONENT_NAMES = (
 )
 
 COMPONENT_WEIGHTS: Mapping[str, float] = {
-    "return_score": 0.25,
-    "expectancy_score": 0.15,
-    # Return and expectancy remain the dominant objective.  PF is deliberately
-    # smaller because a large PF can be produced by only a handful of trades.
-    "profit_factor_score": 0.10,
-    "activity_score": 0.20,
+    # Net profit velocity and pairwise activity dominate.  Expectancy and PF
+    # remain useful gradients, but cannot make a handful of lucky trades look
+    # like a production-quality high-frequency strategy.
+    "return_score": 0.40,
+    "expectancy_score": 0.10,
+    "profit_factor_score": 0.05,
+    "activity_score": 0.35,
     "holding_score": 0.05,
     "drawdown_risk": -0.12,
     "drawdown_duration_risk": -0.07,
@@ -118,7 +128,7 @@ class RawMultiPairPanel:
 
     def __post_init__(self) -> None:
         if self.timeframe not in HARDCORE_TIMEFRAMES:
-            raise ValueError("raw-multipair-score-v2 supports only 15m and 1h timeframes")
+            raise ValueError("raw-multipair-score-v3 supports only 15m and 1h timeframes")
 
         development = _canonical_pairs(self.development_pairs, "development_pairs")
         validation = _canonical_pairs(self.validation_pairs, "validation_pairs")
@@ -166,12 +176,18 @@ class RawMultiPairPanel:
         )
 
     @property
+    def calendar_weeks(self) -> float:
+        """Inclusive panel duration expressed as seven-day weeks."""
+
+        return ((self.period_end - self.period_start).days + 1) / 7.0
+
+    @property
     def panel_id(self) -> str:
         """Stable identity including the timeframe and scoring semantics."""
 
         payload = json.dumps(self._identity_descriptor(), sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
-        return f"raw_multipair_panel_v2_{digest}"
+        return f"raw_multipair_panel_v3_{digest}"
 
     def _identity_descriptor(self) -> dict[str, Any]:
         return {
@@ -565,29 +581,32 @@ def _score_pair(
     )
     trades_per_month = trade_count / panel.calendar_months
     active_month_ratio = active_months / panel.calendar_months
-    trade_rate_progress = min(
-        1.0,
-        trades_per_month / ACTIVITY_TARGET_TRADES_PER_MONTH[panel.timeframe],
-    )
+    trade_rate_progress = min(1.0, trade_count / ACTIVITY_TARGET_TRADES_PER_PAIR)
     month_coverage_progress = min(
         1.0,
         active_month_ratio / ACTIVITY_TARGET_ACTIVE_MONTH_RATIO,
     )
-    # Signed activity makes inactivity an actual cost instead of merely the
-    # absence of a bonus.  The additive blend also provides a useful gradient
-    # when only one of rate or month coverage improves.
-    activity_progress = (
-        ACTIVITY_TRADE_RATE_WEIGHT * trade_rate_progress
-        + ACTIVITY_MONTH_COVERAGE_WEIGHT * month_coverage_progress
+    # Geometric blending prevents a burst of trades in a few months from
+    # hiding long inactive stretches.  Activity is a smooth shortfall in
+    # [-1, 0]: reaching the target removes the penalty but never grants a
+    # positive score capable of compensating for losses.
+    activity_progress = math.sqrt(trade_rate_progress * month_coverage_progress)
+    activity = activity_progress - 1.0
+    holding_progress = 0.5 * _threshold_reward(
+        median_holding, HOLDING_MEDIAN_TARGET_HOURS[panel.timeframe]
+    ) + 0.5 * _threshold_reward(
+        p90_holding, HOLDING_P90_TARGET_HOURS[panel.timeframe]
     )
-    activity = 2.0 * activity_progress - 1.0
-    holding = 0.5 * _threshold_reward(
-        median_holding, HOLDING_MEDIAN_TARGET_HOURS
-    ) + 0.5 * _threshold_reward(p90_holding, HOLDING_P90_TARGET_HOURS)
+    # Like activity, holding time is a shortfall penalty rather than a free
+    # positive reward.  A frequent break-even strategy therefore remains
+    # neutral instead of scoring positively merely for closing quickly.
+    holding = holding_progress - 1.0
     overtrading_excess = max(0.0, trades_per_month - OVERTRADING_FREE_TRADES_PER_MONTH)
 
     vector = ComponentVector(
-        return_score=math.tanh(net_return / RETURN_SCALE),
+        return_score=math.tanh(
+            (net_return / panel.calendar_weeks) / TARGET_WEEKLY_NET_RETURN
+        ),
         expectancy_score=math.tanh(net_expectancy / EXPECTANCY_SCALE),
         profit_factor_score=math.tanh((effective_pf - 1.0) / PROFIT_FACTOR_SCALE),
         activity_score=activity,

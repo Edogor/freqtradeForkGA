@@ -139,6 +139,54 @@ def test_codegen_eliminates_duplicate_compiled_supertrend_terms():
     assert code.count("(dataframe['supertrend'] == True)") == 1
 
 
+def test_initial_or_probability_exposes_disjunctive_entry_topologies():
+    config = {
+        "indicators": {
+            "available": ["RSI", "EMA", "ATR"],
+            "min_per_strategy": 3,
+            "max_per_strategy": 3,
+            "min_entry_conditions": 2,
+            "max_entry_conditions": 2,
+            "min_exit_conditions": 1,
+            "max_exit_conditions": 1,
+            "initial_or_probability": 1.0,
+        },
+        "strategy_constraints": {"timeframes": ["15m"]},
+        "multi_timeframe": {"enabled": False},
+        "short_selling": {"enabled": False},
+        "regime_aware": {"enabled": False},
+    }
+
+    random.seed(42)
+    gene = StrategyGenerator(config).generate_random_strategy(0, 0)
+
+    assert len(gene.entry_conditions) == 2
+    assert {condition.logic for condition in gene.entry_conditions} == {"OR"}
+
+
+def test_initial_or_probability_keeps_legacy_all_and_default():
+    config = {
+        "indicators": {
+            "available": ["RSI", "EMA", "ATR"],
+            "min_per_strategy": 3,
+            "max_per_strategy": 3,
+            "min_entry_conditions": 2,
+            "max_entry_conditions": 2,
+            "min_exit_conditions": 1,
+            "max_exit_conditions": 1,
+        },
+        "strategy_constraints": {"timeframes": ["15m"]},
+        "multi_timeframe": {"enabled": False},
+        "short_selling": {"enabled": False},
+        "regime_aware": {"enabled": False},
+    }
+
+    random.seed(42)
+    gene = StrategyGenerator(config).generate_random_strategy(0, 0)
+
+    assert {condition.logic for condition in gene.entry_conditions} == {"AND"}
+
+
 def test_supertrend_threshold_mutation_removes_neutral_drift():
     condition = ConditionGene(
         "SUPERTREND_0",

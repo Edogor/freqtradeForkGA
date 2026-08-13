@@ -83,8 +83,11 @@ def test_production_preset_is_exact_twelve_island_six_pair_contract(preset_path)
     assert all(set(island["pairs"]) == EXPECTED_PAIRS for island in islands)
     assert config["pair_validation"]["validate_top_n_only"] == 0
     assert config["genetic_algorithm"]["seed_known_archetypes"] is False
-    assert config["raw_multipair_score"]["policy_version"] == "raw-multipair-score-v2"
+    assert config["raw_multipair_score"]["policy_version"] == "raw-multipair-score-v3"
     assert config["strategy_constraints"]["canonicalize_executable_genome"] is True
+    assert config["indicators"]["min_entry_conditions"] == 1
+    assert config["indicators"]["initial_or_probability"] == 0.5
+    assert config["strategy_constraints"]["roi_range"] == [0.001, 0.10]
 
 
 def test_hardcore_profile_rejects_built_in_archetype_seeding():

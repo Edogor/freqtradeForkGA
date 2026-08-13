@@ -36,11 +36,16 @@ strategy_constraints:
   startup_candle_floor: 75
   startup_candle_cap: 75
   stoploss_range: [-0.12, -0.03]
+  # Wide, low-ended execution ranges let evolution discover fast turnover;
+  # these are search bounds, not prescribed exits or profitability gates.
+  roi_range: [0.001, 0.10]
+  trailing_stop_positive_range: [0.001, 0.03]
+  trailing_stop_offset_addition_range: [0.001, 0.03]
   max_open_trades_range: [3, 3]
 
 raw_multipair_score:
   enabled: true
-  policy_version: raw-multipair-score-v2
+  policy_version: raw-multipair-score-v3
   development_pairs: [BTC/USDT, SOL/USDT, XRP/USDT]
   validation_pairs: [BNB/USDT, ETH/USDT, PEPE/USDT]
   period_start: "2023-05-09"
@@ -61,6 +66,17 @@ pair_validation:
   profitable_pair_penalty_floor: 1.0
   max_pair_loss_pct: 0.0
   worst_pair_loss_penalty_floor: 1.0
+
+# Keep the indicator universe broad while allowing evolution to explore both
+# selective conjunctions and frequent one-condition/disjunctive entries.
+indicators:
+  min_per_strategy: 1
+  max_per_strategy: 5
+  min_entry_conditions: 1
+  max_entry_conditions: 4
+  min_exit_conditions: 1
+  max_exit_conditions: 3
+  initial_or_probability: 0.50
 
 genetic_algorithm:
   random_seed: 42

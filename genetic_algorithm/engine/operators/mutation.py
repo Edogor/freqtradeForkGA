@@ -16,6 +16,7 @@ from genetic_algorithm.core.strategy_gene import (
     RegimeGene,
     StrategyGene,
     is_higher_timeframe,
+    timeframe_to_minutes,
 )
 from genetic_algorithm.strategies.operator_registry import (
     get_standard_operators,
@@ -40,6 +41,30 @@ _THRESHOLD_CLAMPS = {
     "ADX": (0, 100),
     "ATR": (0.001, 0.1),
 }
+
+
+def _generate_random_roi_table(
+    timeframe: str,
+    strategy_constraints: Dict[str, Any],
+) -> Dict[str, float]:
+    """Generate ROI values and checkpoints scaled to the genome timeframe."""
+
+    roi_range = strategy_constraints.get("roi_range", [0.01, 0.10])
+    candle_minutes = timeframe_to_minutes(timeframe) or 60
+    first_checkpoint = max(1, candle_minutes * random.randint(2, 4))
+    second_checkpoint = max(
+        first_checkpoint + 1,
+        candle_minutes * random.randint(5, 8),
+    )
+    return {
+        "0": random.uniform(roi_range[0] * 2, roi_range[1]),
+        str(first_checkpoint): random.uniform(
+            roi_range[0] * 1.5, roi_range[1] * 0.7
+        ),
+        str(second_checkpoint): random.uniform(
+            roi_range[0], roi_range[1] * 0.5
+        ),
+    }
 
 
 def clamp_condition_thresholds(conditions: list) -> None:
@@ -323,12 +348,10 @@ def mutate_parameters(
 
     # Mutate ROI values
     if random.random() < mutation_rate:
-        roi_range = strategy_constraints.get("roi_range", [0.01, 0.10])
-        mutated_gene.minimal_roi = {
-            "0": random.uniform(roi_range[0] * 2, roi_range[1]),
-            "30": random.uniform(roi_range[0] * 1.5, roi_range[1] * 0.7),
-            "60": random.uniform(roi_range[0], roi_range[1] * 0.5),
-        }
+        mutated_gene.minimal_roi = _generate_random_roi_table(
+            mutated_gene.timeframe,
+            strategy_constraints,
+        )
         # Enforce monotonically decreasing ROI values
         mutated_gene._enforce_roi_monotonicity()
         mutations_applied.append("roi")
@@ -955,12 +978,10 @@ def mutate_structure(
 
     # Mutate ROI
     if random.random() < mutation_rate:
-        roi_range = strategy_constraints.get("roi_range", [0.01, 0.10])
-        mutated_gene.minimal_roi = {
-            "0": random.uniform(roi_range[0] * 2, roi_range[1]),
-            "30": random.uniform(roi_range[0] * 1.5, roi_range[1] * 0.7),
-            "60": random.uniform(roi_range[0], roi_range[1] * 0.5),
-        }
+        mutated_gene.minimal_roi = _generate_random_roi_table(
+            mutated_gene.timeframe,
+            strategy_constraints,
+        )
         # Enforce monotonically decreasing ROI values
         mutated_gene._enforce_roi_monotonicity()
         mutations_applied.append("roi")

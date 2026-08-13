@@ -123,7 +123,7 @@ class FitnessEvaluator:
         if self.raw_multipair_score_enabled:
             if self.walk_forward_config.get('enabled', False):
                 raise ValueError(
-                    'raw-multipair-score-v2 forbids walk-forward evaluation'
+                    'raw-multipair-score-v3 forbids walk-forward evaluation'
                 )
             if (
                 not self.pair_validation_enabled
@@ -132,7 +132,7 @@ class FitnessEvaluator:
                 or self.validate_top_n_only != 0
             ):
                 raise ValueError(
-                    'raw-multipair-score-v2 requires immediate independent '
+                    'raw-multipair-score-v3 requires immediate independent '
                     'evaluation of every pair'
                 )
             self.raw_multipair_panel = RawMultiPairPanel(
@@ -2049,7 +2049,7 @@ class FitnessEvaluator:
         # Raw multipair search and strict replay must consume the identical
         # daily-equity drawdown definition.  Legacy fitness keeps its historic
         # trade-level field; missing daily evidence in raw mode remains None
-        # and therefore fails closed in raw-multipair-score-v2.
+        # and therefore fails closed in raw-multipair-score-v3.
         max_drawdown = (
             result.daily_max_drawdown
             if getattr(self, 'raw_multipair_score_enabled', False)

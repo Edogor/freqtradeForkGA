@@ -962,7 +962,7 @@ class TestProductionEvolutionSupervision:
         config = _minimal_config(num_islands=1)
         config['raw_multipair_score'] = {
             'enabled': True,
-            'policy_version': 'raw-multipair-score-v2',
+            'policy_version': 'raw-multipair-score-v3',
             'development_pairs': ['BTC/USDT', 'SOL/USDT', 'XRP/USDT'],
             'validation_pairs': ['BNB/USDT', 'ETH/USDT', 'PEPE/USDT'],
             'period_start': '2023-05-09',
@@ -1122,7 +1122,7 @@ class TestProductionEvolutionSupervision:
         }
         candidate = _make_individual(fitness=-1.0)
         candidate.metrics.update({
-            'raw_multipair_score_version': 'raw-multipair-score-v2',
+            'raw_multipair_score_version': 'raw-multipair-score-v3',
             'raw_multipair_status': 'VALID',
             'raw_pair_metrics': {'BTC/USDT': {}},
         })
@@ -1219,7 +1219,7 @@ class TestProductionEvolutionSupervision:
                 {
                     'profit': -1.0,
                     'num_trades': 20,
-                    'raw_multipair_score_version': 'raw-multipair-score-v2',
+                    'raw_multipair_score_version': 'raw-multipair-score-v3',
                     'raw_multipair_status': 'VALID',
                     'raw_pair_metrics': {pair: {} for pair in all_pairs},
                 },

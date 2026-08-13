@@ -175,6 +175,9 @@ DEFAULTS: Dict[str, Any] = {
         "max_entry_conditions": 4,
         "min_exit_conditions": 1,
         "max_exit_conditions": 3,
+        # Zero preserves the historical all-AND initial population.  Search
+        # profiles may opt into evolvable disjunctive signal topologies.
+        "initial_or_probability": 0.0,
     },
     # === Strategy constraints ===
     "strategy_constraints": {
@@ -184,6 +187,8 @@ DEFAULTS: Dict[str, Any] = {
         "canonicalize_executable_genome": False,
         "stoploss_range": [-0.20, -0.05],
         "roi_range": [0.01, 0.10],
+        "trailing_stop_positive_range": [0.01, 0.03],
+        "trailing_stop_offset_addition_range": [0.01, 0.03],
         "max_open_trades_range": [1, 5],
         "min_indicators": 2,
         "max_indicators": 8,
@@ -393,7 +398,7 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
     # statistic, gate state or deferred validation may influence selection.
     "raw_multipair_score": {
         "enabled": False,
-        "policy_version": "raw-multipair-score-v2",
+        "policy_version": "raw-multipair-score-v3",
         "development_pairs": ["BTC/USDT", "SOL/USDT", "XRP/USDT"],
         "validation_pairs": ["BNB/USDT", "ETH/USDT", "PEPE/USDT"],
         "period_start": "2023-05-09",
@@ -1003,6 +1008,16 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             "genetic_algorithm.max_runtime_minutes must be a positive integer or null"
         )
 
+    indicators = _nested_config(config, ("indicators",))
+    initial_or_probability = indicators.get("initial_or_probability", 0.0)
+    if (
+        not isinstance(initial_or_probability, (int, float))
+        or isinstance(initial_or_probability, bool)
+        or not math.isfinite(initial_or_probability)
+        or not 0.0 <= float(initial_or_probability) <= 1.0
+    ):
+        errors.append("indicators.initial_or_probability must be between 0 and 1")
+
     pair_validation = _nested_config(config, ("pair_validation",))
     if pair_validation.get("enabled", False):
         evaluation_mode = pair_validation.get("evaluation_mode", "joint")
@@ -1038,9 +1053,9 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
     raw_score = _nested_config(config, ("raw_multipair_score",))
     if raw_score.get("enabled", False):
-        if raw_score.get("policy_version") != "raw-multipair-score-v2":
+        if raw_score.get("policy_version") != "raw-multipair-score-v3":
             errors.append(
-                "raw_multipair_score.policy_version must be raw-multipair-score-v2"
+                "raw_multipair_score.policy_version must be raw-multipair-score-v3"
             )
         development_pairs = raw_score.get("development_pairs", [])
         validation_pairs = raw_score.get("validation_pairs", [])
@@ -1598,8 +1613,8 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         raw_score = _nested_config(config, ("raw_multipair_score",))
         if not raw_score.get("enabled", False):
             errors.append(f"{label} requires raw_multipair_score.enabled: true")
-        if raw_score.get("policy_version") != "raw-multipair-score-v2":
-            errors.append(f"{label} requires raw-multipair-score-v2")
+        if raw_score.get("policy_version") != "raw-multipair-score-v3":
+            errors.append(f"{label} requires raw-multipair-score-v3")
         if raw_score.get("development_pairs") != expected_dev:
             errors.append(f"{label} requires the fixed development pair group")
         if raw_score.get("validation_pairs") != expected_val:
@@ -1638,6 +1653,18 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             )
         if constraints.get("canonicalize_executable_genome") is not True:
             errors.append(f"{label} requires executable-genome canonicalization")
+        if indicators.get("min_entry_conditions") != 1:
+            errors.append(f"{label} requires min_entry_conditions: 1")
+        if indicators.get("initial_or_probability") != 0.5:
+            errors.append(f"{label} requires initial_or_probability: 0.5")
+        roi_range = constraints.get("roi_range")
+        if (
+            not isinstance(roi_range, list)
+            or len(roi_range) != 2
+            or roi_range[0] > 0.001
+            or roi_range[1] < 0.10
+        ):
+            errors.append(f"{label} requires the broad high-turnover ROI search range")
 
         promotion = _nested_config(config, ("promotion_v2",))
         scenarios = promotion.get("required_scenarios", [])
@@ -1784,13 +1811,13 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         raw_score = _nested_config(config, ("raw_multipair_score",))
         if (
             not raw_score.get("enabled", False)
-            or raw_score.get("policy_version") != "raw-multipair-score-v2"
+            or raw_score.get("policy_version") != "raw-multipair-score-v3"
             or raw_score.get("development_pairs") != expected_dev
             or raw_score.get("validation_pairs") != expected_val
             or raw_score.get("period_start") != "2023-05-09"
             or raw_score.get("period_end") != "2026-03-26"
         ):
-            errors.append(f"{label} requires the immutable raw-multipair-score-v2 panel")
+            errors.append(f"{label} requires the immutable raw-multipair-score-v3 panel")
 
         timeframe = bt.get("timeframe")
         expected_timerange = {
