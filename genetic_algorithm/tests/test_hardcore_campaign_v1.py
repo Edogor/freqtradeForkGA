@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -601,8 +602,20 @@ def test_canary_finishes_after_exactly_one_15m_and_one_1h_run(tmp_path: Path):
         CampaignLane.FIFTEEN_MINUTES,
         CampaignLane.ONE_HOUR,
     ]
-    controller.run_once(observed_at=NOW + timedelta(minutes=20))
+    terminal_refresh_time = NOW + timedelta(minutes=20)
+    controller.run_once(observed_at=terminal_refresh_time)
     assert len(backend.queued) == 2
+    refreshed_status = json.loads(
+        (Path(policy.automation_root) / "campaign_status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert refreshed_status["lifecycle"] == CampaignLifecycle.COMPLETED.value
+    assert refreshed_status["stop_reason"] == "CANARY_COMPLETED"
+    assert refreshed_status["active_run_id"] is None
+    assert refreshed_status["observed_at"] == terminal_refresh_time.isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 @pytest.mark.parametrize("technical_lane", [

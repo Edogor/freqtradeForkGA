@@ -1853,6 +1853,11 @@ class HardcoreCampaignControllerV1:
             CampaignLifecycle.BLOCKED,
             CampaignLifecycle.KILLED,
         }:
+            # A stale controller can finish writing an older live-status snapshot
+            # after the canonical terminal state has already been committed.  A
+            # later invocation must therefore self-heal the derived status file
+            # from the authoritative campaign state before returning.
+            self._persist_status(now)
             return self._tick(now, ControllerTickOutcome.STOPPED, ["CAMPAIGN_TERMINAL"])
 
         if Path(self.policy.kill_switch_path).is_file() and self.state.lifecycle != (
