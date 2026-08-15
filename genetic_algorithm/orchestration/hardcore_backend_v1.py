@@ -23,6 +23,8 @@ from genetic_algorithm.config.schema import (
     load_config,
     validate_resolved_config_v2_or_raise,
 )
+from genetic_algorithm.core.strategy_gene import StrategyGene
+from genetic_algorithm.evaluation.panel_contract import phenotype_fingerprint
 from genetic_algorithm.evaluation.raw_multipair_score import (
     PairScenario,
     RawMultiPairPanel,
@@ -213,9 +215,9 @@ def _archive_seeds(request: EvolutionRunRequestV1) -> list[FrozenEvolutionSeedV2
     seen: set[str] = set()
     for archive_entry in flattened:
         candidate = archive_entry.candidate
-        if candidate.phenotype_hash in seen:
+        if candidate.evolutionary_phenotype_hash in seen:
             continue
-        seen.add(candidate.phenotype_hash)
+        seen.add(candidate.evolutionary_phenotype_hash)
         path = Path(candidate.evolution_seed_path).resolve()
         if not path.is_file() or _sha256_file(path) != candidate.evolution_seed_sha256:
             raise HardcoreCampaignError("archived evolution seed is missing or changed")
@@ -939,6 +941,9 @@ def candidate_snapshot_from_strict_replay(
     return CandidateSnapshotV1(
         candidate_id=candidate.candidate_id,
         phenotype_hash=candidate.phenotype_hash,
+        evolutionary_phenotype_hash=phenotype_fingerprint(
+            StrategyGene.from_dict_exact(seed.strategy_gene)
+        ),
         score=score.score,
         policy_hash=score.policy_hash,
         edge_score=aggregate.edge_score,

@@ -191,6 +191,7 @@ def _candidate(
     return CandidateSnapshotV1(
         candidate_id=f"candidate-{lane.value}-{ordinal}",
         phenotype_hash=phenotype,
+        evolutionary_phenotype_hash=phenotype,
         score=score,
         timeframe=lane,
         panel_id=RawMultiPairPanel(timeframe=lane.value).panel_id,
@@ -328,6 +329,30 @@ def test_partial_archive_preserves_all_three_niches_and_balanced_champion(
     )
     balanced = [candidate for niche, candidate, _ in assignments if niche is ArchiveNiche.BALANCED]
     assert max(candidates, key=lambda item: item.score) in balanced
+
+
+def test_archive_deduplicates_evolutionary_semantics_not_generated_code(
+    tmp_path: Path,
+):
+    first = _candidate(
+        tmp_path,
+        lane=CampaignLane.ONE_HOUR,
+        score=5.0,
+        ordinal=1,
+    )
+    second = _candidate(
+        tmp_path,
+        lane=CampaignLane.ONE_HOUR,
+        score=4.0,
+        ordinal=2,
+    ).model_copy(
+        update={"evolutionary_phenotype_hash": first.evolutionary_phenotype_hash}
+    )
+
+    assignments = assign_candidate_niches([first, second])
+
+    assert len(assignments) == 1
+    assert assignments[0][1] == first
 
 
 def test_search_recipes_materially_change_explicit_indicator_pools():

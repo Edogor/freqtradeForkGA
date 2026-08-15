@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from genetic_algorithm.config.schema import load_config
+from genetic_algorithm.core.strategy_gene import StrategyGene
+from genetic_algorithm.evaluation.panel_contract import phenotype_fingerprint
 from genetic_algorithm.evaluation.raw_multipair_score import (
     PairScenario,
     RawMultiPairPanel,
@@ -56,7 +58,7 @@ from genetic_algorithm.orchestration.result_contract import AttemptStatus
 class _HistoricalCandidate:
     lane: CampaignLane
     candidate_id: str
-    phenotype_hash: str
+    evolutionary_phenotype_hash: str
     provisional_score: float
     provisional_edge: float
     provisional_activity: float
@@ -158,7 +160,9 @@ def _historical_candidates(  # noqa: C901 - fail closed at each legacy boundary
                 candidate = _HistoricalCandidate(
                     lane=lane,
                     candidate_id=candidate_id,
-                    phenotype_hash=seed.phenotype_hash,
+                    evolutionary_phenotype_hash=phenotype_fingerprint(
+                        StrategyGene.from_dict_exact(seed.strategy_gene)
+                    ),
                     provisional_score=float(scored.score),
                     provisional_edge=float(aggregate.edge_score),
                     provisional_activity=float(aggregate.activity_score),
@@ -174,9 +178,9 @@ def _historical_candidates(  # noqa: C901 - fail closed at each legacy boundary
                     )
                 )
                 continue
-            previous = by_phenotype.get(candidate.phenotype_hash)
+            previous = by_phenotype.get(candidate.evolutionary_phenotype_hash)
             if previous is None or candidate.provisional_score > previous.provisional_score:
-                by_phenotype[candidate.phenotype_hash] = candidate
+                by_phenotype[candidate.evolutionary_phenotype_hash] = candidate
     return list(by_phenotype.values()), quarantined, sorted(set(outcome_hashes))
 
 
@@ -191,10 +195,10 @@ def _shortlist(candidates: list[_HistoricalCandidate]) -> list[_HistoricalCandid
     for key in rankings:
         added = 0
         for candidate in sorted(candidates, key=key, reverse=True):
-            if candidate.phenotype_hash in hashes:
+            if candidate.evolutionary_phenotype_hash in hashes:
                 continue
             selected.append(candidate)
-            hashes.add(candidate.phenotype_hash)
+            hashes.add(candidate.evolutionary_phenotype_hash)
             added += 1
             if added == 4:
                 break

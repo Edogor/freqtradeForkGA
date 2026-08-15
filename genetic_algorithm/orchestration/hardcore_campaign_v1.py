@@ -317,10 +317,13 @@ class RawPairMetricsV1(StrictV2Model):
 
 
 class CandidateSnapshotV1(StrictV2Model):
-    """A scored executable phenotype and the seed needed for warm-starting."""
+    """A scored executable plus its normalized evolutionary phenotype."""
 
     candidate_id: str = Field(min_length=1)
+    # Hash of the frozen executable, including its immutable generated code.
     phenotype_hash: str = Field(min_length=64, max_length=64)
+    # Hash of trading semantics after removing generation/individual IDs.
+    evolutionary_phenotype_hash: str = Field(min_length=64, max_length=64)
     score_version: Literal["raw-multipair-score-v4"] = RAW_MULTIPAIR_SCORE_VERSION
     policy_hash: str = Field(min_length=64, max_length=64)
     score: float
@@ -406,7 +409,7 @@ def assign_candidate_niches(
                 (
                     item
                     for item in rankings[niche]
-                    if item.phenotype_hash not in selected_hashes
+                    if item.evolutionary_phenotype_hash not in selected_hashes
                 ),
                 None,
             )
@@ -418,7 +421,7 @@ def assign_candidate_niches(
                 ArchiveNiche.ACTIVITY: candidate.activity_score,
             }[niche]
             selected.append((niche, candidate, descriptor))
-            selected_hashes.add(candidate.phenotype_hash)
+            selected_hashes.add(candidate.evolutionary_phenotype_hash)
     return selected
 
 
@@ -490,7 +493,7 @@ class AttemptEvidenceV1(StrictV2Model):
         scores = [item.score for item in self.candidates]
         if scores != sorted(scores, reverse=True):
             raise ValueError("attempt candidates must be ordered by descending raw score")
-        phenotypes = [item.phenotype_hash for item in self.candidates]
+        phenotypes = [item.evolutionary_phenotype_hash for item in self.candidates]
         if len(phenotypes) != len(set(phenotypes)):
             raise ValueError("attempt candidate phenotypes must be unique")
         if len(self.score_curve) > self.actual_generations:
@@ -642,7 +645,9 @@ class HardcoreBootstrapArchiveV4(StrictV2Model):
         for lane, entries in self.lanes.items():
             if len(entries) > 12:
                 raise ValueError("bootstrap lane archive exceeds twelve entries")
-            hashes = [entry.candidate.phenotype_hash for entry in entries]
+            hashes = [
+                entry.candidate.evolutionary_phenotype_hash for entry in entries
+            ]
             if len(hashes) != len(set(hashes)):
                 raise ValueError("bootstrap lane contains duplicate phenotypes")
             if any(entry.candidate.timeframe != lane for entry in entries):
@@ -1206,7 +1211,9 @@ class LaneStateV1(StrictV2Model):
     def _archive_contract(self) -> "LaneStateV1":
         if self.lifecycle == LaneLifecycle.SUSPENDED and not self.suspension_reason:
             raise ValueError("suspended lane requires a reason")
-        phenotypes = [item.candidate.phenotype_hash for item in self.archive]
+        phenotypes = [
+            item.candidate.evolutionary_phenotype_hash for item in self.archive
+        ]
         if len(phenotypes) != len(set(phenotypes)):
             raise ValueError("lane archive phenotypes must be unique")
         if any(
@@ -1433,7 +1440,7 @@ def build_island_blueprints(
         raise ValueError("lane archive exceeds twelve entries")
     if any(item.candidate.timeframe != lane for item in archive):
         raise ValueError("cross-timeframe archive input is forbidden")
-    unique = [item.candidate.phenotype_hash for item in archive]
+    unique = [item.candidate.evolutionary_phenotype_hash for item in archive]
     if len(unique) != len(set(unique)):
         raise ValueError("archive input contains duplicate phenotypes")
     edge = [item for item in archive if item.niche is ArchiveNiche.EDGE]
@@ -1795,21 +1802,24 @@ class HardcoreCampaignControllerV1:
             )
         best = max(evidence.candidates, key=lambda item: item.score)
         improved = material_improvement(previous, best.score)
-        old = {item.candidate.phenotype_hash: item for item in lane_state.archive}
+        old = {
+            item.candidate.evolutionary_phenotype_hash: item
+            for item in lane_state.archive
+        }
         merged_candidates = {
-            item.candidate.phenotype_hash: item.candidate
+            item.candidate.evolutionary_phenotype_hash: item.candidate
             for item in lane_state.archive
         }
         for candidate in evidence.candidates:
-            current = merged_candidates.get(candidate.phenotype_hash)
+            current = merged_candidates.get(candidate.evolutionary_phenotype_hash)
             if current is None or candidate.score > current.score:
-                merged_candidates[candidate.phenotype_hash] = candidate
+                merged_candidates[candidate.evolutionary_phenotype_hash] = candidate
 
         selected: list[ArchiveEntryV1] = []
         for niche, candidate, descriptor in assign_candidate_niches(
             list(merged_candidates.values())
         ):
-            previous_entry = old.get(candidate.phenotype_hash)
+            previous_entry = old.get(candidate.evolutionary_phenotype_hash)
             selected.append(
                 ArchiveEntryV1(
                     candidate=candidate,
@@ -1830,7 +1840,9 @@ class HardcoreCampaignControllerV1:
                 )
             )
         new_archive = selected[: self.policy.archive_size]
-        new_hashes = {item.candidate.phenotype_hash for item in new_archive}
+        new_hashes = {
+            item.candidate.evolutionary_phenotype_hash for item in new_archive
+        }
         old_hashes = set(old)
         added = sorted(new_hashes - old_hashes)
         evicted = sorted(old_hashes - new_hashes)
@@ -1841,7 +1853,7 @@ class HardcoreCampaignControllerV1:
             != next(
                 item.niche
                 for item in new_archive
-                if item.candidate.phenotype_hash == phenotype
+                if item.candidate.evolutionary_phenotype_hash == phenotype
             )
         )
         updated = sorted(
@@ -1851,7 +1863,7 @@ class HardcoreCampaignControllerV1:
             != next(
                 item.candidate
                 for item in new_archive
-                if item.candidate.phenotype_hash == phenotype
+                if item.candidate.evolutionary_phenotype_hash == phenotype
             )
         )
         history = list(lane_state.champion_history)
