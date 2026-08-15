@@ -24,6 +24,7 @@ class AttemptOutputLayoutV2(StrictV2Model):
 
     schema_version: Literal["attempt-output-layout-v2"] = "attempt-output-layout-v2"
     artifact_root: str = Field(min_length=1)
+    runtime_dir: str = Field(min_length=1)
     evolution_root: str = Field(min_length=1)
     evolution_work_dir: str = Field(min_length=1)
     engine_config_path: str = Field(min_length=1)
@@ -52,6 +53,7 @@ class AttemptOutputLayoutV2(StrictV2Model):
         replay = root / "replay"
         return {
             "artifact_root": str(root),
+            "runtime_dir": str(root / "runtime"),
             "evolution_root": str(evolution),
             "evolution_work_dir": str(evolution / "work"),
             "engine_config_path": str(evolution / "engine_config.yaml"),
