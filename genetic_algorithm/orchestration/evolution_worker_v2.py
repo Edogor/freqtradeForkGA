@@ -431,6 +431,68 @@ def _validate_evolution_contract(
         raise EvolutionWorkerError("runtime split plan differs from attempt manifest")
 
 
+def _validate_evolution_seed_capacity(
+    config: Mapping[str, Any], seed_ids: Sequence[str]
+) -> None:
+    """Validate seed capacity against the engine that will consume the seeds.
+
+    Standard evolution has one population, so its global population size is the
+    correct bound.  Generic-island archive seeding is different: immutable
+    seeds are stored once by the worker and then assigned to individual archive
+    islands by candidate ID.  Bounding that union by the compatibility
+    ``genetic_algorithm.population_size`` incorrectly rejects valid campaigns
+    whenever different bridge islands receive different seeds.
+    """
+
+    population_size = int(
+        config.get("genetic_algorithm", {}).get("population_size", 0)
+    )
+    generic = config.get("generic_island_model", {})
+    archive = generic.get("archive_seeding", {}) if isinstance(generic, Mapping) else {}
+    assignments = archive.get("assignments", {}) if isinstance(archive, Mapping) else {}
+    if not (
+        isinstance(generic, Mapping)
+        and generic.get("enabled") is True
+        and isinstance(assignments, Mapping)
+        and assignments
+    ):
+        if len(seed_ids) > population_size:
+            raise EvolutionWorkerError("evolution seed count exceeds population size")
+        return
+
+    islands = {
+        str(row.get("name")): row
+        for row in generic.get("islands", [])
+        if isinstance(row, Mapping) and row.get("name")
+    }
+    max_per_island = int(archive.get("max_seeds_per_island", 4))
+    assigned_ids: set[str] = set()
+    for island_name, rows in assignments.items():
+        if island_name not in islands or not isinstance(rows, list):
+            raise EvolutionWorkerError(
+                "archive seed assignment references an invalid island"
+            )
+        row_ids = [
+            str(row.get("candidate_id"))
+            for row in rows
+            if isinstance(row, Mapping) and row.get("candidate_id")
+        ]
+        if len(row_ids) != len(rows) or len(row_ids) != len(set(row_ids)):
+            raise EvolutionWorkerError(
+                "archive seed assignment IDs must be present and unique"
+            )
+        island_capacity = int(islands[island_name].get("population_size", 0))
+        if len(row_ids) > min(max_per_island, island_capacity):
+            raise EvolutionWorkerError(
+                f"archive seed assignment exceeds capacity for {island_name}"
+            )
+        assigned_ids.update(row_ids)
+    if set(seed_ids) != assigned_ids:
+        raise EvolutionWorkerError(
+            "immutable evolution seeds differ from archive seed assignments"
+        )
+
+
 def prepare_evolution_worker(
     *,
     bundle: AttemptManifestBundleV2,
@@ -469,13 +531,11 @@ def prepare_evolution_worker(
     seed_ids = [item.candidate_id for item in seed_list]
     if len(seed_ids) != len(set(seed_ids)):
         raise EvolutionWorkerError("evolution seed candidate IDs must be unique")
-    population_size = int(config.get("genetic_algorithm", {}).get("population_size", 0))
-    if len(seed_list) > population_size:
-        raise EvolutionWorkerError("evolution seed count exceeds population size")
     if replay_input_seeds and len(seed_list) != 1:
         raise EvolutionWorkerError(
             "immutable parent replay requires exactly one evolution seed"
         )
+    _validate_evolution_seed_capacity(config, seed_ids)
     for seed in seed_list:
         validate_evolution_seed(seed, config)
 

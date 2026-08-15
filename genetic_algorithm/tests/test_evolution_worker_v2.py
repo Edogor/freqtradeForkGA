@@ -34,6 +34,7 @@ from genetic_algorithm.orchestration.evolution_scheduler_v2 import (
     queue_prepared_evolution_attempt,
 )
 from genetic_algorithm.orchestration.evolution_worker_v2 import (
+    _validate_evolution_seed_capacity,
     EvolutionWorkerError,
     FrozenEvolutionSeedV2,
     LoadedEvolutionWorkerV2,
@@ -333,6 +334,39 @@ def test_prepared_evolution_worker_roundtrips_all_bound_inputs(evolution_context
         loaded.spec.artifact_root
     )
     assert not context.ledger_path.exists()
+
+
+def test_generic_island_archive_seed_capacity_is_per_island_not_global():
+    seed_ids = [f"seed-{index}" for index in range(12)]
+    config = {
+        "genetic_algorithm": {"population_size": 4},
+        "generic_island_model": {
+            "enabled": True,
+            "islands": [
+                {"name": f"bridge-{index}", "population_size": 4}
+                for index in range(1, 4)
+            ],
+            "archive_seeding": {
+                "enabled": True,
+                "max_seeds_per_island": 4,
+                "assignments": {
+                    f"bridge-{index + 1}": [
+                        {"candidate_id": candidate_id, "niche": "EDGE"}
+                        for candidate_id in seed_ids[index * 4 : (index + 1) * 4]
+                    ]
+                    for index in range(3)
+                },
+            },
+        },
+    }
+
+    _validate_evolution_seed_capacity(config, seed_ids)
+
+    with pytest.raises(
+        EvolutionWorkerError,
+        match="differ from archive seed assignments",
+    ):
+        _validate_evolution_seed_capacity(config, seed_ids[:-1])
 
 
 def test_completed_evolution_worker_can_be_inspected_after_restart(
