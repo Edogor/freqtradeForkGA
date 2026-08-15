@@ -11,6 +11,7 @@ import pytest
 from genetic_algorithm.evaluation.raw_multipair_score import RawMultiPairPanel
 from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
     HARDCORE_PANEL_PAIRS,
+    ArchiveNiche,
     ArchiveEntryV1,
     AttemptEvidenceV1,
     AttemptHandleV1,
@@ -24,6 +25,7 @@ from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
     EvolutionStopReason,
     FailureClass,
     HardcoreCampaignControllerV1,
+    HardcoreBootstrapArchiveV4,
     HardcoreQueueError,
     HardcoreCampaignPreflightV1,
     PairRole,
@@ -32,10 +34,12 @@ from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
     SearchRecipe,
     build_island_blueprints,
     build_hardcore_campaign_preflight,
+    assign_candidate_niches,
     default_hardcore_campaign_policy,
     material_improvement,
     read_evolution_outcome,
     render_hardcore_systemd_user_unit,
+    write_hardcore_bootstrap_archive,
 )
 
 
@@ -156,6 +160,8 @@ def _pair_metrics() -> list[RawPairMetricsV1]:
                 "E": 0.2,
                 "P": 0.2,
                 "A": 0.5,
+                "Q": 0.15,
+                "F": 0.075,
                 "H": 1.0,
                 "D": 0.1,
                 "U": 0.2,
@@ -188,6 +194,10 @@ def _candidate(
         score=score,
         timeframe=lane,
         panel_id=RawMultiPairPanel(timeframe=lane.value).panel_id,
+        policy_hash=RawMultiPairPanel(timeframe=lane.value).policy.policy_hash,
+        edge_score=0.15,
+        activity_score=0.5,
+        productive_frequency_score=0.075,
         evolution_seed_path=str(seed_path),
         evolution_seed_sha256=seed_hash,
         gene_hash=gene_hash,
@@ -260,11 +270,18 @@ def test_material_improvement_is_continuous_and_allows_first_negative():
 def test_blueprints_are_twelve_specialists_with_only_three_archive_islands(
     tmp_path: Path,
 ):
+    niches = (
+        [ArchiveNiche.EDGE] * 4
+        + [ArchiveNiche.ACTIVITY] * 4
+        + [ArchiveNiche.BALANCED] * 2
+    )
     archive = [
         ArchiveEntryV1(
             candidate=_candidate(
                 tmp_path, lane=CampaignLane.FIFTEEN_MINUTES, score=10 - index, ordinal=index
             ),
+            niche=niches[index - 1],
+            descriptor_score=float(10 - index),
             source_run_id=f"run-{index}",
             archived_at=NOW,
         )
@@ -280,14 +297,37 @@ def test_blueprints_are_twelve_specialists_with_only_three_archive_islands(
     assert len(islands) == 12
     assert len({island.seed for island in islands}) == 12
     assert sum(island.archive_island for island in islands) == 3
-    assert [len(island.seed_candidates) for island in islands[:3]] == [4, 3, 3]
-    assert all(not island.seed_candidates for island in islands[3:])
+    assert all(not island.seed_candidates for island in islands[:9])
+    assert [len(island.seed_candidates) for island in islands[9:]] == [4, 4, 4]
     assert {island.family for island in islands} == {
         "momentum",
         "trend",
         "volatility-volume",
-        "mixed",
+        "bridge",
     }
+
+
+def test_partial_archive_preserves_all_three_niches_and_balanced_champion(
+    tmp_path: Path,
+):
+    candidates = [
+        _candidate(
+            tmp_path,
+            lane=CampaignLane.FIFTEEN_MINUTES,
+            score=float(10 - index),
+            ordinal=index,
+        )
+        for index in range(1, 8)
+    ]
+
+    assignments = assign_candidate_niches(candidates)
+
+    assert len(assignments) == 7
+    assert {niche for niche, _candidate, _descriptor in assignments} == set(
+        ArchiveNiche
+    )
+    balanced = [candidate for niche, candidate, _ in assignments if niche is ArchiveNiche.BALANCED]
+    assert max(candidates, key=lambda item: item.score) in balanced
 
 
 def test_search_recipes_materially_change_explicit_indicator_pools():
@@ -391,6 +431,78 @@ def test_recipe_rotates_without_progress_and_resets_after_improvement(tmp_path: 
     assert controller.state.lanes[CampaignLane.FIFTEEN_MINUTES].recipe == (
         SearchRecipe.BALANCED
     )
+
+
+
+def test_new_campaign_loads_hash_covered_niche_bootstrap_and_starts_recombine(
+    tmp_path: Path,
+):
+    root = tmp_path / "hardcore"
+    bootstrap_path = root / "bootstrap" / "bootstrap_archive_v4.json"
+    lanes = {}
+    for lane in CampaignLane:
+        candidate = _candidate(tmp_path, lane=lane, score=3.0)
+        lanes[lane] = [
+            ArchiveEntryV1(
+                candidate=candidate,
+                niche=ArchiveNiche.BALANCED,
+                descriptor_score=candidate.score,
+                source_run_id=f"historical-{lane.value}",
+                archived_at=NOW,
+            )
+        ]
+    bootstrap = HardcoreBootstrapArchiveV4(
+        created_at=NOW,
+        source_root=str(tmp_path / "v3"),
+        lanes=lanes,
+    )
+    digest = write_hardcore_bootstrap_archive(bootstrap_path, bootstrap)
+    base = _policy(tmp_path)
+    policy = base.model_copy(
+        update={
+            "automation_root": str(root.resolve()),
+            "kill_switch_path": str((root / "STOP_HARDCORE_CAMPAIGN").resolve()),
+            "bootstrap_archive_path": str(bootstrap_path.resolve()),
+            "bootstrap_archive_sha256": digest,
+        }
+    )
+    policy = type(base).model_validate(policy.model_dump(mode="python"))
+    controller = HardcoreCampaignControllerV1(
+        policy=policy,
+        backend=FakeBackend(tmp_path / "attempts"),
+        started_at=NOW,
+        resource_probe=_ample_resources,
+    )
+
+    for lane in CampaignLane:
+        state = controller.state.lanes[lane]
+        assert state.recipe is SearchRecipe.RECOMBINE
+        assert state.global_champion_score == 3.0
+        assert len(state.archive) == 1
+        assert state.archive[0].candidate.timeframe is lane
+
+
+def test_niche_archive_can_update_without_material_global_progress(tmp_path: Path):
+    backend = FakeBackend(tmp_path / "attempts")
+    controller = HardcoreCampaignControllerV1(
+        policy=_policy(tmp_path),
+        backend=backend,
+        started_at=NOW,
+        resource_probe=_ample_resources,
+    )
+    controller.run_once(observed_at=NOW)
+    _finish_active(controller, backend, tmp_path, score=1.0)
+    controller.run_once(observed_at=NOW + timedelta(minutes=6))
+    _finish_active(controller, backend, tmp_path, score=2.0)
+    controller.run_once(observed_at=NOW + timedelta(minutes=12))
+    _finish_active(controller, backend, tmp_path, score=1.1)
+
+    lane = controller.state.lanes[CampaignLane.FIFTEEN_MINUTES]
+    assert lane.global_champion_score == 1.0
+    outcome = read_evolution_outcome(controller.state.outcomes[-1].outcome_path)
+    assert outcome.archive_change.material_improvement is False
+    assert outcome.archive_change.niche_archive_changed is True
+    assert outcome.archive_change.updated_phenotype_hashes
 
 
 def test_transient_error_retries_once_from_checkpoint_without_new_run(
@@ -542,7 +654,7 @@ def test_prequeue_config_error_suspends_lane_and_other_lane_continues(
     assert [request.lane for request in backend.queued] == [CampaignLane.ONE_HOUR]
 
 
-def test_canary_request_preserves_reduced_three_by_one_shape(tmp_path: Path):
+def test_canary_request_preserves_reduced_four_by_one_shape(tmp_path: Path):
     repo_root = Path(__file__).resolve().parents[2]
     policy = default_hardcore_campaign_policy(
         campaign_id="canary-test",
@@ -566,7 +678,7 @@ def test_canary_request_preserves_reduced_three_by_one_shape(tmp_path: Path):
 
     assert len(request.islands) == 12
     assert {(item.population_size, item.generations) for item in request.islands} == {
-        (3, 1)
+        (4, 1)
     }
 
 
@@ -862,7 +974,8 @@ def test_systemd_template_uses_isolated_command_and_crash_restart(tmp_path: Path
     assert "hardcore-campaign start" in unit
     assert "Restart=on-failure" in unit
     assert "SuccessExitStatus=2" in unit
-    assert "KillMode=control-group" in unit
+    assert "TimeoutStopSec=infinity" in unit
+    assert "KillMode=mixed" in unit
 
 
 def test_preflight_requires_clean_pushed_commit_and_isolated_state(

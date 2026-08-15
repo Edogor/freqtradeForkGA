@@ -8,7 +8,7 @@ safety_profile:
   canary: true
 
 genetic_algorithm:
-  population_size: 3
+  population_size: 4
   generations: 1
   elite_size: 1
   tournament_size: 2
@@ -17,7 +17,7 @@ output:
   top_n: 2
 
 generic_island_model:
-  population_per_island: 3
+  population_per_island: 4
   generations: 1
   common_panel_replay:
     enabled: true
@@ -30,7 +30,7 @@ generic_island_model:
   islands:
     - &momentum1
       name: momentum-1
-      population_size: 3
+      population_size: 4
       generations: 1
       seed: 42
       indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR]
@@ -40,7 +40,7 @@ generic_island_model:
     - {<<: *momentum1, name: momentum-3, seed: 44}
     - &trend1
       name: trend-1
-      population_size: 3
+      population_size: 4
       generations: 1
       seed: 45
       indicator_pool: [EMA, SMA, TEMA, KAMA, SUPERTREND, AROON, PSAR]
@@ -50,7 +50,7 @@ generic_island_model:
     - {<<: *trend1, name: trend-3, seed: 47}
     - &volatility1
       name: volatility-volume-1
-      population_size: 3
+      population_size: 4
       generations: 1
       seed: 48
       indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP]
@@ -58,13 +58,13 @@ generic_island_model:
       walk_forward_enabled: false
     - {<<: *volatility1, name: volatility-volume-2, seed: 49}
     - {<<: *volatility1, name: volatility-volume-3, seed: 50}
-    - &mixed1
-      name: mixed-1
-      population_size: 3
+    - &bridge1
+      name: bridge-1
+      population_size: 4
       generations: 1
       seed: 51
-      indicator_pool: [RSI, MACD, EMA, SUPERTREND, BBANDS, ATR, CMF, VWAP]
+      indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR, EMA, SMA, TEMA, KAMA, SUPERTREND, AROON, PSAR, BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP]
       pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
       walk_forward_enabled: false
-    - {<<: *mixed1, name: mixed-2, seed: 52}
-    - {<<: *mixed1, name: mixed-3, seed: 53}
+    - {<<: *bridge1, name: bridge-2, seed: 52}
+    - {<<: *bridge1, name: bridge-3, seed: 53}

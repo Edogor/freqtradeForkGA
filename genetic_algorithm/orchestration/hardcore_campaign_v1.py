@@ -8,7 +8,7 @@ attempt evidence; this controller owns lane alternation, retry/suspension,
 archives, recipes and the final ``evolution_outcome.json`` decision artifact.
 
 The controller is intentionally unaware of LCB/UCB, ESS, Sharpe, Sortino and
-legacy promotion gates.  Its only quality input is ``raw-multipair-score-v3``.
+legacy promotion gates.  Its only quality input is ``raw-multipair-score-v4``.
 """
 
 from __future__ import annotations
@@ -34,12 +34,13 @@ from genetic_algorithm.config.schema import load_config
 from genetic_algorithm.evaluation.raw_multipair_score import (
     RAW_MULTIPAIR_SCORE_VERSION,
     RawMultiPairPanel,
+    RawMultiPairPolicyV4,
 )
 from genetic_algorithm.orchestration.artifact_store_v2 import canonical_config_hash
 from genetic_algorithm.orchestration.result_contract import StrictV2Model
 
 
-HARDCORE_CAMPAIGN_VERSION = "hardcore-multipair-campaign-v1"
+HARDCORE_CAMPAIGN_VERSION = "hardcore-multipair-campaign-v2"
 HARDCORE_PANEL_PAIRS = (
     "BTC/USDT",
     "SOL/USDT",
@@ -154,6 +155,12 @@ class ControllerTickOutcome(StrEnum):
 class PairRole(StrEnum):
     DEVELOPMENT = "DEVELOPMENT"
     VALIDATION = "VALIDATION"
+
+
+class ArchiveNiche(StrEnum):
+    EDGE = "EDGE"
+    ACTIVITY = "ACTIVITY"
+    BALANCED = "BALANCED"
 
 
 def _canonical_bytes(model: StrictV2Model) -> bytes:
@@ -301,7 +308,9 @@ class RawPairMetricsV1(StrictV2Model):
             )
         ):
             raise ValueError("positive-trade evidence is missing raw metrics")
-        required_components = {"R", "E", "P", "A", "H", "D", "U", "L", "O"}
+        required_components = {
+            "R", "E", "P", "A", "Q", "F", "H", "D", "U", "L", "O"
+        }
         if set(self.normalized_components) != required_components:
             raise ValueError("normalized pair components must be exactly R,E,P,A,H,D,U,L,O")
         return self
@@ -312,14 +321,19 @@ class CandidateSnapshotV1(StrictV2Model):
 
     candidate_id: str = Field(min_length=1)
     phenotype_hash: str = Field(min_length=64, max_length=64)
-    score_version: Literal["raw-multipair-score-v3"] = RAW_MULTIPAIR_SCORE_VERSION
+    score_version: Literal["raw-multipair-score-v4"] = RAW_MULTIPAIR_SCORE_VERSION
+    policy_hash: str = Field(min_length=64, max_length=64)
     score: float
+    edge_score: float = Field(ge=-1.0, le=1.0)
+    activity_score: float = Field(ge=0.0, le=1.0)
+    productive_frequency_score: float = Field(ge=-1.0, le=1.0)
     timeframe: CampaignLane
     panel_id: str = Field(min_length=1)
     evolution_seed_path: str = Field(min_length=1)
     evolution_seed_sha256: str = Field(min_length=64, max_length=64)
     gene_hash: str = Field(min_length=64, max_length=64)
     pair_metrics: list[RawPairMetricsV1] = Field(min_length=6, max_length=6)
+    interesting_profit_activity_signal: bool = False
 
     @model_validator(mode="after")
     def _complete_panel(self) -> "CandidateSnapshotV1":
@@ -332,10 +346,80 @@ class CandidateSnapshotV1(StrictV2Model):
             raise ValueError("candidate must contain exactly one metric row for all six pairs")
         if pairs != list(HARDCORE_PANEL_PAIRS):
             raise ValueError("candidate pair metrics must use canonical panel order")
-        expected_panel = RawMultiPairPanel(timeframe=self.timeframe.value).panel_id
-        if self.panel_id != expected_panel:
-            raise ValueError("candidate panel_id differs from the raw-score timeframe panel")
+        if not self.panel_id.startswith("raw_multipair_panel_v4_"):
+            raise ValueError("candidate panel_id is not a v4 raw-score panel")
+        expected_signal = candidate_profit_activity_signal(
+            self.pair_metrics,
+            timeframe=self.timeframe,
+        )
+        if self.interesting_profit_activity_signal != expected_signal:
+            raise ValueError("candidate profit/activity reporting signal differs")
         return self
+
+
+def candidate_profit_activity_signal(
+    pair_metrics: Sequence[RawPairMetricsV1], *, timeframe: CampaignLane
+) -> bool:
+    """Reporting-only signal; it never participates in search or promotion."""
+
+    target = 17.0 if timeframe is CampaignLane.FIFTEEN_MINUTES else 10.0
+    return len(pair_metrics) == 6 and all(
+        item.net_return is not None
+        and item.net_return > 0.0
+        and item.trade_count / item.calendar_months >= target
+        and item.active_months / item.calendar_months >= 0.75
+        for item in pair_metrics
+    )
+
+
+def assign_candidate_niches(
+    candidates: Sequence[CandidateSnapshotV1],
+) -> list[tuple[ArchiveNiche, CandidateSnapshotV1, float]]:
+    """Allocate unique phenotypes fairly while reserving the score champion."""
+
+    rankings = {
+        ArchiveNiche.BALANCED: sorted(
+            candidates,
+            key=lambda item: (item.score, item.edge_score),
+            reverse=True,
+        ),
+        ArchiveNiche.EDGE: sorted(
+            candidates,
+            key=lambda item: (item.edge_score, item.score),
+            reverse=True,
+        ),
+        ArchiveNiche.ACTIVITY: sorted(
+            candidates,
+            key=lambda item: (item.activity_score, item.score),
+            reverse=True,
+        ),
+    }
+    selected: list[tuple[ArchiveNiche, CandidateSnapshotV1, float]] = []
+    selected_hashes: set[str] = set()
+    for _round in range(4):
+        for niche in (
+            ArchiveNiche.BALANCED,
+            ArchiveNiche.EDGE,
+            ArchiveNiche.ACTIVITY,
+        ):
+            candidate = next(
+                (
+                    item
+                    for item in rankings[niche]
+                    if item.phenotype_hash not in selected_hashes
+                ),
+                None,
+            )
+            if candidate is None:
+                continue
+            descriptor = {
+                ArchiveNiche.BALANCED: candidate.score,
+                ArchiveNiche.EDGE: candidate.edge_score,
+                ArchiveNiche.ACTIVITY: candidate.activity_score,
+            }[niche]
+            selected.append((niche, candidate, descriptor))
+            selected_hashes.add(candidate.phenotype_hash)
+    return selected
 
 
 class DiversityEventV1(StrictV2Model):
@@ -350,9 +434,9 @@ class DiversityEventV1(StrictV2Model):
 class AttemptEvidenceV1(StrictV2Model):
     """Hash-bound worker output consumed by the campaign controller."""
 
-    schema_version: Literal["1.0"] = "1.0"
-    evidence_version: Literal["hardcore-attempt-evidence-v1"] = (
-        "hardcore-attempt-evidence-v1"
+    schema_version: Literal["2.0"] = "2.0"
+    evidence_version: Literal["hardcore-attempt-evidence-v2"] = (
+        "hardcore-attempt-evidence-v2"
     )
     campaign_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
@@ -436,16 +520,19 @@ class ArchiveChangeV1(StrictV2Model):
     previous_global_score: float | None = None
     resulting_global_score: float | None = None
     material_improvement: bool
+    niche_archive_changed: bool = False
     added_phenotype_hashes: list[str] = Field(default_factory=list)
     evicted_phenotype_hashes: list[str] = Field(default_factory=list)
+    reassigned_phenotype_hashes: list[str] = Field(default_factory=list)
+    updated_phenotype_hashes: list[str] = Field(default_factory=list)
 
 
 class EvolutionOutcomeV1(StrictV2Model):
     """Final controller-owned, SHA-256-covered result for one evolution run."""
 
-    schema_version: Literal["1.0"] = "1.0"
-    outcome_version: Literal["hardcore-evolution-outcome-v1"] = (
-        "hardcore-evolution-outcome-v1"
+    schema_version: Literal["2.0"] = "2.0"
+    outcome_version: Literal["hardcore-evolution-outcome-v2"] = (
+        "hardcore-evolution-outcome-v2"
     )
     evidence: AttemptEvidenceV1
     evidence_hash: str = Field(min_length=64, max_length=64)
@@ -461,12 +548,17 @@ class EvolutionOutcomeV1(StrictV2Model):
         if self.finalized_at < self.evidence.finished_at:
             raise ValueError("outcome finalization precedes attempt completion")
         if not self.archive_change.material_improvement:
-            if self.archive_change.added_phenotype_hashes:
-                raise ValueError("archive cannot add candidates without material progress")
             if self.archive_change.resulting_global_score != (
                 self.archive_change.previous_global_score
             ):
                 raise ValueError("non-improving outcome cannot change global score")
+        if self.archive_change.niche_archive_changed != bool(
+            self.archive_change.added_phenotype_hashes
+            or self.archive_change.evicted_phenotype_hashes
+            or self.archive_change.reassigned_phenotype_hashes
+            or self.archive_change.updated_phenotype_hashes
+        ):
+            raise ValueError("niche archive change flag differs from archive mutations")
         return self
 
 
@@ -509,6 +601,8 @@ def read_evolution_outcome(path: str | Path) -> EvolutionOutcomeV1:
 
 class ArchiveEntryV1(StrictV2Model):
     candidate: CandidateSnapshotV1
+    niche: ArchiveNiche
+    descriptor_score: float
     source_run_id: str = Field(min_length=1)
     archived_at: datetime
 
@@ -518,9 +612,87 @@ class ArchiveEntryV1(StrictV2Model):
         return self
 
 
+class BootstrapQuarantineV1(StrictV2Model):
+    """One optional historical seed rejected without suspending a lane."""
+
+    lane: CampaignLane
+    candidate_id: str
+    reason_code: str
+    detail: str | None = None
+
+
+class HardcoreBootstrapArchiveV4(StrictV2Model):
+    """Hash-covered, strictly replayed v4 starting archive."""
+
+    schema_version: Literal["2.0"] = "2.0"
+    archive_version: Literal["hardcore-bootstrap-archive-v4"] = (
+        "hardcore-bootstrap-archive-v4"
+    )
+    created_at: datetime
+    source_root: str
+    source_outcome_sha256: list[str] = Field(default_factory=list)
+    lanes: dict[CampaignLane, list[ArchiveEntryV1]]
+    quarantined: list[BootstrapQuarantineV1] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _complete_lanes(self) -> "HardcoreBootstrapArchiveV4":
+        _require_aware(self.created_at, "created_at")
+        if set(self.lanes) != set(CampaignLane):
+            raise ValueError("bootstrap archive must declare both timeframe lanes")
+        for lane, entries in self.lanes.items():
+            if len(entries) > 12:
+                raise ValueError("bootstrap lane archive exceeds twelve entries")
+            hashes = [entry.candidate.phenotype_hash for entry in entries]
+            if len(hashes) != len(set(hashes)):
+                raise ValueError("bootstrap lane contains duplicate phenotypes")
+            if any(entry.candidate.timeframe != lane for entry in entries):
+                raise ValueError("bootstrap archive crosses timeframe lanes")
+            if any(
+                sum(entry.niche is niche for entry in entries) > 4
+                for niche in ArchiveNiche
+            ):
+                raise ValueError("bootstrap archive exceeds a niche capacity")
+        return self
+
+
+def write_hardcore_bootstrap_archive(
+    path: str | Path, archive: HardcoreBootstrapArchiveV4
+) -> str:
+    """Persist a replayed bootstrap archive and return its SHA-256."""
+
+    target = Path(path).resolve()
+    payload = _canonical_bytes(archive)
+    digest = _sha256_bytes(payload)
+    _write_immutable(target, payload)
+    _write_immutable(
+        target.with_name(target.name + ".sha256"),
+        (digest + "\n").encode("ascii"),
+    )
+    return digest
+
+
+def read_hardcore_bootstrap_archive(
+    path: str | Path, *, expected_sha256: str | None = None
+) -> HardcoreBootstrapArchiveV4:
+    """Read only a complete checksum-covered bootstrap archive."""
+
+    target = Path(path).resolve()
+    checksum = target.with_name(target.name + ".sha256")
+    if not target.is_file() or not checksum.is_file():
+        raise HardcoreCampaignError("bootstrap archive or checksum is missing")
+    digest = _sha256_file(target)
+    detached = checksum.read_text(encoding="ascii").strip()
+    if digest != detached or (expected_sha256 is not None and digest != expected_sha256):
+        raise HardcoreCampaignError("bootstrap archive checksum mismatch")
+    try:
+        return HardcoreBootstrapArchiveV4.model_validate_json(target.read_bytes())
+    except ValueError as exc:
+        raise HardcoreCampaignError("bootstrap archive violates its contract") from exc
+
+
 class IslandBlueprintV1(StrictV2Model):
     name: str = Field(min_length=1)
-    family: Literal["momentum", "trend", "volatility-volume", "mixed"]
+    family: Literal["momentum", "trend", "volatility-volume", "bridge"]
     variant: int = Field(ge=1, le=3)
     seed: int = Field(ge=0, lt=2**32)
     archive_island: bool
@@ -559,9 +731,9 @@ _RECIPE_PARAMETERS: dict[SearchRecipe, RecipeParametersV1] = {
 
 
 class EvolutionRunRequestV1(StrictV2Model):
-    schema_version: Literal["1.0"] = "1.0"
-    request_version: Literal["hardcore-evolution-request-v1"] = (
-        "hardcore-evolution-request-v1"
+    schema_version: Literal["2.0"] = "2.0"
+    request_version: Literal["hardcore-evolution-request-v2"] = (
+        "hardcore-evolution-request-v2"
     )
     campaign_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
@@ -578,7 +750,7 @@ class EvolutionRunRequestV1(StrictV2Model):
     resolved_config_sha256: str = Field(min_length=64, max_length=64)
     search_seed: int = Field(ge=0, lt=2**32)
     panel_id: str = Field(min_length=1)
-    score_version: Literal["raw-multipair-score-v3"] = RAW_MULTIPAIR_SCORE_VERSION
+    score_version: Literal["raw-multipair-score-v4"] = RAW_MULTIPAIR_SCORE_VERSION
     previous_global_score: float | None = None
     islands: list[IslandBlueprintV1] = Field(min_length=12, max_length=12)
     resume_checkpoint_path: str | None = None
@@ -614,21 +786,16 @@ class EvolutionRunRequestV1(StrictV2Model):
         families = [(item.family, item.variant) for item in self.islands]
         expected = {
             (family, variant)
-            for family in ("momentum", "trend", "volatility-volume", "mixed")
+            for family in ("momentum", "trend", "volatility-volume", "bridge")
             for variant in (1, 2, 3)
         }
         if set(families) != expected:
-            raise ValueError("islands must be four specialist families x three variants")
+            raise ValueError("islands must be nine specialists plus three bridges")
         shapes = {(item.population_size, item.generations) for item in self.islands}
         if len(shapes) != 1:
             raise ValueError("all twelve islands must share one population/generation shape")
-        seeded = [
-            entry.candidate.phenotype_hash
-            for island in self.islands
-            for entry in island.seed_candidates
-        ]
-        if len(seeded) != len(set(seeded)):
-            raise ValueError("an archived phenotype can seed only one island")
+        if any(len(island.seed_candidates) > 4 for island in self.islands):
+            raise ValueError("an archive island can receive at most four seeds")
         if any(
             entry.candidate.timeframe != self.lane
             for island in self.islands
@@ -685,9 +852,9 @@ class HardcoreAttemptBackend(Protocol):
 
 
 class HardcoreCampaignPolicyV1(StrictV2Model):
-    schema_version: Literal["1.0"] = "1.0"
-    policy_version: Literal["hardcore-multipair-policy-v1"] = (
-        "hardcore-multipair-policy-v1"
+    schema_version: Literal["2.0"] = "2.0"
+    policy_version: Literal["hardcore-multipair-policy-v2"] = (
+        "hardcore-multipair-policy-v2"
     )
     campaign_id: str = Field(min_length=1)
     campaign_mode: Literal["production", "canary"] = "production"
@@ -706,6 +873,10 @@ class HardcoreCampaignPolicyV1(StrictV2Model):
     max_transient_retries: Literal[1] = 1
     poll_interval_seconds: float = Field(default=5.0, gt=0)
     kill_switch_path: str = Field(min_length=1)
+    bootstrap_archive_path: str | None = None
+    bootstrap_archive_sha256: str | None = Field(
+        default=None, min_length=64, max_length=64
+    )
 
     @model_validator(mode="after")
     def _isolated_paths(self) -> "HardcoreCampaignPolicyV1":
@@ -723,6 +894,14 @@ class HardcoreCampaignPolicyV1(StrictV2Model):
             raise ValueError("lane config paths must be absolute")
         if (self.campaign_mode == "canary") != (self.max_completed_runs == 2):
             raise ValueError("canary mode must stop after exactly two finalized runs")
+        if (self.bootstrap_archive_path is None) != (
+            self.bootstrap_archive_sha256 is None
+        ):
+            raise ValueError("bootstrap archive path and hash must be supplied together")
+        if self.bootstrap_archive_path is not None:
+            bootstrap = Path(self.bootstrap_archive_path)
+            if not bootstrap.is_absolute():
+                raise ValueError("bootstrap archive path must be absolute")
         return self
 
     @property
@@ -737,6 +916,8 @@ def default_hardcore_campaign_policy(
     config_15m: str | Path,
     config_1h: str | Path,
     canary: bool = False,
+    bootstrap_archive_path: str | Path | None = None,
+    bootstrap_archive_sha256: str | None = None,
 ) -> HardcoreCampaignPolicyV1:
     root = Path(automation_root).resolve()
     return HardcoreCampaignPolicyV1(
@@ -749,11 +930,17 @@ def default_hardcore_campaign_policy(
             CampaignLane.ONE_HOUR: str(Path(config_1h).resolve()),
         },
         kill_switch_path=str(root / "STOP_HARDCORE_CAMPAIGN"),
+        bootstrap_archive_path=(
+            str(Path(bootstrap_archive_path).resolve())
+            if bootstrap_archive_path is not None
+            else None
+        ),
+        bootstrap_archive_sha256=bootstrap_archive_sha256,
     )
 
 
 class HardcoreCampaignPreflightV1(StrictV2Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     checked_at: datetime
     ready: bool
     campaign_id: str
@@ -887,6 +1074,41 @@ def build_hardcore_campaign_preflight(
             )
         )
 
+    if policy.bootstrap_archive_path is not None:
+        try:
+            bootstrap = read_hardcore_bootstrap_archive(
+                policy.bootstrap_archive_path,
+                expected_sha256=policy.bootstrap_archive_sha256,
+            )
+            for lane, entries in bootstrap.lanes.items():
+                lane_config = load_config(policy.lane_configs[lane])
+                raw_policy = RawMultiPairPolicyV4.from_mapping(
+                    lane_config.get("raw_multipair_score", {}).get("policy")
+                )
+                expected_panel = RawMultiPairPanel(
+                    timeframe=lane.value,
+                    policy=raw_policy,
+                )
+                for entry in entries:
+                    candidate = entry.candidate
+                    if (
+                        candidate.policy_hash != raw_policy.policy_hash
+                        or candidate.panel_id != expected_panel.panel_id
+                    ):
+                        reasons.append(
+                            f"{lane.value.upper()}_BOOTSTRAP_SCORE_IDENTITY_MISMATCH"
+                        )
+                    seed = Path(candidate.evolution_seed_path)
+                    if (
+                        not seed.is_file()
+                        or _sha256_file(seed) != candidate.evolution_seed_sha256
+                    ):
+                        reasons.append(
+                            f"{lane.value.upper()}_BOOTSTRAP_SEED_MISSING_OR_CHANGED"
+                        )
+        except (OSError, ValueError, HardcoreCampaignError):
+            reasons.append("BOOTSTRAP_ARCHIVE_INVALID")
+
     git_head = None
     git_upstream = None
     git_upstream_head = None
@@ -973,7 +1195,7 @@ class LaneStateV1(StrictV2Model):
     lane: CampaignLane
     lifecycle: LaneLifecycle = LaneLifecycle.ACTIVE
     suspension_reason: str | None = None
-    recipe: SearchRecipe = SearchRecipe.BALANCED
+    recipe: SearchRecipe = SearchRecipe.RECOMBINE
     runs_started: int = Field(default=0, ge=0)
     runs_completed: int = Field(default=0, ge=0)
     global_champion_score: float | None = None
@@ -986,20 +1208,31 @@ class LaneStateV1(StrictV2Model):
             raise ValueError("suspended lane requires a reason")
         phenotypes = [item.candidate.phenotype_hash for item in self.archive]
         if len(phenotypes) != len(set(phenotypes)):
-            raise ValueError("lane archive phenotype hashes must be unique")
-        scores = [item.candidate.score for item in self.archive]
-        if scores != sorted(scores, reverse=True):
-            raise ValueError("lane archive must be score ordered")
+            raise ValueError("lane archive phenotypes must be unique")
+        if any(
+            sum(item.niche is niche for item in self.archive) > 4
+            for niche in ArchiveNiche
+        ):
+            raise ValueError("lane archive may contain at most four entries per niche")
         if any(item.candidate.timeframe != self.lane for item in self.archive):
             raise ValueError("lane archive contains a cross-timeframe candidate")
         panel_ids = {item.candidate.panel_id for item in self.archive}
         if len(panel_ids) > 1:
             raise ValueError("lane archive mixes raw-score panels")
-        if self.archive:
-            if self.global_champion_score != self.archive[0].candidate.score:
-                raise ValueError("global champion score differs from archive head")
+        champion_records = [*self.archive, *self.champion_history]
+        if champion_records:
+            if self.global_champion_score is None or not any(
+                math.isclose(
+                    self.global_champion_score,
+                    item.candidate.score,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                for item in champion_records
+            ):
+                raise ValueError("global champion is absent from archive history")
         elif self.global_champion_score is not None:
-            raise ValueError("empty archive cannot declare a global champion")
+            raise ValueError("empty archive history cannot declare a global champion")
         return self
 
 
@@ -1017,9 +1250,9 @@ class ActiveRunV1(StrictV2Model):
 
 
 class CampaignStateV1(StrictV2Model):
-    schema_version: Literal["1.0"] = "1.0"
-    state_version: Literal["hardcore-campaign-state-v1"] = (
-        "hardcore-campaign-state-v1"
+    schema_version: Literal["2.0"] = "2.0"
+    state_version: Literal["hardcore-campaign-state-v2"] = (
+        "hardcore-campaign-state-v2"
     )
     campaign_id: str
     policy_hash: str = Field(min_length=64, max_length=64)
@@ -1086,7 +1319,7 @@ class RuntimeResourcesV1(StrictV2Model):
 
 
 class CampaignStatusV1(StrictV2Model):
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     campaign_id: str
     observed_at: datetime
     lifecycle: CampaignLifecycle
@@ -1100,6 +1333,9 @@ class CampaignStatusV1(StrictV2Model):
     global_champion_pair_metrics: list[RawPairMetricsV1] = Field(default_factory=list)
     lane_champion_scores: dict[CampaignLane, float | None]
     lane_champion_pair_metrics: dict[CampaignLane, list[RawPairMetricsV1]]
+    lane_niche_leaders: dict[
+        CampaignLane, dict[ArchiveNiche, CandidateSnapshotV1]
+    ]
     plateau_checks: int | None = None
     next_timeframe: CampaignLane
     elapsed_seconds: float = Field(ge=0)
@@ -1119,17 +1355,18 @@ class LaneFinalReportV1(StrictV2Model):
     champion_label: Literal["SEARCH_CHAMPION"] | None
     champion: CandidateSnapshotV1 | None
     champion_history: list[ArchiveEntryV1]
+    niche_archive: list[ArchiveEntryV1]
     outcomes: list[OutcomeRecordV1]
 
 
 class CampaignFinalReportV1(StrictV2Model):
-    schema_version: Literal["1.0"] = "1.0"
-    report_version: Literal["hardcore-final-report-v1"] = "hardcore-final-report-v1"
+    schema_version: Literal["2.0"] = "2.0"
+    report_version: Literal["hardcore-final-report-v2"] = "hardcore-final-report-v2"
     campaign_id: str
     started_at: datetime
     finished_at: datetime
     stop_reason: str
-    score_version: Literal["raw-multipair-score-v3"] = RAW_MULTIPAIR_SCORE_VERSION
+    score_version: Literal["raw-multipair-score-v4"] = RAW_MULTIPAIR_SCORE_VERSION
     live_ready: Literal[False] = False
     lanes: dict[CampaignLane, LaneFinalReportV1]
 
@@ -1146,7 +1383,6 @@ _INDICATOR_POOLS: dict[str, list[str]] = {
         "VROC",
         "VWAP",
     ],
-    "mixed": ["RSI", "MACD", "EMA", "SUPERTREND", "BBANDS", "ATR", "CMF", "VWAP"],
 }
 
 
@@ -1159,6 +1395,10 @@ def _recipe_indicator_pool(
 ) -> list[str]:
     """Combine a stable family core with deterministic cross-family overlap."""
 
+    if family == "bridge":
+        return sorted(
+            {indicator for values in _INDICATOR_POOLS.values() for indicator in values}
+        )
     core = list(_INDICATOR_POOLS[family])
     universe = sorted(
         {
@@ -1196,16 +1436,25 @@ def build_island_blueprints(
     unique = [item.candidate.phenotype_hash for item in archive]
     if len(unique) != len(set(unique)):
         raise ValueError("archive input contains duplicate phenotypes")
+    edge = [item for item in archive if item.niche is ArchiveNiche.EDGE]
+    activity = [item for item in archive if item.niche is ArchiveNiche.ACTIVITY]
     assignments: list[list[ArchiveEntryV1]] = [[], [], []]
-    for index, entry in enumerate(archive):
-        # Match GenericIslandModelEvolution.set_archive_initial_seeds(), which
-        # deterministically distributes its flat seed list round-robin.
-        assignments[index % 3].append(entry)
+    for bridge_index in range(3):
+        if edge:
+            assignments[bridge_index].extend(
+                edge[(2 * bridge_index + offset) % len(edge)]
+                for offset in range(min(2, len(edge)))
+            )
+        if activity:
+            assignments[bridge_index].extend(
+                activity[(2 * bridge_index + offset) % len(activity)]
+                for offset in range(min(2, len(activity)))
+            )
     result: list[IslandBlueprintV1] = []
     ordinal = 0
-    for family in ("momentum", "trend", "volatility-volume", "mixed"):
+    for family in ("momentum", "trend", "volatility-volume", "bridge"):
         for variant in (1, 2, 3):
-            archive_island = ordinal < 3
+            archive_island = family == "bridge"
             result.append(
                 IslandBlueprintV1(
                     name=f"{family}-{variant}",
@@ -1222,7 +1471,9 @@ def build_island_blueprints(
                         search_seed=search_seed,
                     ),
                     pairs=list(HARDCORE_PANEL_PAIRS),
-                    seed_candidates=assignments[ordinal] if archive_island else [],
+                    seed_candidates=(
+                        assignments[variant - 1] if archive_island else []
+                    ),
                 )
             )
             ordinal += 1
@@ -1268,6 +1519,41 @@ class HardcoreCampaignControllerV1:
         else:
             now = started_at or datetime.now(UTC)
             _require_aware(now, "started_at")
+            lane_states = {
+                lane: LaneStateV1(lane=lane) for lane in CampaignLane
+            }
+            if policy.bootstrap_archive_path is not None:
+                bootstrap = read_hardcore_bootstrap_archive(
+                    policy.bootstrap_archive_path,
+                    expected_sha256=policy.bootstrap_archive_sha256,
+                )
+                for lane, entries in bootstrap.lanes.items():
+                    champion = max(
+                        entries,
+                        key=lambda entry: entry.candidate.score,
+                        default=None,
+                    )
+                    lane_states[lane] = LaneStateV1(
+                        lane=lane,
+                        recipe=SearchRecipe.RECOMBINE,
+                        archive=list(entries),
+                        global_champion_score=(
+                            champion.candidate.score if champion is not None else None
+                        ),
+                        champion_history=(
+                            [
+                                ArchiveEntryV1(
+                                    candidate=champion.candidate,
+                                    niche=ArchiveNiche.BALANCED,
+                                    descriptor_score=champion.candidate.score,
+                                    source_run_id=champion.source_run_id,
+                                    archived_at=champion.archived_at,
+                                )
+                            ]
+                            if champion is not None
+                            else []
+                        ),
+                    )
             self.state = CampaignStateV1(
                 campaign_id=policy.campaign_id,
                 policy_hash=policy.policy_hash,
@@ -1276,7 +1562,7 @@ class HardcoreCampaignControllerV1:
                 updated_at=now,
                 lifecycle=CampaignLifecycle.RUNNING,
                 next_lane=CampaignLane.FIFTEEN_MINUTES,
-                lanes={lane: LaneStateV1(lane=lane) for lane in CampaignLane},
+                lanes=lane_states,
             )
             self._persist_state()
 
@@ -1507,41 +1793,82 @@ class HardcoreCampaignControllerV1:
                 resulting_global_score=previous,
                 material_improvement=False,
             )
-        best = evidence.candidates[0]
+        best = max(evidence.candidates, key=lambda item: item.score)
         improved = material_improvement(previous, best.score)
-        if not improved:
-            return ArchiveChangeV1(
-                previous_global_score=previous,
-                resulting_global_score=previous,
-                material_improvement=False,
-            )
         old = {item.candidate.phenotype_hash: item for item in lane_state.archive}
-        merged = dict(old)
+        merged_candidates = {
+            item.candidate.phenotype_hash: item.candidate
+            for item in lane_state.archive
+        }
         for candidate in evidence.candidates:
-            current = merged.get(candidate.phenotype_hash)
-            if current is None or candidate.score > current.candidate.score:
-                merged[candidate.phenotype_hash] = ArchiveEntryV1(
+            current = merged_candidates.get(candidate.phenotype_hash)
+            if current is None or candidate.score > current.score:
+                merged_candidates[candidate.phenotype_hash] = candidate
+
+        selected: list[ArchiveEntryV1] = []
+        for niche, candidate, descriptor in assign_candidate_niches(
+            list(merged_candidates.values())
+        ):
+            previous_entry = old.get(candidate.phenotype_hash)
+            selected.append(
+                ArchiveEntryV1(
                     candidate=candidate,
-                    source_run_id=evidence.run_id,
-                    archived_at=now,
+                    niche=niche,
+                    descriptor_score=descriptor,
+                    source_run_id=(
+                        previous_entry.source_run_id
+                        if previous_entry is not None
+                        and previous_entry.candidate == candidate
+                        else evidence.run_id
+                    ),
+                    archived_at=(
+                        previous_entry.archived_at
+                        if previous_entry is not None
+                        and previous_entry.candidate == candidate
+                        else now
+                    ),
                 )
-        new_archive = sorted(
-            merged.values(), key=lambda item: item.candidate.score, reverse=True
-        )[: self.policy.archive_size]
+            )
+        new_archive = selected[: self.policy.archive_size]
         new_hashes = {item.candidate.phenotype_hash for item in new_archive}
         old_hashes = set(old)
         added = sorted(new_hashes - old_hashes)
         evicted = sorted(old_hashes - new_hashes)
-        history = [
-            *lane_state.champion_history,
-            ArchiveEntryV1(
-                candidate=best, source_run_id=evidence.run_id, archived_at=now
-            ),
-        ]
+        reassigned = sorted(
+            phenotype
+            for phenotype in old_hashes & new_hashes
+            if old[phenotype].niche
+            != next(
+                item.niche
+                for item in new_archive
+                if item.candidate.phenotype_hash == phenotype
+            )
+        )
+        updated = sorted(
+            phenotype
+            for phenotype in old_hashes & new_hashes
+            if old[phenotype].candidate
+            != next(
+                item.candidate
+                for item in new_archive
+                if item.candidate.phenotype_hash == phenotype
+            )
+        )
+        history = list(lane_state.champion_history)
+        if improved:
+            history.append(
+                ArchiveEntryV1(
+                    candidate=best,
+                    niche=ArchiveNiche.BALANCED,
+                    descriptor_score=best.score,
+                    source_run_id=evidence.run_id,
+                    archived_at=now,
+                )
+            )
         updated_lane = lane_state.model_copy(
             update={
                 "archive": new_archive,
-                "global_champion_score": new_archive[0].candidate.score,
+                "global_champion_score": best.score if improved else previous,
                 "champion_history": history,
             }
         )
@@ -1551,9 +1878,12 @@ class HardcoreCampaignControllerV1:
         return ArchiveChangeV1(
             previous_global_score=previous,
             resulting_global_score=updated_lane.global_champion_score,
-            material_improvement=True,
+            material_improvement=improved,
+            niche_archive_changed=bool(added or evicted or reassigned or updated),
             added_phenotype_hashes=added,
             evicted_phenotype_hashes=evicted,
+            reassigned_phenotype_hashes=reassigned,
+            updated_phenotype_hashes=updated,
         )
 
     def _finalize_evidence(
@@ -1943,7 +2273,7 @@ class HardcoreCampaignControllerV1:
         current_lane = active.request.lane if active else None
         status_lane = current_lane or self.state.next_lane
         lane_state = self.state.lanes[status_lane]
-        champion = lane_state.archive[0].candidate if lane_state and lane_state.archive else None
+        champion = self._lane_champion(lane_state)
         next_lane = current_lane.other if current_lane is not None else self.state.next_lane
         if self.state.lanes[next_lane].lifecycle == LaneLifecycle.SUSPENDED:
             next_lane = next_lane.other
@@ -1970,8 +2300,21 @@ class HardcoreCampaignControllerV1:
             },
             lane_champion_pair_metrics={
                 lane: (
-                    state.archive[0].candidate.pair_metrics if state.archive else []
+                    self._lane_champion(state).pair_metrics
+                    if self._lane_champion(state) is not None
+                    else []
                 )
+                for lane, state in self.state.lanes.items()
+            },
+            lane_niche_leaders={
+                lane: {
+                    niche: max(
+                        (item for item in state.archive if item.niche is niche),
+                        key=lambda item: item.descriptor_score,
+                    ).candidate
+                    for niche in ArchiveNiche
+                    if any(item.niche is niche for item in state.archive)
+                }
                 for lane, state in self.state.lanes.items()
             },
             plateau_checks=poll.plateau_checks if poll else None,
@@ -2012,7 +2355,7 @@ class HardcoreCampaignControllerV1:
         now = finished_at or self.state.updated_at
         lane_reports: dict[CampaignLane, LaneFinalReportV1] = {}
         for lane, lane_state in self.state.lanes.items():
-            champion = lane_state.archive[0].candidate if lane_state.archive else None
+            champion = self._lane_champion(lane_state)
             lane_reports[lane] = LaneFinalReportV1(
                 lane=lane,
                 runs_started=lane_state.runs_started,
@@ -2022,6 +2365,7 @@ class HardcoreCampaignControllerV1:
                 champion_label="SEARCH_CHAMPION" if champion is not None else None,
                 champion=champion,
                 champion_history=lane_state.champion_history,
+                niche_archive=lane_state.archive,
                 outcomes=[item for item in self.state.outcomes if item.lane == lane],
             )
         return CampaignFinalReportV1(
@@ -2030,6 +2374,24 @@ class HardcoreCampaignControllerV1:
             finished_at=now,
             stop_reason=self.state.stop_reason or "UNKNOWN",
             lanes=lane_reports,
+        )
+
+    @staticmethod
+    def _lane_champion(lane_state: LaneStateV1) -> CandidateSnapshotV1 | None:
+        if lane_state.global_champion_score is None:
+            return None
+        return next(
+            (
+                item.candidate
+                for item in [*lane_state.archive, *lane_state.champion_history]
+                if math.isclose(
+                    item.candidate.score,
+                    lane_state.global_champion_score,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ),
+            None,
         )
 
     def _persist_final_report(self, now: datetime) -> None:
@@ -2050,6 +2412,7 @@ def render_hardcore_systemd_user_unit(
     config_15m: str | Path,
     config_1h: str | Path,
     campaign_id: str,
+    bootstrap_archive_path: str | Path | None = None,
 ) -> str:
     """Render, but never install, the isolated crash-restart service."""
 
@@ -2067,8 +2430,7 @@ def render_hardcore_systemd_user_unit(
             raise HardcoreCampaignError("systemd argument contains control characters")
         return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
-    command = " ".join(
-        [
+    arguments = [
             quote(executable),
             "-m",
             "genetic_algorithm",
@@ -2083,7 +2445,11 @@ def render_hardcore_systemd_user_unit(
             "--automation-root",
             quote(Path(automation_root).resolve()),
         ]
-    )
+    if bootstrap_archive_path is not None:
+        arguments.extend(
+            ["--bootstrap-archive", quote(Path(bootstrap_archive_path).resolve())]
+        )
+    command = " ".join(arguments)
     return (
         "[Unit]\n"
         "Description=Hardcore six-pair GA search campaign\n"
@@ -2096,8 +2462,8 @@ def render_hardcore_systemd_user_unit(
         "SuccessExitStatus=2\n"
         "RestartPreventExitStatus=2\n"
         "RestartSec=30s\n"
-        "TimeoutStopSec=90s\n"
-        "KillMode=control-group\n"
+        "TimeoutStopSec=infinity\n"
+        "KillMode=mixed\n"
         "NoNewPrivileges=true\n\n"
         "[Install]\n"
         "WantedBy=default.target\n"

@@ -150,7 +150,7 @@ def test_six_zero_trade_pairs_are_valid_negative_fitness():
         strategy_gene=_gene(),
     )
 
-    assert score == pytest.approx(-90.0)
+    assert score == pytest.approx(-60.0)
     assert metrics["raw_multipair_status"] == "VALID"
     assert metrics["no_trades"] is True
     assert "error" not in metrics

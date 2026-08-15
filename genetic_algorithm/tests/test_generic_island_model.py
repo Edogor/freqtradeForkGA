@@ -962,7 +962,7 @@ class TestProductionEvolutionSupervision:
         config = _minimal_config(num_islands=1)
         config['raw_multipair_score'] = {
             'enabled': True,
-            'policy_version': 'raw-multipair-score-v3',
+            'policy_version': 'raw-multipair-score-v4',
             'development_pairs': ['BTC/USDT', 'SOL/USDT', 'XRP/USDT'],
             'validation_pairs': ['BNB/USDT', 'ETH/USDT', 'PEPE/USDT'],
             'period_start': '2023-05-09',
@@ -1122,7 +1122,7 @@ class TestProductionEvolutionSupervision:
         }
         candidate = _make_individual(fitness=-1.0)
         candidate.metrics.update({
-            'raw_multipair_score_version': 'raw-multipair-score-v3',
+            'raw_multipair_score_version': 'raw-multipair-score-v4',
             'raw_multipair_status': 'VALID',
             'raw_pair_metrics': {'BTC/USDT': {}},
         })
@@ -1219,7 +1219,7 @@ class TestProductionEvolutionSupervision:
                 {
                     'profit': -1.0,
                     'num_trades': 20,
-                    'raw_multipair_score_version': 'raw-multipair-score-v3',
+                    'raw_multipair_score_version': 'raw-multipair-score-v4',
                     'raw_multipair_status': 'VALID',
                     'raw_pair_metrics': {pair: {} for pair in all_pairs},
                 },
@@ -1469,6 +1469,65 @@ class TestArchiveIslandSeeding:
         ]
         assert len(assigned) == len(set(assigned)) == 4
         assert 'fresh' not in model._archive_initial_seeds
+
+    def test_bridge_reserves_two_edge_activity_cross_niche_offspring(self):
+        config = _minimal_config(num_islands=2)
+        config['generic_island_model']['islands'] = [
+            {'name': 'bridge-1', 'population_size': 4},
+            {'name': 'fresh', 'population_size': 4},
+        ]
+        config['generic_island_model']['archive_seeding'] = {
+            'enabled': True,
+            'island_names': ['bridge-1'],
+            'max_seeds_per_island': 4,
+            'assignments': {
+                'bridge-1': [
+                    {'candidate_id': 'edge', 'niche': 'EDGE'},
+                    {'candidate_id': 'activity', 'niche': 'ACTIVITY'},
+                ],
+            },
+            'cross_niche_offspring_per_generation': 2,
+        }
+        model = _create_model_from_config(config)
+        edge = _make_individual(stoploss=-0.01)
+        edge.metrics['archive_candidate_id'] = 'edge'
+        activity = _make_individual(stoploss=-0.02)
+        activity.metrics['archive_candidate_id'] = 'activity'
+        model.set_archive_initial_seeds([edge, activity])
+        population = _make_population([0.1, 0.2, 0.3, 0.4])
+        ga = MagicMock()
+        ga.config = config
+        ga.crossover_method = 'uniform'
+        ga.mutation_rate = 0.2
+        child_a = _make_individual(generation=1, individual_id=2)
+        child_b = _make_individual(generation=1, individual_id=3)
+
+        with (
+            patch(
+                'genetic_algorithm.core.generic_island_model.crossover',
+                return_value=(child_a, child_b),
+            ) as cross,
+            patch(
+                'genetic_algorithm.core.generic_island_model.mutate',
+                side_effect=lambda individual, *_args: individual,
+            ),
+        ):
+            model._inject_cross_niche_offspring(
+                ga,
+                population,
+                island_name='bridge-1',
+                generation=1,
+            )
+
+        assert cross.call_count == 1
+        assert [item.metrics['origin'] for item in population.individuals[-2:]] == [
+            'cross_niche_bridge',
+            'cross_niche_bridge',
+        ]
+        assert all(
+            item.metrics['parent_niches'] == ['EDGE', 'ACTIVITY']
+            for item in population.individuals[-2:]
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -71,6 +71,12 @@ from genetic_algorithm.engine.checkpoint_contract import (
     verify_resume_checkpoint,
 )
 from genetic_algorithm.engine.island_results import extract_island_finalists
+from genetic_algorithm.engine.operators.crossover import (
+    _enforce_min_entry_conditions,
+    _fix_invalid_operators,
+    crossover,
+)
+from genetic_algorithm.engine.operators.mutation import mutate
 from genetic_algorithm.evaluation.fitness import FitnessEvaluator
 from genetic_algorithm.evaluation.panel_contract import (
     PANEL_ROLE_COMMON_REPLAY,
@@ -296,6 +302,16 @@ class GenericIslandModelEvolution:
         self.archive_seeding_max_per_island = int(
             archive_cfg.get('max_seeds_per_island', 4)
         )
+        self.archive_seed_assignments = copy.deepcopy(
+            archive_cfg.get('assignments', {})
+        )
+        self.cross_niche_offspring_per_generation = int(
+            archive_cfg.get('cross_niche_offspring_per_generation', 0)
+        )
+        graceful_marker = gim_cfg.get('graceful_stop_marker')
+        self.graceful_stop_marker = (
+            Path(graceful_marker).resolve() if graceful_marker else None
+        )
 
         # Walk-forward config (per-island override)
         wf_cfg = gim_cfg.get('walk_forward', {})
@@ -495,6 +511,38 @@ class GenericIslandModelEvolution:
         assignments = {
             island_name: [] for island_name in self.archive_seeding_island_names
         }
+        by_candidate_id = {
+            str(seed.metrics.get('archive_candidate_id')): seed
+            for seed in unique
+            if seed.metrics.get('archive_candidate_id')
+        }
+        if self.archive_seed_assignments:
+            for island_name in self.archive_seeding_island_names:
+                for row in self.archive_seed_assignments.get(island_name, []):
+                    seed = by_candidate_id.get(str(row.get('candidate_id')))
+                    if seed is None:
+                        continue
+                    clone = copy.deepcopy(seed)
+                    clone.metrics['archive_niche'] = str(row['niche'])
+                    assignments[island_name].append(clone)
+                if len(assignments[island_name]) > self.archive_seeding_max_per_island:
+                    raise ValueError(
+                        f'archive seed assignment exceeds capacity for {island_name}'
+                    )
+                island_size = next(
+                    island.population_size
+                    for island in self.island_configs
+                    if island.name == island_name
+                )
+                if (
+                    len(assignments[island_name]) + len(self._strict_initial_seeds)
+                    > island_size
+                ):
+                    raise ValueError(
+                        f'archive seeds exceed population size for {island_name}'
+                    )
+            self._archive_initial_seeds = assignments
+            return
         capacity = (
             len(self.archive_seeding_island_names)
             * self.archive_seeding_max_per_island
@@ -671,7 +719,7 @@ class GenericIslandModelEvolution:
         raw_pair_metrics = individual.metrics.get('raw_pair_metrics')
         return (
             individual.metrics.get('raw_multipair_score_version')
-            == 'raw-multipair-score-v3'
+            == 'raw-multipair-score-v4'
             and individual.metrics.get('raw_multipair_status') == 'VALID'
             and isinstance(raw_pair_metrics, dict)
             and set(raw_pair_metrics) == expected_pairs
@@ -1425,6 +1473,40 @@ class GenericIslandModelEvolution:
             if self._shutdown_requested:
                 break
 
+            if (
+                self.graceful_stop_marker is not None
+                and self.graceful_stop_marker.is_file()
+            ):
+                try:
+                    requested = json.loads(
+                        self.graceful_stop_marker.read_text(encoding='utf-8')
+                    ).get('reason')
+                except (OSError, json.JSONDecodeError, AttributeError):
+                    requested = 'CAMPAIGN_DEADLINE'
+                self.logger.info(
+                    '[SHUTDOWN] Graceful marker observed after generation %d: %s',
+                    gen + 1,
+                    requested,
+                )
+                terminal_reason = (
+                    requested
+                    if requested
+                    in {
+                        OUTCOME_PLATEAU,
+                        OUTCOME_TECHNICAL_INVALID,
+                        OUTCOME_DIVERSITY_COLLAPSE,
+                        OUTCOME_COMPLETED_BUDGET,
+                        'CAMPAIGN_DEADLINE',
+                        'NO_GLOBAL_PROGRESS',
+                    }
+                    else 'CAMPAIGN_DEADLINE'
+                )
+                self._request_stop(
+                    terminal_reason,
+                    f'graceful stop marker observed after generation {gen + 1}',
+                )
+                self._checkpoint_requested = True
+
         # Collect results: pool top-5 from every island, deduplicate
         results = self._collect_final_results()
 
@@ -1671,6 +1753,77 @@ class GenericIslandModelEvolution:
             else:
                 next_pop = ga.create_next_generation(reproduction_population)
             self.island_populations[island_name] = next_pop
+            self._inject_cross_niche_offspring(
+                ga,
+                next_pop,
+                island_name=island_name,
+                generation=generation + 1,
+            )
+
+    def _inject_cross_niche_offspring(
+        self,
+        ga: GeneticAlgorithm,
+        population: Population,
+        *,
+        island_name: str,
+        generation: int,
+    ) -> None:
+        """Reserve a tiny bridge budget for EDGE x ACTIVITY recombination."""
+
+        count = self.cross_niche_offspring_per_generation
+        if count <= 0 or island_name not in self.archive_seeding_island_names:
+            return
+        seeds = self._archive_initial_seeds.get(island_name, [])
+        edge = [item for item in seeds if item.metrics.get('archive_niche') == 'EDGE']
+        activity = [
+            item for item in seeds if item.metrics.get('archive_niche') == 'ACTIVITY'
+        ]
+        if not edge or not activity:
+            return
+        replacements: list[Individual] = []
+        attempts = 0
+        while len(replacements) < min(count, population.size):
+            attempts += 1
+            if attempts > max(4, count * 4):
+                self.logger.warning(
+                    '[BRIDGE] Could not create the requested cross-niche offspring for %s',
+                    island_name,
+                )
+                break
+            parent_edge = random.choice(edge)
+            parent_activity = random.choice(activity)
+            try:
+                child1, child2 = crossover(
+                    parent_edge,
+                    parent_activity,
+                    generation=generation,
+                    ind_id=max(0, population.size - count + len(replacements)),
+                    config=ga.config,
+                    method=ga.crossover_method,
+                )
+            except (TypeError, ValueError) as exc:
+                self.logger.warning(
+                    '[BRIDGE] Quarantined incompatible EDGE/ACTIVITY mating on %s: %s',
+                    island_name,
+                    exc,
+                )
+                continue
+            for child in (child1, child2):
+                if len(replacements) >= count:
+                    break
+                child = mutate(child, ga.mutation_rate, ga.config)
+                _fix_invalid_operators(child.strategy_gene)
+                _enforce_min_entry_conditions(child.strategy_gene, ga.config)
+                child.evaluated = False
+                child.fitness = None
+                child.raw_fitness = None
+                child.metrics = {
+                    'origin': 'cross_niche_bridge',
+                    'parent_niches': ['EDGE', 'ACTIVITY'],
+                }
+                replacements.append(child)
+        if replacements:
+            population.individuals[-len(replacements):] = replacements
 
     @staticmethod
     def _fresh_generation_without_self_crossover(
@@ -2736,31 +2889,116 @@ class GenericIslandModelEvolution:
             island_config.name: [] for island_config in self.island_configs
         }
 
-        # The production contract replays the top two per island.  Reusing the
-        # same bound for final collection avoids an unbounded serial tail.
-        global_pool: List[Individual] = []
+        # Search metrics already contain the full six-pair panel. Preselect a
+        # compact union of balanced, edge and activity leaders, then replay
+        # that union once on the common panel.
+        all_evaluated: List[Individual] = []
         for ic in self.island_configs:
             evaluated = self._evaluated_generation_populations.get(ic.name)
             if evaluated is None:
                 pop = self.island_populations.get(ic.name)
                 evaluated = list(pop.individuals) if pop else []
             if evaluated:
-                local_top = sorted(
-                    [ind for ind in evaluated if self._is_valid_evidence(ind)],
-                    key=lambda x: x.raw_fitness,
-                    reverse=True,
-                )[:self.common_panel_top_n]
-                for individual in local_top:
+                valid = [ind for ind in evaluated if self._is_valid_evidence(ind)]
+                for individual in valid:
                     individual.metrics['evaluation_island'] = ic.name
-                results[ic.name] = local_top
-                global_pool.extend(local_top)
+                all_evaluated.extend(valid)
 
-        unique_global = self._replay_global_candidates(global_pool)
-        results['__global__'] = unique_global[:20]
+        def descriptor(individual: Individual, name: str) -> float:
+            result = individual.metrics.get('raw_multipair_result', {})
+            aggregate = result.get('aggregate_components', {})
+            value = aggregate.get(name)
+            return float(value) if isinstance(value, (int, float)) else -math.inf
+
+        def take(
+            values: List[Individual],
+            *,
+            key,
+            limit: int,
+        ) -> List[Individual]:
+            selected: List[Individual] = []
+            seen: set[str] = set()
+            for individual in sorted(values, key=key, reverse=True):
+                fingerprint = self._gene_hash(individual)
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                selected.append(individual)
+                if len(selected) >= limit:
+                    break
+            return selected
+
+        preselected = [
+            *take(all_evaluated, key=lambda item: float(item.raw_fitness), limit=12),
+            *take(
+                all_evaluated,
+                key=lambda item: (
+                    descriptor(item, 'edge_score'),
+                    float(item.raw_fitness),
+                ),
+                limit=12,
+            ),
+            *take(
+                all_evaluated,
+                key=lambda item: (
+                    descriptor(item, 'activity_score'),
+                    float(item.raw_fitness),
+                ),
+                limit=12,
+            ),
+        ]
+        global_pool = take(
+            preselected,
+            key=lambda item: 0.0,
+            limit=36,
+        )
+        for individual in global_pool:
+            island_name = str(individual.metrics['evaluation_island'])
+            results[island_name].append(individual)
+
+        replayed = self._replay_global_candidates(global_pool)
+        niche_finalists: List[Individual] = []
+        selected_hashes: set[str] = set()
+        niche_specs = (
+            ('BALANCED', lambda item: (float(item.raw_fitness), descriptor(item, 'edge_score'))),
+            ('EDGE', lambda item: (descriptor(item, 'edge_score'), float(item.raw_fitness))),
+            (
+                'ACTIVITY',
+                lambda item: (
+                    descriptor(item, 'activity_score'),
+                    float(item.raw_fitness),
+                ),
+            ),
+        )
+        rankings = {
+            niche: sorted(replayed, key=key, reverse=True)
+            for niche, key in niche_specs
+        }
+        for _round in range(4):
+            for niche, _key in niche_specs:
+                individual = next(
+                    (
+                        item
+                        for item in rankings[niche]
+                        if self._gene_hash(item) not in selected_hashes
+                    ),
+                    None,
+                )
+                if individual is None:
+                    continue
+                fingerprint = self._gene_hash(individual)
+                individual.metrics['archive_niche_candidate'] = niche
+                niche_finalists.append(individual)
+                selected_hashes.add(fingerprint)
+        results['__global__'] = sorted(
+            niche_finalists,
+            key=lambda item: float(item.raw_fitness),
+            reverse=True,
+        )[:12]
 
         self.logger.info(
-            "Final results: %d unique strategies across %d islands (top-20 global)",
-            len(unique_global), len(self.island_configs),
+            "Final results: %d niche finalists across %d islands",
+            len(results['__global__']), len(self.island_configs),
         )
 
         return results

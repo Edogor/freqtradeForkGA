@@ -209,7 +209,7 @@ class EvolutionWorkerSpecV2(StrictV2Model):
     final_test_ledger_path: str = Field(min_length=1)
     output_layout: AttemptOutputLayoutV2
     # RunEngine currently returns at most ten standard-GA finalists.
-    top_n: int = Field(default=5, ge=1, le=10)
+    top_n: int = Field(default=5, ge=1, le=12)
     seeds: list[EvolutionWorkerSeedInputV2] = Field(default_factory=list)
     resume_checkpoint: EvolutionWorkerCheckpointInputV2 | None = None
     replay_input_seeds: bool = False
@@ -834,6 +834,14 @@ def derive_engine_config(
         "genome_schema_version": "strategy-gene-v2",
         "island_names": island_names,
     }
+    if (
+        generic_island
+        and config.get("safety_profile", {}).get("name")
+        == "hardcore_multipair_v1"
+    ):
+        config["generic_island_model"]["graceful_stop_marker"] = str(
+            Path(loaded.spec.output_layout.runtime_dir) / "graceful_stop.json"
+        )
     loaded.spec.output_layout.assert_engine_config(config)
     return config
 
@@ -983,9 +991,43 @@ def run_evolution_worker(
             or _attempt_backtester_factory(loaded.spec.output_layout),
             clock=clock,
         )
-        strict_seeds = [
-            validate_evolution_seed(seed, loaded.resolved_config) for seed in loaded.seeds
-        ]
+        strict_seeds: list[Individual] = []
+        quarantined_seeds: list[dict[str, str]] = []
+        hardcore = (
+            loaded.resolved_config.get("safety_profile", {}).get("name")
+            == "hardcore_multipair_v1"
+        )
+        for seed in loaded.seeds:
+            try:
+                individual = validate_evolution_seed(seed, loaded.resolved_config)
+            except EvolutionWorkerError as exc:
+                if not hardcore:
+                    raise
+                quarantined_seeds.append(
+                    {"candidate_id": seed.candidate_id, "reason": str(exc)}
+                )
+                continue
+            individual.metrics["archive_candidate_id"] = seed.candidate_id
+            strict_seeds.append(individual)
+        if hardcore:
+            quarantine_path = Path(loaded.spec.output_layout.runtime_dir) / "seed_quarantine.json"
+            quarantine_path.parent.mkdir(parents=True, exist_ok=True)
+            quarantine_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "2.0",
+                        "quarantine_version": "hardcore-seed-quarantine-v2",
+                        "quarantined": quarantined_seeds,
+                        "accepted_candidate_ids": [
+                            item.metrics["archive_candidate_id"] for item in strict_seeds
+                        ],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
         engine_config = derive_engine_config(loaded)
         store = V2ArtifactStore(loaded.spec.artifact_root)
         config_path = store.write_engine_config(engine_config)

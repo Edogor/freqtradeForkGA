@@ -154,6 +154,10 @@ def main(argv: list[str] | None = None) -> int:
         command.add_argument("--config-1h")
         command.add_argument("--automation-root")
         command.add_argument("--state-db")
+        command.add_argument(
+            "--bootstrap-archive",
+            help="Hash-covered v4 archive created by strict historical replay",
+        )
         if command_name == "start":
             command.add_argument("--once", action="store_true")
         if command_name == "preflight":
@@ -173,7 +177,16 @@ def main(argv: list[str] | None = None) -> int:
     h_unit.add_argument("--config-15m", default="hardcore_multipair_15m_v1")
     h_unit.add_argument("--config-1h", default="hardcore_multipair_1h_v1")
     h_unit.add_argument("--automation-root", required=True)
+    h_unit.add_argument("--bootstrap-archive")
     h_unit.add_argument("--output", required=True)
+    h_bootstrap = h_sub.add_parser(
+        "bootstrap-v3",
+        help="Strictly replay historical v3 seeds into a v4 niche archive",
+    )
+    h_bootstrap.add_argument("--source-root", required=True)
+    h_bootstrap.add_argument("--output", required=True)
+    h_bootstrap.add_argument("--config-15m", default="hardcore_multipair_15m_v1")
+    h_bootstrap.add_argument("--config-1h", default="hardcore_multipair_1h_v1")
 
     # --- experiment ---
     p_exp = sub.add_parser("experiment", help="Experiment management")
@@ -653,6 +666,20 @@ def _cmd_hardcore_campaign(args) -> int:
         return preset.resolve()
 
     command = args.hardcore_cmd
+    if command == "bootstrap-v3":
+        from genetic_algorithm.orchestration.hardcore_bootstrap_v4 import (
+            build_strict_v4_bootstrap_archive,
+        )
+
+        archive = build_strict_v4_bootstrap_archive(
+            source_root=args.source_root,
+            output_path=args.output,
+            repo_root=repo_root,
+            config_15m=resolve_config(args.config_15m),
+            config_1h=resolve_config(args.config_1h),
+        )
+        print(archive.model_dump_json(indent=2))
+        return 0
     if command == "status":
         root = Path(args.automation_root).resolve()
         path = root / "campaign_status.json"
@@ -679,10 +706,16 @@ def _cmd_hardcore_campaign(args) -> int:
         print(f"Generation-boundary stop requested: {marker}")
         return 0
 
-    if command not in {"start", "preflight", "canary", "service-unit"}:
+    if command not in {
+        "start",
+        "preflight",
+        "canary",
+        "service-unit",
+        "bootstrap-v3",
+    }:
         print(
             "Usage: python -m genetic_algorithm hardcore-campaign "
-            "{preflight|canary|service-unit|start|status|stop}"
+            "{bootstrap-v3|preflight|canary|service-unit|start|status|stop}"
         )
         return 1
 
@@ -722,6 +755,7 @@ def _cmd_hardcore_campaign(args) -> int:
                 config_15m=config_15m,
                 config_1h=config_1h,
                 campaign_id=args.campaign_id,
+                bootstrap_archive_path=args.bootstrap_archive,
             ),
             encoding="utf-8",
         )
@@ -733,12 +767,25 @@ def _cmd_hardcore_campaign(args) -> int:
         if args.state_db
         else automation_root / "hardcore_state.sqlite3"
     )
+    bootstrap_path = (
+        Path(args.bootstrap_archive).resolve()
+        if getattr(args, "bootstrap_archive", None)
+        else None
+    )
+    bootstrap_hash = None
+    if bootstrap_path is not None:
+        checksum = bootstrap_path.with_name(bootstrap_path.name + ".sha256")
+        if not checksum.is_file():
+            raise RuntimeError("bootstrap archive checksum is missing")
+        bootstrap_hash = checksum.read_text(encoding="ascii").strip()
     policy = default_hardcore_campaign_policy(
         campaign_id=args.campaign_id,
         automation_root=automation_root,
         config_15m=config_15m,
         config_1h=config_1h,
         canary=is_canary,
+        bootstrap_archive_path=bootstrap_path,
+        bootstrap_archive_sha256=bootstrap_hash,
     )
     if command == "preflight":
         report = build_hardcore_campaign_preflight(

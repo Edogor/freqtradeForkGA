@@ -95,6 +95,8 @@ def test_live_pair_metrics_are_read_from_checkpoint(tmp_path):
         "expectancy_score": 0.5,
         "profit_factor_score": 0.5,
         "activity_score": 0.5,
+        "edge_score": 0.5,
+        "productive_frequency_score": 0.25,
         "holding_score": 1.0,
         "drawdown_risk": 0.2,
         "drawdown_duration_risk": 0.2,
@@ -191,7 +193,7 @@ def test_backend_materializes_canary_shape_and_recipe_specific_pools():
     balanced = _materialized_config(_request(repo_root, recipe=SearchRecipe.BALANCED))
     explore = _materialized_config(_request(repo_root, recipe=SearchRecipe.EXPLORE))
 
-    assert balanced["genetic_algorithm"]["population_size"] == 3
+    assert balanced["genetic_algorithm"]["population_size"] == 4
     assert balanced["generic_island_model"]["generations"] == 1
     assert {
         (item["population_size"], item["generations"])

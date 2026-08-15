@@ -45,11 +45,43 @@ strategy_constraints:
 
 raw_multipair_score:
   enabled: true
-  policy_version: raw-multipair-score-v3
+  policy_version: raw-multipair-score-v4
   development_pairs: [BTC/USDT, SOL/USDT, XRP/USDT]
   validation_pairs: [BNB/USDT, ETH/USDT, PEPE/USDT]
   period_start: "2023-05-09"
   period_end: "2026-03-26"
+  # Continuous search policy. These are soft normalizations, never gates.
+  policy:
+    annual_return_scale: 0.20
+    expectancy_scale: 0.005
+    profit_factor_cap: 3.0
+    profit_factor_scale: 0.5
+    profit_factor_full_credit_trades: 30
+    activity_target_trades_per_month_15m: 17.0
+    activity_target_trades_per_month_1h: 10.0
+    activity_target_active_month_ratio: 0.75
+    holding_median_target_hours_15m: 8.0
+    holding_median_target_hours_1h: 12.0
+    holding_p90_target_hours_15m: 24.0
+    holding_p90_target_hours_1h: 36.0
+    max_drawdown_scale: 0.20
+    loss_streak_scale: 10.0
+    overtrading_free_trades_per_month: 60.0
+    overtrading_scale_trades_per_month: 60.0
+    development_group_weight: 0.40
+    validation_group_weight: 0.60
+    worst_pair_weight: 0.60
+    group_median_weight: 0.40
+    edge_return_weight: 0.50
+    edge_expectancy_weight: 0.30
+    edge_profit_factor_weight: 0.20
+    score_edge_weight: 0.60
+    score_productive_frequency_weight: 0.30
+    score_holding_weight: 0.02
+    score_drawdown_weight: -0.040
+    score_drawdown_duration_weight: -0.020
+    score_loss_streak_weight: -0.015
+    score_overtrading_weight: -0.005
 
 pair_validation:
   enabled: true
@@ -146,8 +178,10 @@ generic_island_model:
     recovery_mutation_rate: 0.35
   archive_seeding:
     enabled: true
-    island_names: [momentum-1, momentum-2, momentum-3]
+    island_names: [bridge-1, bridge-2, bridge-3]
     max_seeds_per_island: 4
+    assignments: {}
+    cross_niche_offspring_per_generation: 2
   walk_forward:
     enabled: false
   external_migration:
@@ -196,19 +230,19 @@ generic_island_model:
     - <<: *volatility1
       name: volatility-volume-3
       seed: 50
-    - &mixed1
-      name: mixed-1
+    - &bridge1
+      name: bridge-1
       population_size: 12
       generations: 30
       seed: 51
-      indicator_pool: [RSI, MACD, EMA, SUPERTREND, BBANDS, ATR, CMF, VWAP]
+      indicator_pool: [AROON, ATR, BBANDS, CCI, CMF, DONCHIAN, EMA, KAMA, MACD, MFI, OBV, PSAR, ROC, RSI, SMA, STOCH, SUPERTREND, TEMA, VROC, VWAP, WILLR]
       pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
       walk_forward_enabled: false
-    - <<: *mixed1
-      name: mixed-2
+    - <<: *bridge1
+      name: bridge-2
       seed: 52
-    - <<: *mixed1
-      name: mixed-3
+    - <<: *bridge1
+      name: bridge-3
       seed: 53
 
 # Legacy weights are schema-complete only.  With raw_multipair_score enabled,
@@ -281,4 +315,4 @@ fitness_policy_v3: {enabled: false}
 terminal_monitor: {enabled: false}
 
 output:
-  top_n: 10
+  top_n: 12

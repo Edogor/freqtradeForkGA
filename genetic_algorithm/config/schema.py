@@ -398,11 +398,43 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
     # statistic, gate state or deferred validation may influence selection.
     "raw_multipair_score": {
         "enabled": False,
-        "policy_version": "raw-multipair-score-v3",
+        "policy_version": "raw-multipair-score-v4",
         "development_pairs": ["BTC/USDT", "SOL/USDT", "XRP/USDT"],
         "validation_pairs": ["BNB/USDT", "ETH/USDT", "PEPE/USDT"],
         "period_start": "2023-05-09",
         "period_end": "2026-03-26",
+        "policy": {
+            "annual_return_scale": 0.20,
+            "expectancy_scale": 0.005,
+            "profit_factor_cap": 3.0,
+            "profit_factor_scale": 0.5,
+            "profit_factor_full_credit_trades": 30,
+            "activity_target_trades_per_month_15m": 17.0,
+            "activity_target_trades_per_month_1h": 10.0,
+            "activity_target_active_month_ratio": 0.75,
+            "holding_median_target_hours_15m": 8.0,
+            "holding_median_target_hours_1h": 12.0,
+            "holding_p90_target_hours_15m": 24.0,
+            "holding_p90_target_hours_1h": 36.0,
+            "max_drawdown_scale": 0.20,
+            "loss_streak_scale": 10.0,
+            "overtrading_free_trades_per_month": 60.0,
+            "overtrading_scale_trades_per_month": 60.0,
+            "development_group_weight": 0.40,
+            "validation_group_weight": 0.60,
+            "worst_pair_weight": 0.60,
+            "group_median_weight": 0.40,
+            "edge_return_weight": 0.50,
+            "edge_expectancy_weight": 0.30,
+            "edge_profit_factor_weight": 0.20,
+            "score_edge_weight": 0.60,
+            "score_productive_frequency_weight": 0.30,
+            "score_holding_weight": 0.02,
+            "score_drawdown_weight": -0.040,
+            "score_drawdown_duration_weight": -0.020,
+            "score_loss_streak_weight": -0.015,
+            "score_overtrading_weight": -0.005,
+        },
     },
     "safety_profile": {
         "name": "safe_v2",
@@ -437,6 +469,7 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
     },
     "generic_island_model": {
         "parallel_islands": False,
+        "graceful_stop_marker": "",
         "common_panel_replay": {
             "enabled": False,
             "interval": 3,
@@ -461,6 +494,8 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
             "enabled": False,
             "island_names": ["island-1"],
             "max_seeds_per_island": 4,
+            "assignments": {},
+            "cross_niche_offspring_per_generation": 0,
         },
         "specialization": {
             "rotate_seeds": True,
@@ -798,6 +833,10 @@ def _join_path(prefix: str, key: object) -> str:
 
 def _unknown_paths(value: Any, shape: Any, prefix: str = "") -> List[str]:
     if isinstance(value, dict):
+        if prefix == "generic_island_model.archive_seeding.assignments":
+            # Island names are materialized dynamically from the immutable run
+            # request. Row structure is validated by validate_config().
+            return []
         if not isinstance(shape, dict):
             return []
         unknown: List[str] = []
@@ -1053,9 +1092,9 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
     raw_score = _nested_config(config, ("raw_multipair_score",))
     if raw_score.get("enabled", False):
-        if raw_score.get("policy_version") != "raw-multipair-score-v3":
+        if raw_score.get("policy_version") != "raw-multipair-score-v4":
             errors.append(
-                "raw_multipair_score.policy_version must be raw-multipair-score-v3"
+                "raw_multipair_score.policy_version must be raw-multipair-score-v4"
             )
         development_pairs = raw_score.get("development_pairs", [])
         validation_pairs = raw_score.get("validation_pairs", [])
@@ -1106,6 +1145,14 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
                 )
         except ValueError:
             pass
+        try:
+            from genetic_algorithm.evaluation.raw_multipair_score import (
+                RawMultiPairPolicyV4,
+            )
+
+            RawMultiPairPolicyV4.from_mapping(raw_score.get("policy"))
+        except (TypeError, ValueError) as exc:
+            errors.append(f"invalid raw_multipair_score.policy: {exc}")
 
     qualification_v3 = _nested_config(config, ("qualification_v3",))
     if qualification_v3.get("enabled", False):
@@ -1235,6 +1282,35 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             errors.append(
                 "generic_island_model.archive_seeding.max_seeds_per_island "
                 "must be a positive integer"
+            )
+        assignments = archive_seeding.get("assignments", {})
+        if not isinstance(assignments, dict) or any(
+            name not in island_names or not isinstance(rows, list)
+            for name, rows in (
+                assignments.items() if isinstance(assignments, dict) else []
+            )
+        ):
+            errors.append(
+                "generic_island_model.archive_seeding.assignments must map "
+                "configured archive islands to seed lists"
+            )
+        elif any(
+            not isinstance(row, dict)
+            or set(row) != {"candidate_id", "niche"}
+            or not isinstance(row.get("candidate_id"), str)
+            or row.get("niche") not in {"EDGE", "ACTIVITY", "BALANCED"}
+            for rows in assignments.values()
+            for row in rows
+        ):
+            errors.append(
+                "archive seed assignments require candidate_id and a valid niche"
+            )
+        bridge_count = archive_seeding.get(
+            "cross_niche_offspring_per_generation", 0
+        )
+        if type(bridge_count) is not int or not 0 <= bridge_count <= 4:
+            errors.append(
+                "archive_seeding.cross_niche_offspring_per_generation must be 0..4"
             )
 
     # --- NSGA-II contract ---
@@ -1613,8 +1689,8 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         raw_score = _nested_config(config, ("raw_multipair_score",))
         if not raw_score.get("enabled", False):
             errors.append(f"{label} requires raw_multipair_score.enabled: true")
-        if raw_score.get("policy_version") != "raw-multipair-score-v3":
-            errors.append(f"{label} requires raw-multipair-score-v3")
+        if raw_score.get("policy_version") != "raw-multipair-score-v4":
+            errors.append(f"{label} requires raw-multipair-score-v4")
         if raw_score.get("development_pairs") != expected_dev:
             errors.append(f"{label} requires the fixed development pair group")
         if raw_score.get("validation_pairs") != expected_val:
@@ -1783,7 +1859,7 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             errors.append(f"{label} requires allow_self_crossover: false")
         if not ga.get("fitness_sharing", False):
             errors.append(f"{label} requires fitness sharing")
-        expected_immigrants = 1 if safety.get("canary", False) else 2
+        expected_immigrants = 2
         if ga.get("random_immigrants") != expected_immigrants:
             errors.append(
                 f"{label} requires exactly {expected_immigrants} random immigrants"
@@ -1811,13 +1887,13 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         raw_score = _nested_config(config, ("raw_multipair_score",))
         if (
             not raw_score.get("enabled", False)
-            or raw_score.get("policy_version") != "raw-multipair-score-v3"
+            or raw_score.get("policy_version") != "raw-multipair-score-v4"
             or raw_score.get("development_pairs") != expected_dev
             or raw_score.get("validation_pairs") != expected_val
             or raw_score.get("period_start") != "2023-05-09"
             or raw_score.get("period_end") != "2026-03-26"
         ):
-            errors.append(f"{label} requires the immutable raw-multipair-score-v3 panel")
+            errors.append(f"{label} requires the immutable raw-multipair-score-v4 panel")
 
         timeframe = bt.get("timeframe")
         expected_timerange = {

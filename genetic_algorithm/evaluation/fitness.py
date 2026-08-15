@@ -28,6 +28,7 @@ from genetic_algorithm.evaluation.fitness_policy_v3 import (
 from genetic_algorithm.evaluation.raw_multipair_score import (
     PairScenario,
     RawMultiPairPanel,
+    RawMultiPairPolicyV4,
     score_raw_multipair,
 )
 from genetic_algorithm.evaluation.period_provenance import (
@@ -123,7 +124,7 @@ class FitnessEvaluator:
         if self.raw_multipair_score_enabled:
             if self.walk_forward_config.get('enabled', False):
                 raise ValueError(
-                    'raw-multipair-score-v3 forbids walk-forward evaluation'
+                    'raw-multipair-score-v4 forbids walk-forward evaluation'
                 )
             if (
                 not self.pair_validation_enabled
@@ -132,7 +133,7 @@ class FitnessEvaluator:
                 or self.validate_top_n_only != 0
             ):
                 raise ValueError(
-                    'raw-multipair-score-v3 requires immediate independent '
+                    'raw-multipair-score-v4 requires immediate independent '
                     'evaluation of every pair'
                 )
             self.raw_multipair_panel = RawMultiPairPanel(
@@ -152,6 +153,9 @@ class FitnessEvaluator:
                 fee_rate=float(config.get('backtesting', {}).get('fee', 0.0)),
                 slippage_rate=float(
                     config.get('backtesting', {}).get('slippage_pct', 0.0)
+                ),
+                policy=RawMultiPairPolicyV4.from_mapping(
+                    self.raw_multipair_score_config.get('policy')
                 ),
             )
         
@@ -2049,7 +2053,7 @@ class FitnessEvaluator:
         # Raw multipair search and strict replay must consume the identical
         # daily-equity drawdown definition.  Legacy fitness keeps its historic
         # trade-level field; missing daily evidence in raw mode remains None
-        # and therefore fails closed in raw-multipair-score-v3.
+        # and therefore fails closed in raw-multipair-score-v4.
         max_drawdown = (
             result.daily_max_drawdown
             if getattr(self, 'raw_multipair_score_enabled', False)

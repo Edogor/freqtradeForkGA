@@ -489,10 +489,10 @@ def _validate_evolution_config(experiment: PlannedExperimentV2) -> list[str]:
     if (
         not isinstance(top_n, int)
         or isinstance(top_n, bool)
-        or not 1 <= top_n <= 10
+        or not 1 <= top_n <= 12
     ):
         raise WaveMaterializationError(
-            "evolution materialization requires output.top_n between 1 and 10"
+            "evolution materialization requires output.top_n between 1 and 12"
         )
     if experiment.resolved_config.get("genetic_algorithm", {}).get("mode") != "single_objective":
         raise WaveMaterializationError("canonical evolution currently supports single_objective")

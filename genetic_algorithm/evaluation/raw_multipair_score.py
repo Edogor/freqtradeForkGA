@@ -1,6 +1,6 @@
 """Production scoring contract for the hardcore six-pair search.
 
-``raw-multipair-score-v3`` deliberately consumes point estimates from six
+``raw-multipair-score-v4`` deliberately consumes point estimates from six
 independent pair backtests.  It does not consume confidence bounds, effective
 sample sizes, Sharpe/Sortino ratios, gate results, or any temporal validation
 output.  Cross-pair validation is the only generalisation signal in this
@@ -24,7 +24,7 @@ from statistics import median
 from typing import Any
 
 
-RAW_MULTIPAIR_SCORE_VERSION = "raw-multipair-score-v3"
+RAW_MULTIPAIR_SCORE_VERSION = "raw-multipair-score-v4"
 
 HARDCORE_DEVELOPMENT_PAIRS = (
     "BTC/USDT",
@@ -42,45 +42,166 @@ HARDCORE_PERIOD_END = date(2026, 3, 26)
 HARDCORE_FEE_RATE = 0.001
 HARDCORE_SLIPPAGE_RATE = 0.0005
 
-DEVELOPMENT_GROUP_WEIGHT = 0.4
-VALIDATION_GROUP_WEIGHT = 0.6
-WORST_PAIR_WEIGHT = 0.6
-GROUP_MEDIAN_WEIGHT = 0.4
+@dataclass(frozen=True)
+class RawMultiPairPolicyV4:
+    """Hashable continuous policy; no field is a qualification gate."""
 
-# Profit is measured as simple net-return velocity over the immutable panel.
-# The former v2 scale used ten percent *total* return, which was almost fully
-# saturated by a strategy earning only a few percent per year.  Three percent
-# per week is an intentionally ambitious soft reference, not a qualification
-# gate: tanh remains continuous above and below it.
-TARGET_WEEKLY_NET_RETURN = 0.03
-EXPECTANCY_SCALE = 0.005
-PROFIT_FACTOR_CAP = 3.0
-PROFIT_FACTOR_SCALE = 0.5
-PROFIT_FACTOR_FULL_CREDIT_TRADES = 30
-# Roughly one thousand trades per pair over this 35-month panel is the desired
-# high-frequency daytrading region.  It is deliberately a soft saturation
-# point: candidates below it remain valid and receive a smooth gradient.
-ACTIVITY_TARGET_TRADES_PER_PAIR = 1000.0
-ACTIVITY_TARGET_ACTIVE_MONTH_RATIO = 0.90
-HOLDING_MEDIAN_TARGET_HOURS: Mapping[str, float] = {
-    "15m": 8.0,
-    "1h": 12.0,
-}
-HOLDING_P90_TARGET_HOURS: Mapping[str, float] = {
-    "15m": 24.0,
-    "1h": 36.0,
-}
-MAX_DRAWDOWN_SCALE = 0.20
-DRAWDOWN_DURATION_SCALE_DAYS = 120.0
-LOSS_STREAK_SCALE = 10.0
-OVERTRADING_FREE_TRADES_PER_MONTH = 60.0
-OVERTRADING_SCALE_TRADES_PER_MONTH = 60.0
+    annual_return_scale: float = 0.20
+    expectancy_scale: float = 0.005
+    profit_factor_cap: float = 3.0
+    profit_factor_scale: float = 0.5
+    profit_factor_full_credit_trades: int = 30
+    activity_target_trades_per_month_15m: float = 17.0
+    activity_target_trades_per_month_1h: float = 10.0
+    activity_target_active_month_ratio: float = 0.75
+    holding_median_target_hours_15m: float = 8.0
+    holding_median_target_hours_1h: float = 12.0
+    holding_p90_target_hours_15m: float = 24.0
+    holding_p90_target_hours_1h: float = 36.0
+    max_drawdown_scale: float = 0.20
+    loss_streak_scale: float = 10.0
+    overtrading_free_trades_per_month: float = 60.0
+    overtrading_scale_trades_per_month: float = 60.0
+    development_group_weight: float = 0.40
+    validation_group_weight: float = 0.60
+    worst_pair_weight: float = 0.60
+    group_median_weight: float = 0.40
+    edge_return_weight: float = 0.50
+    edge_expectancy_weight: float = 0.30
+    edge_profit_factor_weight: float = 0.20
+    score_edge_weight: float = 0.60
+    score_productive_frequency_weight: float = 0.30
+    score_holding_weight: float = 0.02
+    score_drawdown_weight: float = -0.040
+    score_drawdown_duration_weight: float = -0.020
+    score_loss_streak_weight: float = -0.015
+    score_overtrading_weight: float = -0.005
+
+    def __post_init__(self) -> None:
+        values = self.to_dict()
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in values.values()
+        ):
+            raise ValueError("raw multipair policy values must be finite numbers")
+        positive = (
+            "annual_return_scale",
+            "expectancy_scale",
+            "profit_factor_cap",
+            "profit_factor_scale",
+            "profit_factor_full_credit_trades",
+            "activity_target_trades_per_month_15m",
+            "activity_target_trades_per_month_1h",
+            "activity_target_active_month_ratio",
+            "holding_median_target_hours_15m",
+            "holding_median_target_hours_1h",
+            "holding_p90_target_hours_15m",
+            "holding_p90_target_hours_1h",
+            "max_drawdown_scale",
+            "loss_streak_scale",
+            "overtrading_scale_trades_per_month",
+        )
+        if any(float(values[name]) <= 0.0 for name in positive):
+            raise ValueError("raw multipair policy scales and targets must be positive")
+        if not 0.0 < self.activity_target_active_month_ratio <= 1.0:
+            raise ValueError("activity month ratio must be in (0, 1]")
+        if self.overtrading_free_trades_per_month < 0.0:
+            raise ValueError("overtrading free rate must be non-negative")
+        if any(
+            value < 0.0
+            for value in (
+                self.development_group_weight,
+                self.validation_group_weight,
+                self.worst_pair_weight,
+                self.group_median_weight,
+            )
+        ):
+            raise ValueError("raw multipair aggregation weights must be non-negative")
+        if not math.isclose(
+            self.development_group_weight + self.validation_group_weight,
+            1.0,
+            abs_tol=1e-12,
+        ) or not math.isclose(
+            self.worst_pair_weight + self.group_median_weight,
+            1.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("raw multipair aggregation weights must sum to one")
+        if not math.isclose(
+            self.edge_return_weight
+            + self.edge_expectancy_weight
+            + self.edge_profit_factor_weight,
+            1.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("edge weights must sum to one")
+        if not math.isclose(
+            abs(self.score_drawdown_weight)
+            + abs(self.score_drawdown_duration_weight)
+            + abs(self.score_loss_streak_weight)
+            + abs(self.score_overtrading_weight),
+            0.08,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("v4 risk weights must total eight percent")
+        if any(
+            value > 0.0
+            for value in (
+                self.score_drawdown_weight,
+                self.score_drawdown_duration_weight,
+                self.score_loss_streak_weight,
+                self.score_overtrading_weight,
+            )
+        ):
+            raise ValueError("risk score weights must be non-positive")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any] | None) -> RawMultiPairPolicyV4:
+        if value is None:
+            return cls()
+        if not isinstance(value, Mapping):
+            raise TypeError("raw multipair policy must be a mapping")
+        known = set(cls.__dataclass_fields__)
+        unexpected = set(value) - known
+        if unexpected:
+            raise ValueError(f"unknown raw multipair policy fields: {sorted(unexpected)}")
+        return cls(**dict(value))
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+
+    @property
+    def policy_hash(self) -> str:
+        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def activity_target(self, timeframe: str) -> float:
+        return (
+            self.activity_target_trades_per_month_15m
+            if timeframe == "15m"
+            else self.activity_target_trades_per_month_1h
+        )
+
+    def holding_targets(self, timeframe: str) -> tuple[float, float]:
+        if timeframe == "15m":
+            return (
+                self.holding_median_target_hours_15m,
+                self.holding_p90_target_hours_15m,
+            )
+        return (
+            self.holding_median_target_hours_1h,
+            self.holding_p90_target_hours_1h,
+        )
 
 COMPONENT_NAMES = (
     "return_score",
     "expectancy_score",
     "profit_factor_score",
     "activity_score",
+    "edge_score",
+    "productive_frequency_score",
     "holding_score",
     "drawdown_risk",
     "drawdown_duration_risk",
@@ -88,22 +209,7 @@ COMPONENT_NAMES = (
     "overtrading_risk",
 )
 
-COMPONENT_WEIGHTS: Mapping[str, float] = {
-    # Net profit velocity and pairwise activity dominate.  Expectancy and PF
-    # remain useful gradients, but cannot make a handful of lucky trades look
-    # like a production-quality high-frequency strategy.
-    "return_score": 0.40,
-    "expectancy_score": 0.10,
-    "profit_factor_score": 0.05,
-    "activity_score": 0.35,
-    "holding_score": 0.05,
-    "drawdown_risk": -0.12,
-    "drawdown_duration_risk": -0.07,
-    "loss_streak_risk": -0.04,
-    "overtrading_risk": -0.02,
-}
-
-_BENEFIT_COMPONENTS = frozenset(COMPONENT_NAMES[:5])
+_BENEFIT_COMPONENTS = frozenset(COMPONENT_NAMES[:7])
 
 
 class RawMultiPairStatus(StrEnum):
@@ -125,10 +231,13 @@ class RawMultiPairPanel:
     fee_rate: float = HARDCORE_FEE_RATE
     slippage_rate: float = HARDCORE_SLIPPAGE_RATE
     data_manifest_hash: str | None = None
+    policy: RawMultiPairPolicyV4 = RawMultiPairPolicyV4()
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901 - one fail-closed panel contract
         if self.timeframe not in HARDCORE_TIMEFRAMES:
-            raise ValueError("raw-multipair-score-v3 supports only 15m and 1h timeframes")
+            raise ValueError("raw-multipair-score-v4 supports only 15m and 1h timeframes")
+        if not isinstance(self.policy, RawMultiPairPolicyV4):
+            raise TypeError("policy must be a RawMultiPairPolicyV4")
 
         development = _canonical_pairs(self.development_pairs, "development_pairs")
         validation = _canonical_pairs(self.validation_pairs, "validation_pairs")
@@ -182,12 +291,20 @@ class RawMultiPairPanel:
         return ((self.period_end - self.period_start).days + 1) / 7.0
 
     @property
+    def calendar_years(self) -> float:
+        return ((self.period_end - self.period_start).days + 1) / 365.2425
+
+    @property
+    def calendar_days(self) -> int:
+        return (self.period_end - self.period_start).days + 1
+
+    @property
     def panel_id(self) -> str:
         """Stable identity including the timeframe and scoring semantics."""
 
         payload = json.dumps(self._identity_descriptor(), sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
-        return f"raw_multipair_panel_v3_{digest}"
+        return f"raw_multipair_panel_v4_{digest}"
 
     def _identity_descriptor(self) -> dict[str, Any]:
         return {
@@ -200,6 +317,8 @@ class RawMultiPairPanel:
             "fee_rate": self.fee_rate,
             "slippage_rate": self.slippage_rate,
             "data_manifest_hash": self.data_manifest_hash,
+            "policy_hash": self.policy.policy_hash,
+            "policy": self.policy.to_dict(),
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -272,12 +391,14 @@ class PairScenario:
 
 @dataclass(frozen=True)
 class ComponentVector:
-    """The nine bounded components used by the public formula."""
+    """The eleven bounded components used by the public formula."""
 
     return_score: float
     expectancy_score: float
     profit_factor_score: float
     activity_score: float
+    edge_score: float
+    productive_frequency_score: float
     holding_score: float
     drawdown_risk: float
     drawdown_duration_risk: float
@@ -317,6 +438,7 @@ class RawMultiPairScore:
     """Candidate score or a fail-closed invalid result."""
 
     score_version: str
+    policy_hash: str
     panel_id: str
     timeframe: str
     status: RawMultiPairStatus
@@ -338,6 +460,7 @@ class RawMultiPairScore:
 
         return {
             "score_version": self.score_version,
+            "policy_hash": self.policy_hash,
             "panel_id": self.panel_id,
             "timeframe": self.timeframe,
             "status": self.status.value,
@@ -429,19 +552,33 @@ def score_raw_multipair(
         development_values = [getattr(pair_map[pair], name) for pair in panel.development_pairs]
         validation_values = [getattr(pair_map[pair], name) for pair in panel.validation_pairs]
         group_aggregator = _benefit_group if name in _BENEFIT_COMPONENTS else _risk_group
-        aggregate_values[name] = DEVELOPMENT_GROUP_WEIGHT * group_aggregator(
-            development_values
-        ) + VALIDATION_GROUP_WEIGHT * group_aggregator(validation_values)
+        aggregate_values[name] = panel.policy.development_group_weight * group_aggregator(
+            development_values,
+            policy=panel.policy,
+        ) + panel.policy.validation_group_weight * group_aggregator(
+            validation_values,
+            policy=panel.policy,
+        )
 
     aggregate = ComponentVector(**aggregate_values)
-    score = 100.0 * sum(
-        COMPONENT_WEIGHTS[name] * aggregate_values[name] for name in COMPONENT_NAMES
+    policy = panel.policy
+    score = 100.0 * (
+        policy.score_edge_weight * aggregate_values["edge_score"]
+        + policy.score_productive_frequency_weight
+        * aggregate_values["productive_frequency_score"]
+        + policy.score_holding_weight * aggregate_values["holding_score"]
+        + policy.score_drawdown_weight * aggregate_values["drawdown_risk"]
+        + policy.score_drawdown_duration_weight
+        * aggregate_values["drawdown_duration_risk"]
+        + policy.score_loss_streak_weight * aggregate_values["loss_streak_risk"]
+        + policy.score_overtrading_weight * aggregate_values["overtrading_risk"]
     )
     if not math.isfinite(score):  # Defensive: normalized components are finite.
         return _invalid(panel, "NONFINITE_SCORE", "score is not finite")
 
     return RawMultiPairScore(
         score_version=RAW_MULTIPAIR_SCORE_VERSION,
+        policy_hash=panel.policy.policy_hash,
         panel_id=panel.panel_id,
         timeframe=panel.timeframe,
         status=RawMultiPairStatus.VALID,
@@ -510,7 +647,9 @@ def _score_pair(
                 return_score=-1.0,
                 expectancy_score=-1.0,
                 profit_factor_score=-1.0,
-                activity_score=-1.0,
+                activity_score=0.0,
+                edge_score=-1.0,
+                productive_frequency_score=0.0,
                 holding_score=0.0,
                 drawdown_risk=0.0,
                 drawdown_duration_risk=0.0,
@@ -574,47 +713,71 @@ def _score_pair(
             f"{scenario.pair}.profit_factor_censored is required",
         )
 
+    policy = panel.policy
     effective_pf = _effective_profit_factor(
         profit_factor,
         censored=scenario.profit_factor_censored,
         trade_count=trade_count,
+        policy=policy,
     )
     trades_per_month = trade_count / panel.calendar_months
     active_month_ratio = active_months / panel.calendar_months
-    trade_rate_progress = min(1.0, trade_count / ACTIVITY_TARGET_TRADES_PER_PAIR)
-    month_coverage_progress = min(
-        1.0,
-        active_month_ratio / ACTIVITY_TARGET_ACTIVE_MONTH_RATIO,
+    trade_rate_progress = _soft_saturating_progress(
+        trades_per_month / policy.activity_target(panel.timeframe)
+    )
+    month_coverage_progress = _soft_saturating_progress(
+        active_month_ratio / policy.activity_target_active_month_ratio
     )
     # Geometric blending prevents a burst of trades in a few months from
-    # hiding long inactive stretches.  Activity is a smooth shortfall in
-    # [-1, 0]: reaching the target removes the penalty but never grants a
-    # positive score capable of compensating for losses.
-    activity_progress = math.sqrt(trade_rate_progress * month_coverage_progress)
-    activity = activity_progress - 1.0
+    # hiding long inactive stretches.  The smoothstep has zero slope where it
+    # reaches saturation, avoiding a selection cliff at the 17/10 references.
+    # Activity itself never grants edge: only Q*A enters productive frequency.
+    activity = math.sqrt(trade_rate_progress * month_coverage_progress)
+    holding_median_target, holding_p90_target = policy.holding_targets(
+        panel.timeframe
+    )
     holding_progress = 0.5 * _threshold_reward(
-        median_holding, HOLDING_MEDIAN_TARGET_HOURS[panel.timeframe]
+        median_holding, holding_median_target
     ) + 0.5 * _threshold_reward(
-        p90_holding, HOLDING_P90_TARGET_HOURS[panel.timeframe]
+        p90_holding, holding_p90_target
     )
     # Like activity, holding time is a shortfall penalty rather than a free
     # positive reward.  A frequent break-even strategy therefore remains
     # neutral instead of scoring positively merely for closing quickly.
     holding = holding_progress - 1.0
-    overtrading_excess = max(0.0, trades_per_month - OVERTRADING_FREE_TRADES_PER_MONTH)
+    overtrading_excess = max(
+        0.0,
+        trades_per_month - policy.overtrading_free_trades_per_month,
+    )
+
+    return_score = math.tanh(
+        (net_return / panel.calendar_years) / policy.annual_return_scale
+    )
+    expectancy_score = math.tanh(net_expectancy / policy.expectancy_scale)
+    profit_factor_score = math.tanh(
+        (effective_pf - 1.0) / policy.profit_factor_scale
+    )
+    edge_score = (
+        policy.edge_return_weight * return_score
+        + policy.edge_expectancy_weight * expectancy_score
+        + policy.edge_profit_factor_weight * profit_factor_score
+    )
+    productive_frequency_score = edge_score * activity
 
     vector = ComponentVector(
-        return_score=math.tanh(
-            (net_return / panel.calendar_weeks) / TARGET_WEEKLY_NET_RETURN
-        ),
-        expectancy_score=math.tanh(net_expectancy / EXPECTANCY_SCALE),
-        profit_factor_score=math.tanh((effective_pf - 1.0) / PROFIT_FACTOR_SCALE),
+        return_score=return_score,
+        expectancy_score=expectancy_score,
+        profit_factor_score=profit_factor_score,
         activity_score=activity,
+        edge_score=edge_score,
+        productive_frequency_score=productive_frequency_score,
         holding_score=holding,
-        drawdown_risk=math.tanh(max_drawdown / MAX_DRAWDOWN_SCALE),
-        drawdown_duration_risk=math.tanh(drawdown_duration / DRAWDOWN_DURATION_SCALE_DAYS),
-        loss_streak_risk=math.tanh(loss_streak / LOSS_STREAK_SCALE),
-        overtrading_risk=math.tanh(overtrading_excess / OVERTRADING_SCALE_TRADES_PER_MONTH),
+        drawdown_risk=math.tanh(max_drawdown / policy.max_drawdown_scale),
+        drawdown_duration_risk=min(1.0, drawdown_duration / panel.calendar_days),
+        loss_streak_risk=math.tanh(loss_streak / policy.loss_streak_scale),
+        overtrading_risk=math.tanh(
+            overtrading_excess / policy.overtrading_scale_trades_per_month
+        ),
     )
     return PairScoreComponents(
         pair=scenario.pair,
@@ -632,13 +795,14 @@ def _effective_profit_factor(
     *,
     censored: bool,
     trade_count: int,
+    policy: RawMultiPairPolicyV4,
 ) -> float:
-    capped = min(PROFIT_FACTOR_CAP, value)
+    capped = min(policy.profit_factor_cap, value)
     if capped <= 1.0:
         return capped
     # Apply evidence damping to every profitable PF, not only the censored
     # no-loss case.  A finite PF based on nine trades is still thin evidence.
-    evidence = min(1.0, trade_count / PROFIT_FACTOR_FULL_CREDIT_TRADES)
+    evidence = min(1.0, trade_count / policy.profit_factor_full_credit_trades)
     return 1.0 + (capped - 1.0) * evidence
 
 
@@ -648,12 +812,27 @@ def _threshold_reward(value: float, target: float) -> float:
     return target / value
 
 
-def _benefit_group(values: list[float]) -> float:
-    return WORST_PAIR_WEIGHT * min(values) + GROUP_MEDIAN_WEIGHT * median(values)
+def _soft_saturating_progress(ratio: float) -> float:
+    """C1-continuous progress from zero to a softly saturated reference."""
+
+    bounded = max(0.0, min(1.0, ratio))
+    return bounded * bounded * (3.0 - 2.0 * bounded)
 
 
-def _risk_group(values: list[float]) -> float:
-    return WORST_PAIR_WEIGHT * max(values) + GROUP_MEDIAN_WEIGHT * median(values)
+def _benefit_group(
+    values: list[float], *, policy: RawMultiPairPolicyV4
+) -> float:
+    return (
+        policy.worst_pair_weight * min(values)
+        + policy.group_median_weight * median(values)
+    )
+
+
+def _risk_group(values: list[float], *, policy: RawMultiPairPolicyV4) -> float:
+    return (
+        policy.worst_pair_weight * max(values)
+        + policy.group_median_weight * median(values)
+    )
 
 
 def _canonical_pairs(values: tuple[str, ...], name: str) -> tuple[str, ...]:
@@ -742,6 +921,7 @@ def _invalid(
 ) -> RawMultiPairScore:
     return RawMultiPairScore(
         score_version=RAW_MULTIPAIR_SCORE_VERSION,
+        policy_hash=panel.policy.policy_hash,
         panel_id=panel.panel_id,
         timeframe=panel.timeframe,
         status=RawMultiPairStatus.INVALID,

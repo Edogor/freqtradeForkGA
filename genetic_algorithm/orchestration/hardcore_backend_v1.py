@@ -3,7 +3,7 @@
 The adapter intentionally reuses the canonical manifest, data/code fencing,
 SQLite leases, process guard and Generic-Island worker.  It does not use V2
 wave planning or promotion ranking.  A completed worker result is converted
-back to the sole campaign decision input, ``raw-multipair-score-v3``.
+back to the sole campaign decision input, ``raw-multipair-score-v4``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import hashlib
 import json
 import math
 import os
-import signal
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,6 +26,7 @@ from genetic_algorithm.config.schema import (
 from genetic_algorithm.evaluation.raw_multipair_score import (
     PairScenario,
     RawMultiPairPanel,
+    RawMultiPairPolicyV4,
     RawMultiPairStatus,
     score_raw_multipair,
 )
@@ -60,6 +60,7 @@ from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
     AttemptPollV1,
     CampaignLane,
     CandidateSnapshotV1,
+    candidate_profit_activity_signal,
     DiversityEventV1,
     EvolutionRunRequestV1,
     EvolutionStopReason,
@@ -169,6 +170,17 @@ def _materialized_config(request: EvolutionRunRequestV1) -> dict[str, Any]:
     generic["archive_seeding"]["island_names"] = [
         item.name for item in request.islands if item.archive_island
     ]
+    generic["archive_seeding"]["assignments"] = {
+        item.name: [
+            {
+                "candidate_id": entry.candidate.candidate_id,
+                "niche": entry.niche.value,
+            }
+            for entry in item.seed_candidates
+        ]
+        for item in request.islands
+        if item.archive_island
+    }
     by_name = {item["name"]: item for item in generic["islands"]}
     if set(by_name) != {item.name for item in request.islands}:
         raise HardcoreCampaignError("request islands differ from the lane preset")
@@ -189,20 +201,20 @@ def _materialized_config(request: EvolutionRunRequestV1) -> dict[str, Any]:
 
 
 def _archive_seeds(request: EvolutionRunRequestV1) -> list[FrozenEvolutionSeedV2]:
-    # Request order mirrors GenericIslandModelEvolution's round-robin archive
-    # assignment. Reconstruct the original score-ordered flat archive.
-    assignments = [item.seed_candidates for item in request.islands if item.archive_island]
-    flattened: list[Any] = []
-    for position in range(4):
-        for island_entries in assignments:
-            if position < len(island_entries):
-                flattened.append(island_entries[position])
+    # A phenotype may seed more than one bridge island, but the immutable
+    # worker input stores it once. Engine assignments reference candidate_id.
+    flattened = [
+        entry
+        for island in request.islands
+        if island.archive_island
+        for entry in island.seed_candidates
+    ]
     seeds: list[FrozenEvolutionSeedV2] = []
     seen: set[str] = set()
     for archive_entry in flattened:
         candidate = archive_entry.candidate
         if candidate.phenotype_hash in seen:
-            raise HardcoreCampaignError("run request repeats an archive phenotype")
+            continue
         seen.add(candidate.phenotype_hash)
         path = Path(candidate.evolution_seed_path).resolve()
         if not path.is_file() or _sha256_file(path) != candidate.evolution_seed_sha256:
@@ -445,15 +457,10 @@ class V2HardcoreAttemptBackend:
         if not marker.is_file() or delivered.exists():
             return
         if state.status == AttemptLifecycleStatus.RUNNING and state.pid is not None:
-            try:
-                # Signal only the coordinator.  It catches SIGTERM, finishes
-                # the current generation, checkpoints, and then shuts down
-                # its evaluation pool cleanly. killpg would interrupt pool
-                # workers mid-backtest and destroy generation integrity.
-                os.kill(state.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                return
-            _write_immutable(delivered, b"SIGTERM\n")
+            # The engine polls the immutable marker after a complete
+            # generation. SIGTERM while blocked in a worker pool can trigger
+            # the executor's five-second SIGKILL and lose the checkpoint.
+            _write_immutable(delivered, b"GENERATION_BOUNDARY_MARKER\n")
 
     def _load_or_build_evidence(self, request, state) -> AttemptEvidenceV1:
         root = Path(state.artifact_root).resolve()
@@ -851,6 +858,8 @@ _COMPONENT_ALIAS = {
     "E": "expectancy_score",
     "P": "profit_factor_score",
     "A": "activity_score",
+    "Q": "edge_score",
+    "F": "productive_frequency_score",
     "H": "holding_score",
     "D": "drawdown_risk",
     "U": "drawdown_duration_risk",
@@ -859,22 +868,23 @@ _COMPONENT_ALIAS = {
 }
 
 
-def _candidate_snapshot(
+def candidate_snapshot_from_strict_replay(
     candidate,
     *,
-    request: EvolutionRunRequestV1,
-    result: AttemptResultV2,
+    lane: CampaignLane,
     worker_root: Path,
+    policy: RawMultiPairPolicyV4,
     strict_failure_codes: list[str] | None = None,
 ) -> CandidateSnapshotV1 | None:
     panel = RawMultiPairPanel(
-        timeframe=request.lane.value,
+        timeframe=lane.value,
+        policy=policy,
     )
     records = {record.metrics.pair: record for record in candidate.scenarios}
     if set(records) != set(HARDCORE_PANEL_PAIRS):
         return None
     scenarios = [
-        _scenario_from_record(records[pair], timeframe=request.lane)
+        _scenario_from_record(records[pair], timeframe=lane)
         for pair in HARDCORE_PANEL_PAIRS
     ]
     score = score_raw_multipair(panel, scenarios)
@@ -888,6 +898,9 @@ def _candidate_snapshot(
             strict_failure_codes.extend(technical_codes or [score.reason_code])
         return None
     components = score.pair_component_map()
+    aggregate = score.aggregate_components
+    if aggregate is None:
+        return None
     raw_metrics: list[RawPairMetricsV1] = []
     for pair, scenario in zip(HARDCORE_PANEL_PAIRS, scenarios, strict=True):
         pair_components = components[pair].components.to_dict()
@@ -927,12 +940,20 @@ def _candidate_snapshot(
         candidate_id=candidate.candidate_id,
         phenotype_hash=candidate.phenotype_hash,
         score=score.score,
-        timeframe=request.lane,
+        policy_hash=score.policy_hash,
+        edge_score=aggregate.edge_score,
+        activity_score=aggregate.activity_score,
+        productive_frequency_score=aggregate.productive_frequency_score,
+        timeframe=lane,
         panel_id=score.panel_id,
         evolution_seed_path=str(seed_path.resolve()),
         evolution_seed_sha256=_sha256_file(seed_path),
         gene_hash=seed.gene_hash,
         pair_metrics=raw_metrics,
+        interesting_profit_activity_signal=candidate_profit_activity_signal(
+            raw_metrics,
+            timeframe=lane,
+        ),
     )
 
 
@@ -974,6 +995,10 @@ def _diversity_events(engine: dict[str, Any] | None) -> list[DiversityEventV1]:
 
 def _build_attempt_evidence(request, state) -> AttemptEvidenceV1:
     worker_root = Path(state.artifact_root).resolve()
+    resolved_config = _materialized_config(request)
+    raw_policy = RawMultiPairPolicyV4.from_mapping(
+        resolved_config.get("raw_multipair_score", {}).get("policy")
+    )
     engine = _verified_engine_outcome(worker_root)
     stop_reason = _engine_stop_reason(engine)
     result: AttemptResultV2 | None = None
@@ -985,11 +1010,11 @@ def _build_attempt_evidence(request, state) -> AttemptEvidenceV1:
     strict_failure_codes: list[str] = []
     if result is not None:
         for candidate in result.candidate_evaluations:
-            snapshot = _candidate_snapshot(
+            snapshot = candidate_snapshot_from_strict_replay(
                 candidate,
-                request=request,
-                result=result,
+                lane=request.lane,
                 worker_root=worker_root,
+                policy=raw_policy,
                 strict_failure_codes=strict_failure_codes,
             )
             if snapshot is not None:
