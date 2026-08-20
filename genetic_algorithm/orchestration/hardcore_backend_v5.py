@@ -50,6 +50,8 @@ from genetic_algorithm.orchestration.hardcore_backend_v1 import (
     _classify_failure,
     _engine_stop_reason,
     _finite_or_none,
+    _live_engine_progress,
+    _live_pair_metrics,
     _scenario_from_record,
     _verified_engine_outcome,
 )
@@ -312,7 +314,17 @@ class V2HardcoreAttemptBackendV5:
         if handle not in self._requests:
             self._requests[handle] = self._restore_request(state)
         if state.status not in _TERMINAL:
-            return {"status": "RUNNING", "observed_at": tick.observed_at.isoformat()}
+            generation, score, plateau_checks = _live_engine_progress(state.artifact_root)
+            return {
+                "status": "RUNNING",
+                "observed_at": tick.observed_at.isoformat(),
+                "current_generation": generation,
+                "current_score": score,
+                "current_pair_metrics": [
+                    item.model_dump(mode="json") for item in _live_pair_metrics(state.artifact_root)
+                ],
+                "plateau_checks": plateau_checks,
+            }
         request, config = self._requests[handle]
         return {"status": "FINISHED", "evidence": self._evidence(request, config, state)}
 
