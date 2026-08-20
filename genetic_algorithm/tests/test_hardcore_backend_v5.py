@@ -1,5 +1,8 @@
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
+import genetic_algorithm.orchestration.hardcore_backend_v5 as backend_v5
 from genetic_algorithm.orchestration.hardcore_backend_v5 import V2HardcoreAttemptBackendV5
 from genetic_algorithm.config.schema import validate_resolved_config_v2_or_raise
 
@@ -131,3 +134,63 @@ def test_v5_child_runtime_profile_accepts_4h_panel(tmp_path):
         validate_resolved_config_v2_or_raise(config)
     finally:
         backend.close()
+
+
+def test_v5_archive_seeds_match_bridge_assignments_not_entire_archive(tmp_path, monkeypatch):
+    """Only assigned archive parents may enter the immutable worker spec.
+
+    This is the production resume path after a lane has collected its first
+    twelve archive candidates.  The worker validates seed IDs against bridge
+    assignments, so returning all twelve would reject an otherwise valid run.
+    """
+
+    def load_seed(payload: bytes):
+        return SimpleNamespace(candidate_id=payload.decode("ascii"))
+
+    monkeypatch.setattr(
+        backend_v5.FrozenEvolutionSeedV2,
+        "model_validate_json",
+        staticmethod(load_seed),
+    )
+    monkeypatch.setattr(backend_v5, "validate_evolution_seed", lambda seed, config: None)
+
+    entries = []
+    for candidate_id, niche in (
+        ("edge-1", "EDGE"),
+        ("edge-2", "EDGE"),
+        ("edge-3", "EDGE"),
+        ("activity-1", "ACTIVITY"),
+        ("activity-2", "ACTIVITY"),
+        ("productive-1", "PRODUCTIVE"),
+    ):
+        path = tmp_path / f"{candidate_id}.json"
+        path.write_bytes(candidate_id.encode("ascii"))
+        entries.append(
+            {
+                "evolution_seed_path": str(path),
+                "evolution_seed_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "niche": niche,
+            }
+        )
+    config = {
+        "generic_island_model": {
+            "islands": [{"name": f"bridge-{index}"} for index in range(1, 4)],
+            "archive_seeding": {},
+        }
+    }
+
+    seeds = V2HardcoreAttemptBackendV5._archive_seeds({"archive_seeds": entries}, config)
+
+    assert [seed.candidate_id for seed in seeds] == [
+        "edge-1",
+        "edge-2",
+        "activity-1",
+        "activity-2",
+    ]
+    for assignment in config["generic_island_model"]["archive_seeding"]["assignments"].values():
+        assert [row["candidate_id"] for row in assignment] == [
+            "edge-1",
+            "edge-2",
+            "activity-1",
+            "activity-2",
+        ]

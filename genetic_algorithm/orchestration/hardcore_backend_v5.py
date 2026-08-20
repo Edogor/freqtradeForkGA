@@ -226,7 +226,7 @@ class V2HardcoreAttemptBackendV5:
         supplied = request.get("archive_seeds", [])
         if not isinstance(supplied, list):
             return []
-        accepted: list[FrozenEvolutionSeedV2] = []
+        accepted_by_id: dict[str, FrozenEvolutionSeedV2] = {}
         ids_by_niche: dict[str, list[str]] = {}
         seen: set[str] = set()
         for entry in supplied:
@@ -248,13 +248,36 @@ class V2HardcoreAttemptBackendV5:
             except (OSError, ValueError):
                 continue
             seen.add(seed.candidate_id)
-            accepted.append(seed)
+            accepted_by_id[seed.candidate_id] = seed
             ids_by_niche.setdefault(niche, []).append(seed.candidate_id)
-        # Bridges preferentially receive two economic-edge and two activity
-        # parents. Productive/balanced/novelty entries fill gaps in a stable
-        # order, so a sparse archive remains useful rather than blocking a run.
-        priority = ["EDGE", "ACTIVITY", "PRODUCTIVE", "BALANCED", "NOVELTY"]
-        ordered = [item for niche in priority for item in ids_by_niche.get(niche, [])]
+        # A bridge gets up to two EDGE and two ACTIVITY parents.  If a young
+        # archive does not yet contain all four, fill the remaining slots in a
+        # deterministic niche order.  Crucially, only these assigned parents
+        # are handed to the immutable worker.  Passing the whole 12-entry
+        # archive while assigning four IDs made the worker (correctly) reject
+        # the request as a tampered seed assignment after the first cycle.
+        chosen: list[tuple[str, str]] = []
+        seen_chosen: set[str] = set()
+
+        def choose(niche: str, limit: int) -> None:
+            for candidate_id in ids_by_niche.get(niche, []):
+                if len([item for item in chosen if item[1] == niche]) >= limit:
+                    break
+                if candidate_id not in seen_chosen:
+                    chosen.append((candidate_id, niche))
+                    seen_chosen.add(candidate_id)
+
+        choose("EDGE", 2)
+        choose("ACTIVITY", 2)
+        for niche in ("PRODUCTIVE", "BALANCED", "NOVELTY"):
+            for candidate_id in ids_by_niche.get(niche, []):
+                if len(chosen) >= 4:
+                    break
+                if candidate_id not in seen_chosen:
+                    chosen.append((candidate_id, niche))
+                    seen_chosen.add(candidate_id)
+            if len(chosen) >= 4:
+                break
         generic = config["generic_island_model"]
         assignments: dict[str, list[dict[str, str]]] = {}
         for island in generic.get("islands", []):
@@ -262,11 +285,11 @@ class V2HardcoreAttemptBackendV5:
             if not name.startswith("bridge-"):
                 continue
             assignments[name] = [
-                {"candidate_id": candidate_id, "niche": "EDGE" if index < 2 else "ACTIVITY"}
-                for index, candidate_id in enumerate(ordered[:4])
+                {"candidate_id": candidate_id, "niche": niche}
+                for candidate_id, niche in chosen
             ]
         generic["archive_seeding"]["assignments"] = assignments
-        return accepted
+        return [accepted_by_id[candidate_id] for candidate_id, _ in chosen]
 
     def _materialize(self, request: dict[str, object]) -> dict[str, Any]:
         path = Path(str(request["config_path"])).resolve()
