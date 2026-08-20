@@ -324,7 +324,7 @@ class CandidateSnapshotV1(StrictV2Model):
     phenotype_hash: str = Field(min_length=64, max_length=64)
     # Hash of trading semantics after removing generation/individual IDs.
     evolutionary_phenotype_hash: str = Field(min_length=64, max_length=64)
-    score_version: Literal["raw-multipair-score-v4"] = RAW_MULTIPAIR_SCORE_VERSION
+    score_version: Literal["raw-multipair-score-v4", "raw-multipair-score-v5"] = RAW_MULTIPAIR_SCORE_VERSION
     policy_hash: str = Field(min_length=64, max_length=64)
     score: float
     edge_score: float = Field(ge=-1.0, le=1.0)
@@ -349,8 +349,13 @@ class CandidateSnapshotV1(StrictV2Model):
             raise ValueError("candidate must contain exactly one metric row for all six pairs")
         if pairs != list(HARDCORE_PANEL_PAIRS):
             raise ValueError("candidate pair metrics must use canonical panel order")
-        if not self.panel_id.startswith("raw_multipair_panel_v4_"):
-            raise ValueError("candidate panel_id is not a v4 raw-score panel")
+        expected_prefix = (
+            "raw_multipair_panel_v5_"
+            if self.score_version == "raw-multipair-score-v5"
+            else "raw_multipair_panel_v4_"
+        )
+        if not self.panel_id.startswith(expected_prefix):
+            raise ValueError("candidate panel_id does not match its raw-score version")
         expected_signal = candidate_profit_activity_signal(
             self.pair_metrics,
             timeframe=self.timeframe,

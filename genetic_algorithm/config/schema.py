@@ -22,7 +22,7 @@ import copy
 import logging
 import math
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -411,11 +411,14 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
             "profit_factor_full_credit_trades": 30,
             "activity_target_trades_per_month_15m": 17.0,
             "activity_target_trades_per_month_1h": 10.0,
+            "activity_target_trades_per_month_4h": 6.0,
             "activity_target_active_month_ratio": 0.75,
             "holding_median_target_hours_15m": 8.0,
             "holding_median_target_hours_1h": 12.0,
             "holding_p90_target_hours_15m": 24.0,
             "holding_p90_target_hours_1h": 36.0,
+            "holding_median_target_hours_4h": 24.0,
+            "holding_p90_target_hours_4h": 72.0,
             "max_drawdown_scale": 0.20,
             "loss_streak_scale": 10.0,
             "overtrading_free_trades_per_month": 60.0,
@@ -496,6 +499,7 @@ _V2_SHAPE_EXTRAS: Dict[str, Any] = {
             "max_seeds_per_island": 4,
             "assignments": {},
             "cross_niche_offspring_per_generation": 0,
+            "cross_niche_union_crossover": False,
         },
         "specialization": {
             "rotate_seeds": True,
@@ -1092,9 +1096,10 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
     raw_score = _nested_config(config, ("raw_multipair_score",))
     if raw_score.get("enabled", False):
-        if raw_score.get("policy_version") != "raw-multipair-score-v4":
+        policy_version = raw_score.get("policy_version")
+        if policy_version not in {"raw-multipair-score-v4", "raw-multipair-score-v5"}:
             errors.append(
-                "raw_multipair_score.policy_version must be raw-multipair-score-v4"
+                "raw_multipair_score.policy_version must be raw-multipair-score-v4 or raw-multipair-score-v5"
             )
         development_pairs = raw_score.get("development_pairs", [])
         validation_pairs = raw_score.get("validation_pairs", [])
@@ -1128,29 +1133,59 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
                     "raw_multipair_score pair groups must be disjoint: "
                     + ", ".join(sorted(overlap))
                 )
-        for key in ("period_start", "period_end"):
-            raw_value = raw_score.get(key)
+        if policy_version == "raw-multipair-score-v4":
+            for key in ("period_start", "period_end"):
+                raw_value = raw_score.get(key)
+                try:
+                    parsed = date.fromisoformat(raw_value) if isinstance(raw_value, str) else None
+                except ValueError:
+                    parsed = None
+                if parsed is None:
+                    errors.append(f"raw_multipair_score.{key} must be an ISO date")
             try:
-                parsed = date.fromisoformat(raw_value) if isinstance(raw_value, str) else None
+                if date.fromisoformat(str(raw_score.get("period_end"))) < date.fromisoformat(
+                    str(raw_score.get("period_start"))
+                ):
+                    errors.append(
+                        "raw_multipair_score.period_end must not precede period_start"
+                    )
             except ValueError:
-                parsed = None
-            if parsed is None:
-                errors.append(f"raw_multipair_score.{key} must be an ISO date")
-        try:
-            if date.fromisoformat(str(raw_score.get("period_end"))) < date.fromisoformat(
-                str(raw_score.get("period_start"))
-            ):
-                errors.append(
-                    "raw_multipair_score.period_end must not precede period_start"
-                )
-        except ValueError:
-            pass
-        try:
-            from genetic_algorithm.evaluation.raw_multipair_score import (
-                RawMultiPairPolicyV4,
-            )
+                pass
+        elif policy_version == "raw-multipair-score-v5":
+            timeframe = _nested_config(config, ("backtesting",)).get("timeframe")
+            try:
+                from genetic_algorithm.evaluation.raw_multipair_score_v5 import V5_PANEL_BOUNDS
 
-            RawMultiPairPolicyV4.from_mapping(raw_score.get("policy"))
+                expected_start, expected_end = V5_PANEL_BOUNDS[str(timeframe)]
+                start = datetime.fromisoformat(
+                    str(raw_score.get("period_start")).replace("Z", "+00:00")
+                )
+                end = datetime.fromisoformat(
+                    str(raw_score.get("period_end")).replace("Z", "+00:00")
+                )
+                if start.tzinfo is None or end.tzinfo is None or (
+                    start.astimezone(UTC), end.astimezone(UTC)
+                ) != (expected_start, expected_end):
+                    errors.append(
+                        "raw_multipair_score v5 period bounds differ from its immutable timeframe panel"
+                    )
+            except (KeyError, TypeError, ValueError):
+                errors.append(
+                    "raw_multipair_score v5 requires exact ISO UTC period_start/period_end timestamps"
+                )
+        try:
+            if policy_version == "raw-multipair-score-v5":
+                from genetic_algorithm.evaluation.raw_multipair_score_v5 import (
+                    RawMultiPairPolicyV5,
+                )
+
+                RawMultiPairPolicyV5.from_mapping(raw_score.get("policy"))
+            else:
+                from genetic_algorithm.evaluation.raw_multipair_score import (
+                    RawMultiPairPolicyV4,
+                )
+
+                RawMultiPairPolicyV4.from_mapping(raw_score.get("policy"))
         except (TypeError, ValueError) as exc:
             errors.append(f"invalid raw_multipair_score.policy: {exc}")
 
@@ -1298,7 +1333,9 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             not isinstance(row, dict)
             or set(row) != {"candidate_id", "niche"}
             or not isinstance(row.get("candidate_id"), str)
-            or row.get("niche") not in {"EDGE", "ACTIVITY", "BALANCED"}
+            or row.get("niche") not in {
+                "EDGE", "ACTIVITY", "BALANCED", "PRODUCTIVE", "NOVELTY"
+            }
             for rows in assignments.values()
             for row in rows
         ):
@@ -1657,20 +1694,24 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             not isinstance(name, str) or not name for name in island_names
         ):
             errors.append(f"{label} requires twelve unique island names")
+        raw_score = _nested_config(config, ("raw_multipair_score",))
+        v5_policy = raw_score.get("policy_version") == "raw-multipair-score-v5"
         if not safety.get("canary", False):
-            if ga.get("population_size") != 12 or ga.get("generations") != 30:
-                errors.append(f"{label} production GA requires population 12 x 30 generations")
-            if generic_island.get("population_per_island") != 12:
-                errors.append(f"{label} production islands require population size 12")
-            if generic_island.get("generations") != 30:
-                errors.append(f"{label} production islands require 30 generations")
+            allowed_sizes = {10, 12, 16} if v5_policy else {12}
+            allowed_generations = {12, 18, 30} if v5_policy else {30}
+            if ga.get("population_size") not in allowed_sizes or ga.get("generations") not in allowed_generations:
+                errors.append(f"{label} has an unsupported population/generation budget")
+            if generic_island.get("population_per_island") != ga.get("population_size"):
+                errors.append(f"{label} island population must match genetic_algorithm.population_size")
+            if generic_island.get("generations") != ga.get("generations"):
+                errors.append(f"{label} island generations must match genetic_algorithm.generations")
             for index, island in enumerate(islands):
                 if not isinstance(island, dict):
                     continue
-                if island.get("population_size") != 12:
-                    errors.append(f"{label} island[{index}] requires population_size: 12")
-                if island.get("generations") != 30:
-                    errors.append(f"{label} island[{index}] requires generations: 30")
+                if island.get("population_size") != ga.get("population_size"):
+                    errors.append(f"{label} island[{index}] population differs from the GA budget")
+                if island.get("generations") != ga.get("generations"):
+                    errors.append(f"{label} island[{index}] generations differ from the GA budget")
 
         recursive_violations = sorted(
             set(
@@ -1686,27 +1727,30 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         expected_dev = ["BTC/USDT", "SOL/USDT", "XRP/USDT"]
         expected_val = ["BNB/USDT", "ETH/USDT", "PEPE/USDT"]
         expected_pairs = set(expected_dev) | set(expected_val)
-        raw_score = _nested_config(config, ("raw_multipair_score",))
         if not raw_score.get("enabled", False):
             errors.append(f"{label} requires raw_multipair_score.enabled: true")
-        if raw_score.get("policy_version") != "raw-multipair-score-v4":
-            errors.append(f"{label} requires raw-multipair-score-v4")
+        if raw_score.get("policy_version") not in {
+            "raw-multipair-score-v4", "raw-multipair-score-v5"
+        }:
+            errors.append(f"{label} requires raw-multipair-score-v4 or v5")
         if raw_score.get("development_pairs") != expected_dev:
             errors.append(f"{label} requires the fixed development pair group")
         if raw_score.get("validation_pairs") != expected_val:
             errors.append(f"{label} requires the fixed validation pair group")
-        if raw_score.get("period_start") != "2023-05-09":
+        if not v5_policy and raw_score.get("period_start") != "2023-05-09":
             errors.append(f"{label} requires period_start: 2023-05-09")
-        if raw_score.get("period_end") != "2026-03-26":
+        if not v5_policy and raw_score.get("period_end") != "2026-03-26":
             errors.append(f"{label} requires period_end: 2026-03-26")
 
         if set(bt.get("pairs", [])) != expected_pairs or len(bt.get("pairs", [])) != 6:
             errors.append(f"{label} requires the fixed six-pair panel")
-        if bt.get("timeframe") not in {"15m", "1h"}:
-            errors.append(f"{label} permits only 15m or 1h")
+        allowed_timeframes = {"15m", "1h", "4h"} if v5_policy else {"15m", "1h"}
+        if bt.get("timeframe") not in allowed_timeframes:
+            errors.append(f"{label} permits only {sorted(allowed_timeframes)}")
         expected_timerange = {
             "15m": "1683590400-1774568700",
             "1h": "1683590400-1774566000",
+            "4h": "1684382400-1774555200",
         }.get(bt.get("timeframe"))
         if bt.get("timerange") != expected_timerange:
             errors.append(
@@ -1749,6 +1793,10 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
             **{pair: "TRAIN" for pair in expected_dev},
             **{pair: "PAIR_VALIDATION" for pair in expected_val},
         }
+        replay_period_start = "2023-05-18" if (
+            v5_policy and bt.get("timeframe") == "4h"
+        ) else "2023-05-09"
+        replay_period_end = "2026-03-26"
         if not promotion.get("enabled", False) or len(scenario_rows) != 6:
             errors.append(f"{label} requires one replay manifest row per panel pair")
         elif {
@@ -1758,8 +1806,8 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         for row in scenario_rows:
             pair = row.get("pair")
             if (
-                row.get("period_start") != "2023-05-09"
-                or row.get("period_end") != "2026-03-26"
+                row.get("period_start") != replay_period_start
+                or row.get("period_end") != replay_period_end
                 or row.get("cost_multiplier") != 1.0
                 or row.get("role") != expected_roles.get(pair)
             ):

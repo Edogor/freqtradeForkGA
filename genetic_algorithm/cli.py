@@ -29,9 +29,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="genetic_algorithm",
         description="Genetic Algorithm for FreqTrade Strategy Evolution",
     )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Enable debug logging"
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     sub = parser.add_subparsers(dest="command", help="Available commands")
 
     # --- run ---
@@ -49,8 +47,12 @@ def main(argv: list[str] | None = None) -> int:
     # --- monitor ---
     p_mon = sub.add_parser("monitor", help="Live monitor for running experiments")
     p_mon.add_argument("--live", action="store_true", help="Show live log tails")
-    p_mon.add_argument("--filter", choices=["running", "queued", "completed", "failed", "all"],
-                       default="running", help="Filter experiments by status")
+    p_mon.add_argument(
+        "--filter",
+        choices=["running", "queued", "completed", "failed", "all"],
+        default="running",
+        help="Filter experiments by status",
+    )
     p_mon.add_argument("--tag", action="append", default=[], help="Filter by tag")
     p_mon.add_argument("--once", action="store_true", help="Print once and exit")
     p_mon.add_argument("--interval", type=int, default=5, help="Refresh interval (seconds)")
@@ -170,9 +172,7 @@ def main(argv: list[str] | None = None) -> int:
     h_status.add_argument("--automation-root", required=True)
     h_stop = h_sub.add_parser("stop", help="Request a generation-boundary stop")
     h_stop.add_argument("--automation-root", required=True)
-    h_unit = h_sub.add_parser(
-        "service-unit", help="Render the isolated systemd --user service"
-    )
+    h_unit = h_sub.add_parser("service-unit", help="Render the isolated systemd --user service")
     h_unit.add_argument("--campaign-id", required=True)
     h_unit.add_argument("--config-15m", default="hardcore_multipair_15m_v1")
     h_unit.add_argument("--config-1h", default="hardcore_multipair_1h_v1")
@@ -187,6 +187,31 @@ def main(argv: list[str] | None = None) -> int:
     h_bootstrap.add_argument("--output", required=True)
     h_bootstrap.add_argument("--config-15m", default="hardcore_multipair_15m_v1")
     h_bootstrap.add_argument("--config-1h", default="hardcore_multipair_1h_v1")
+
+    # --- evidence-driven V5 three-lane campaign ---
+    p_hardcore_v5 = sub.add_parser(
+        "hardcore-campaign-v5",
+        help="Seven-day staged raw-score six-pair 15m/1h/4h search campaign",
+    )
+    h5_sub = p_hardcore_v5.add_subparsers(dest="hardcore_v5_cmd")
+    for command_name, command_help in (
+        ("start", "Start or resume the isolated V5 campaign"),
+        ("canary", "Run exactly one reduced evolution per V5 lane"),
+        ("preflight", "Validate the three V5 lane presets and launch inputs"),
+    ):
+        command = h5_sub.add_parser(command_name, help=command_help)
+        command.add_argument("--campaign-id", required=True)
+        command.add_argument("--config-15m")
+        command.add_argument("--config-1h")
+        command.add_argument("--config-4h")
+        command.add_argument("--automation-root")
+        command.add_argument("--state-db")
+        if command_name == "start":
+            command.add_argument("--once", action="store_true")
+    h5_status = h5_sub.add_parser("status", help="Read V5 campaign state")
+    h5_status.add_argument("--automation-root", required=True)
+    h5_stop = h5_sub.add_parser("stop", help="Request a V5 generation-boundary stop")
+    h5_stop.add_argument("--automation-root", required=True)
 
     # --- experiment ---
     p_exp = sub.add_parser("experiment", help="Experiment management")
@@ -281,6 +306,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_automation(args)
         elif args.command == "hardcore-campaign":
             return _cmd_hardcore_campaign(args)
+        elif args.command == "hardcore-campaign-v5":
+            return _cmd_hardcore_campaign_v5(args)
         elif args.command == "experiment":
             return _cmd_experiment(args)
         elif args.command == "data":
@@ -303,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 # Command implementations
 # ---------------------------------------------------------------------------
+
 
 def _cmd_run(args) -> int:
     """Run one immutable standard evolution attempt through the V2 executor."""
@@ -385,9 +413,7 @@ def _cmd_queue(args) -> int:
 
     if args.queue_cmd == "add":
         if args.tag:
-            print(
-                "V2 attempt tags are not persisted yet; no queue entries were created."
-            )
+            print("V2 attempt tags are not persisted yet; no queue entries were created.")
             return 2
         config_files = list(args.configs or [])
 
@@ -427,6 +453,7 @@ def _cmd_queue(args) -> int:
 
     elif args.queue_cmd == "start":
         from genetic_algorithm.orchestration.scheduler import RunScheduler
+
         scheduler = RunScheduler(
             max_concurrent=args.max_concurrent,
             persistent=args.persistent,
@@ -437,6 +464,7 @@ def _cmd_queue(args) -> int:
 
     elif args.queue_cmd == "stop":
         from genetic_algorithm.orchestration.scheduler import RunScheduler
+
         RunScheduler.stop_daemon()
         return 0
 
@@ -494,11 +522,7 @@ def _cmd_automation(args) -> int:
         config_path = Path(args.config)
         if not config_path.exists():
             candidate = (
-                repo_root
-                / "genetic_algorithm"
-                / "config"
-                / "presets"
-                / f"{args.config}.yaml"
+                repo_root / "genetic_algorithm" / "config" / "presets" / f"{args.config}.yaml"
             )
             if not candidate.is_file():
                 print(f"Config not found: {args.config}")
@@ -516,20 +540,14 @@ def _cmd_automation(args) -> int:
         config_path = Path(args.config)
         if not config_path.exists():
             candidate = (
-                repo_root
-                / "genetic_algorithm"
-                / "config"
-                / "presets"
-                / f"{args.config}.yaml"
+                repo_root / "genetic_algorithm" / "config" / "presets" / f"{args.config}.yaml"
             )
             if not candidate.is_file():
                 print(f"Config not found: {args.config}")
                 return 1
             config_path = candidate
         state_path = (
-            Path(args.state_db).resolve()
-            if args.state_db
-            else default_state_path(repo_root)
+            Path(args.state_db).resolve() if args.state_db else default_state_path(repo_root)
         )
         output = Path(args.output).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -553,9 +571,7 @@ def _cmd_automation(args) -> int:
         if not receipt_path.is_file():
             print(f"No automation bootstrap found below {automation_root}")
             return 1
-        receipt = AutomationBootstrapReceiptV2.model_validate_json(
-            receipt_path.read_bytes()
-        )
+        receipt = AutomationBootstrapReceiptV2.model_validate_json(receipt_path.read_bytes())
         waves = store.list_waves()
         by_id = {item.wave_id: item for item in waves}
         lineage = []
@@ -563,11 +579,7 @@ def _cmd_automation(args) -> int:
         while current is not None:
             lineage.append(current)
             current = next(
-                (
-                    item
-                    for item in waves
-                    if item.parent_wave_id == current.wave_id
-                ),
+                (item for item in waves if item.parent_wave_id == current.wave_id),
                 None,
             )
         print(
@@ -575,9 +587,7 @@ def _cmd_automation(args) -> int:
                 {
                     "root_wave_id": receipt.intent.wave_id,
                     "policy_hash": receipt.intent.automation_policy_hash,
-                    "kill_switch_present": (
-                        automation_root / "STOP_AUTOMATION"
-                    ).is_file(),
+                    "kill_switch_present": (automation_root / "STOP_AUTOMATION").is_file(),
                     "waves": [
                         {
                             "wave_id": item.wave_id,
@@ -602,13 +612,7 @@ def _cmd_automation(args) -> int:
 
     config_path = Path(args.config)
     if not config_path.exists():
-        candidate = (
-            repo_root
-            / "genetic_algorithm"
-            / "config"
-            / "presets"
-            / f"{args.config}.yaml"
-        )
+        candidate = repo_root / "genetic_algorithm" / "config" / "presets" / f"{args.config}.yaml"
         if not candidate.is_file():
             print(f"Config not found: {args.config}")
             return 1
@@ -658,9 +662,7 @@ def _cmd_hardcore_campaign(args) -> int:
         direct = Path(value)
         if direct.is_file():
             return direct.resolve()
-        preset = (
-            repo_root / "genetic_algorithm/config/presets" / f"{value}.yaml"
-        )
+        preset = repo_root / "genetic_algorithm/config/presets" / f"{value}.yaml"
         if not preset.is_file():
             raise FileNotFoundError(f"Hardcore config not found: {value}")
         return preset.resolve()
@@ -722,28 +724,12 @@ def _cmd_hardcore_campaign(args) -> int:
     is_canary = command == "canary" or (
         command == "preflight" and bool(getattr(args, "canary", False))
     )
-    default_15m = (
-        "hardcore_multipair_canary_15m_v1"
-        if is_canary
-        else "hardcore_multipair_15m_v1"
-    )
-    default_1h = (
-        "hardcore_multipair_canary_1h_v1"
-        if is_canary
-        else "hardcore_multipair_1h_v1"
-    )
+    default_15m = "hardcore_multipair_canary_15m_v1" if is_canary else "hardcore_multipair_15m_v1"
+    default_1h = "hardcore_multipair_canary_1h_v1" if is_canary else "hardcore_multipair_1h_v1"
     config_15m = resolve_config(args.config_15m or default_15m)
     config_1h = resolve_config(args.config_1h or default_1h)
-    default_root = (
-        repo_root
-        / "genetic_algorithm/data/v2/hardcore"
-        / args.campaign_id
-    ).resolve()
-    automation_root = (
-        Path(args.automation_root).resolve()
-        if args.automation_root
-        else default_root
-    )
+    default_root = (repo_root / "genetic_algorithm/data/v2/hardcore" / args.campaign_id).resolve()
+    automation_root = Path(args.automation_root).resolve() if args.automation_root else default_root
 
     if command == "service-unit":
         output = Path(args.output).resolve()
@@ -768,9 +754,7 @@ def _cmd_hardcore_campaign(args) -> int:
         else automation_root / "hardcore_state.sqlite3"
     )
     bootstrap_path = (
-        Path(args.bootstrap_archive).resolve()
-        if getattr(args, "bootstrap_archive", None)
-        else None
+        Path(args.bootstrap_archive).resolve() if getattr(args, "bootstrap_archive", None) else None
     )
     bootstrap_hash = None
     if bootstrap_path is not None:
@@ -794,9 +778,7 @@ def _cmd_hardcore_campaign(args) -> int:
         print(report.model_dump_json(indent=2))
         return 0 if report.ready else 2
 
-    report = require_hardcore_campaign_preflight(
-        policy, repo_root=repo_root, state_path=state_path
-    )
+    report = require_hardcore_campaign_preflight(policy, repo_root=repo_root, state_path=state_path)
     automation_root.mkdir(parents=True, exist_ok=True)
     preflight_path = automation_root / "start_preflight.json"
     preflight_payload = (report.model_dump_json(indent=2) + "\n").encode("utf-8")
@@ -807,9 +789,7 @@ def _cmd_hardcore_campaign(args) -> int:
         expected = preflight_checksum.read_text(encoding="ascii").strip()
         if hashlib.sha256(preflight_path.read_bytes()).hexdigest() != expected:
             raise RuntimeError("existing start preflight checksum differs")
-        existing = HardcoreCampaignPreflightV1.model_validate_json(
-            preflight_path.read_bytes()
-        )
+        existing = HardcoreCampaignPreflightV1.model_validate_json(preflight_path.read_bytes())
         stable_fields = (
             "ready",
             "campaign_id",
@@ -849,6 +829,114 @@ def _cmd_hardcore_campaign(args) -> int:
     return 2 if tick.outcome.value == "BLOCKED" else 0
 
 
+def _cmd_hardcore_campaign_v5(args) -> int:
+    """Operate the isolated V5 campaign without reusing V1 lane semantics."""
+
+    import hashlib
+    import subprocess
+    import time
+
+    from genetic_algorithm.config.schema import load_config
+    from genetic_algorithm.orchestration.hardcore_backend_v5 import V2HardcoreAttemptBackendV5
+    from genetic_algorithm.orchestration.hardcore_campaign_v5 import (
+        HardcoreCampaignControllerV5,
+        default_hardcore_campaign_policy_v5,
+    )
+    from genetic_algorithm.orchestration.runner_v2 import repository_root
+
+    repo = repository_root()
+    command = args.hardcore_v5_cmd
+    if command == "status":
+        path = Path(args.automation_root).resolve() / "campaign_state_v5.json"
+        checksum = path.with_suffix(path.suffix + ".sha256")
+        if not path.is_file() or not checksum.is_file():
+            return 1
+        if (
+            hashlib.sha256(path.read_bytes()).hexdigest()
+            != checksum.read_text(encoding="ascii").strip()
+        ):
+            return 2
+        print(path.read_text(encoding="utf-8"))
+        return 0
+    if command == "stop":
+        root = Path(args.automation_root).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "STOP_HARDCORE_CAMPAIGN_V5").touch(exist_ok=True)
+        return 0
+
+    def resolve(value: str | None, default: str) -> Path:
+        requested = Path(value or default)
+        if requested.is_file():
+            return requested.resolve()
+        result = repo / "genetic_algorithm/config/presets" / f"{requested}.yaml"
+        if not result.is_file():
+            raise FileNotFoundError(f"V5 config not found: {requested}")
+        return result.resolve()
+
+    configs = {
+        "15m": resolve(args.config_15m, "hardcore_multipair_v5_15m"),
+        "1h": resolve(args.config_1h, "hardcore_multipair_v5_1h"),
+        "4h": resolve(args.config_4h, "hardcore_multipair_v5_4h"),
+    }
+    configs_valid = all(
+        load_config(path)["backtesting"]["timeframe"] == lane
+        and load_config(path)["raw_multipair_score"]["policy_version"] == "raw-multipair-score-v5"
+        for lane, path in configs.items()
+    )
+    clean = (
+        subprocess.run(
+            ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=False
+        ).stdout.strip()
+        == ""
+    )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=False
+    )
+    upstream = subprocess.run(
+        ["git", "rev-parse", "@{u}"], cwd=repo, capture_output=True, text=True, check=False
+    )
+    pushed = head.returncode == upstream.returncode == 0 and head.stdout == upstream.stdout
+    if command == "preflight":
+        print(
+            json.dumps(
+                {
+                    "ready": configs_valid and clean and pushed,
+                    "configs_valid": configs_valid,
+                    "clean": clean,
+                    "pushed": pushed,
+                },
+                indent=2,
+            )
+        )
+        return 0 if configs_valid and clean and pushed else 2
+    if command not in {"start", "canary"} or not (configs_valid and clean and pushed):
+        return 2
+    root = (
+        Path(args.automation_root).resolve()
+        if args.automation_root
+        else repo / "genetic_algorithm/data/v2/hardcore" / args.campaign_id
+    )
+    policy = default_hardcore_campaign_policy_v5(
+        campaign_id=args.campaign_id,
+        automation_root=root,
+        config_15m=configs["15m"],
+        config_1h=configs["1h"],
+        config_4h=configs["4h"],
+        canary=command == "canary",
+    )
+    state = Path(args.state_db).resolve() if args.state_db else root / "hardcore_v5_state.sqlite3"
+    with V2HardcoreAttemptBackendV5(
+        state_path=state, automation_root=root, repo_root=repo
+    ) as backend:
+        controller = HardcoreCampaignControllerV5(policy=policy, backend=backend)
+        while True:
+            current = controller.tick()
+            print(json.dumps(current, sort_keys=True))
+            if current["lifecycle"] != "RUNNING" or getattr(args, "once", False):
+                return 0 if current["lifecycle"] == "COMPLETED" else 2
+            time.sleep(5)
+
+
 def _cmd_experiment(args) -> int:
     """Experiment management commands."""
     if args.exp_cmd is None:
@@ -859,9 +947,7 @@ def _cmd_experiment(args) -> int:
     from genetic_algorithm.orchestration.experiment_catalog_v2 import ExperimentCatalogV2
     from genetic_algorithm.orchestration.runner_v2 import default_state_path
 
-    catalog = ExperimentCatalogV2(
-        AttemptStateStoreV2(args.state_db or default_state_path())
-    )
+    catalog = ExperimentCatalogV2(AttemptStateStoreV2(args.state_db or default_state_path()))
     include_legacy = not args.canonical_only
 
     if args.exp_cmd == "list":
@@ -881,8 +967,7 @@ def _cmd_experiment(args) -> int:
             fit = f"{exp.best_score:.4f}" if exp.best_score is not None else "-"
             created = exp.created_at.isoformat()[:19] if exp.created_at else "-"
             tags = ", ".join(exp.tags)
-            print(f"{exp.experiment_id:<30} {exp.status:<12} "
-                  f"{fit:<10} {created:<22} {tags}")
+            print(f"{exp.experiment_id:<30} {exp.status:<12} {fit:<10} {created:<22} {tags}")
         return 0
 
     elif args.exp_cmd == "show":
@@ -897,10 +982,7 @@ def _cmd_experiment(args) -> int:
         return 0
 
     elif args.exp_cmd == "compare":
-        experiments = [
-            catalog.get_record(eid, include_legacy=include_legacy)
-            for eid in args.ids
-        ]
+        experiments = [catalog.get_record(eid, include_legacy=include_legacy) for eid in args.ids]
         experiments = [e for e in experiments if e]
         if not experiments:
             print("No matching experiments found.")
@@ -940,6 +1022,7 @@ def _cmd_data(args) -> int:
     """Data management commands."""
     if args.data_cmd == "report":
         from genetic_algorithm.orchestration.lifecycle import DataLifecycle
+
         lifecycle = DataLifecycle(dry_run=True, state_path=args.state_db)
         report = lifecycle.report()
 
@@ -948,6 +1031,7 @@ def _cmd_data(args) -> int:
         for cat, size in sorted(report["categories"].items()):
             if size > 0:
                 from genetic_algorithm.orchestration.lifecycle import _human_bytes
+
                 print(f"  {cat:<20} {_human_bytes(size):>10}")
         print(f"  {'TOTAL':<20} {report['total_human']:>10}")
         print(f"  Files: {report['file_count']}")
@@ -960,10 +1044,13 @@ def _cmd_data(args) -> int:
 
     elif args.data_cmd == "cleanup":
         from genetic_algorithm.orchestration.lifecycle import DataLifecycle
+
         lifecycle = DataLifecycle(dry_run=args.dry_run, state_path=args.state_db)
         result = lifecycle.run()
-        print(f"Archived: {result['archived']}, Deleted: {result['deleted']}"
-              f"{' (dry-run)' if result.get('dry_run') else ''}")
+        print(
+            f"Archived: {result['archived']}, Deleted: {result['deleted']}"
+            f"{' (dry-run)' if result.get('dry_run') else ''}"
+        )
         return 0
 
     elif args.data_cmd == "backfill":
@@ -971,9 +1058,7 @@ def _cmd_data(args) -> int:
         from genetic_algorithm.orchestration.experiment_catalog_v2 import ExperimentCatalogV2
         from genetic_algorithm.orchestration.runner_v2 import default_state_path
 
-        catalog = ExperimentCatalogV2(
-            AttemptStateStoreV2(args.state_db or default_state_path())
-        )
+        catalog = ExperimentCatalogV2(AttemptStateStoreV2(args.state_db or default_state_path()))
         receipt = catalog.import_legacy_registry(args.registry)
         state = "already imported" if receipt.already_imported else "imported"
         print(
@@ -987,9 +1072,7 @@ def _cmd_data(args) -> int:
         from genetic_algorithm.orchestration.experiment_catalog_v2 import ExperimentCatalogV2
         from genetic_algorithm.orchestration.runner_v2 import default_state_path
 
-        catalog = ExperimentCatalogV2(
-            AttemptStateStoreV2(args.state_db or default_state_path())
-        )
+        catalog = ExperimentCatalogV2(AttemptStateStoreV2(args.state_db or default_state_path()))
         exported = catalog.export_json(
             args.output,
             include_legacy=not args.canonical_only,
@@ -1010,9 +1093,11 @@ def _cmd_serve(args) -> int:
     try:
         import uvicorn
         from genetic_algorithm.web.server import create_app  # noqa: F401
+
         print(f"Starting web dashboard on {args.host}:{args.port}")
-        uvicorn.run("genetic_algorithm.web.server:create_app", host=args.host,
-                     port=args.port, factory=True)
+        uvicorn.run(
+            "genetic_algorithm.web.server:create_app", host=args.host, port=args.port, factory=True
+        )
         return 0
     except ImportError as e:
         print(f"Web dependencies not installed: {e}")
@@ -1104,6 +1189,7 @@ def _cmd_config(args) -> int:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _detect_ga_type(config: dict) -> str:
     """Detect which GA engine to use from config."""

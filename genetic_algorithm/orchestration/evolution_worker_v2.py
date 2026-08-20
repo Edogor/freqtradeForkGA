@@ -1072,12 +1072,23 @@ def run_evolution_worker(
         if hardcore:
             quarantine_path = Path(loaded.spec.output_layout.runtime_dir) / "seed_quarantine.json"
             quarantine_path.parent.mkdir(parents=True, exist_ok=True)
+            preflight_quarantine: list[dict[str, str]] = []
+            if quarantine_path.exists():
+                try:
+                    existing = json.loads(quarantine_path.read_text(encoding="utf-8"))
+                    rows = existing.get("quarantined", []) if isinstance(existing, dict) else []
+                    if isinstance(rows, list):
+                        preflight_quarantine = [row for row in rows if isinstance(row, dict)]
+                except (OSError, json.JSONDecodeError):
+                    # The preflight artifact itself is evidence; an unreadable
+                    # one is a real worker error and must not be hidden.
+                    raise EvolutionWorkerError("preflight seed quarantine is unreadable")
             quarantine_path.write_text(
                 json.dumps(
                     {
                         "schema_version": "2.0",
-                        "quarantine_version": "hardcore-seed-quarantine-v2",
-                        "quarantined": quarantined_seeds,
+                        "quarantine_version": "hardcore-seed-quarantine-v3",
+                        "quarantined": preflight_quarantine + quarantined_seeds,
                         "accepted_candidate_ids": [
                             item.metrics["archive_candidate_id"] for item in strict_seeds
                         ],

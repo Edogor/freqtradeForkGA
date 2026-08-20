@@ -31,8 +31,15 @@ from genetic_algorithm.evaluation.raw_multipair_score import (
     RawMultiPairPolicyV4,
     score_raw_multipair,
 )
+from genetic_algorithm.evaluation.raw_multipair_score_v5 import (
+    RAW_MULTIPAIR_SCORE_V5_VERSION,
+    RawMultiPairPanelV5,
+    RawMultiPairPolicyV5,
+    score_raw_multipair_v5,
+)
 from genetic_algorithm.evaluation.period_provenance import (
     validate_exact_period_evidence,
+    validate_exact_period_timestamps_v5,
 )
 from genetic_algorithm.strategies.generator import StrategyGenerator
 from genetic_algorithm.utils.timerange import (
@@ -120,11 +127,16 @@ class FitnessEvaluator:
         self.raw_multipair_score_enabled = bool(
             self.raw_multipair_score_config.get('enabled', False)
         )
-        self.raw_multipair_panel: Optional[RawMultiPairPanel] = None
+        self.raw_multipair_panel: Optional[RawMultiPairPanel | RawMultiPairPanelV5] = None
+        self.raw_multipair_score_version = str(
+            self.raw_multipair_score_config.get(
+                'policy_version', 'raw-multipair-score-v4'
+            )
+        )
         if self.raw_multipair_score_enabled:
             if self.walk_forward_config.get('enabled', False):
                 raise ValueError(
-                    'raw-multipair-score-v4 forbids walk-forward evaluation'
+                    'raw-multipair-score forbids walk-forward evaluation'
                 )
             if (
                 not self.pair_validation_enabled
@@ -133,31 +145,46 @@ class FitnessEvaluator:
                 or self.validate_top_n_only != 0
             ):
                 raise ValueError(
-                    'raw-multipair-score-v4 requires immediate independent '
+                    'raw-multipair-score requires immediate independent '
                     'evaluation of every pair'
                 )
-            self.raw_multipair_panel = RawMultiPairPanel(
-                timeframe=str(config.get('backtesting', {}).get('timeframe', '')),
-                development_pairs=tuple(
+            common_panel_args = {
+                'timeframe': str(config.get('backtesting', {}).get('timeframe', '')),
+                'development_pairs': tuple(
                     self.raw_multipair_score_config.get('development_pairs', [])
                 ),
-                validation_pairs=tuple(
+                'validation_pairs': tuple(
                     self.raw_multipair_score_config.get('validation_pairs', [])
                 ),
-                period_start=date.fromisoformat(
-                    str(self.raw_multipair_score_config.get('period_start'))
-                ),
-                period_end=date.fromisoformat(
-                    str(self.raw_multipair_score_config.get('period_end'))
-                ),
-                fee_rate=float(config.get('backtesting', {}).get('fee', 0.0)),
-                slippage_rate=float(
+                'fee_rate': float(config.get('backtesting', {}).get('fee', 0.0)),
+                'slippage_rate': float(
                     config.get('backtesting', {}).get('slippage_pct', 0.0)
                 ),
-                policy=RawMultiPairPolicyV4.from_mapping(
-                    self.raw_multipair_score_config.get('policy')
-                ),
-            )
+            }
+            if self.raw_multipair_score_version == RAW_MULTIPAIR_SCORE_V5_VERSION:
+                self.raw_multipair_panel = RawMultiPairPanelV5(
+                    **common_panel_args,
+                    policy=RawMultiPairPolicyV5.from_mapping(
+                        self.raw_multipair_score_config.get('policy')
+                    ),
+                )
+            elif self.raw_multipair_score_version == 'raw-multipair-score-v4':
+                self.raw_multipair_panel = RawMultiPairPanel(
+                    **common_panel_args,
+                    period_start=date.fromisoformat(
+                        str(self.raw_multipair_score_config.get('period_start'))
+                    ),
+                    period_end=date.fromisoformat(
+                        str(self.raw_multipair_score_config.get('period_end'))
+                    ),
+                    policy=RawMultiPairPolicyV4.from_mapping(
+                        self.raw_multipair_score_config.get('policy')
+                    ),
+                )
+            else:
+                raise ValueError(
+                    'raw_multipair_score.policy_version must be v4 or v5'
+                )
         
         # Fitness bounds for clamping extreme values
         fitness_bounds = config.get('fitness_bounds', {})
@@ -1007,14 +1034,24 @@ class FitnessEvaluator:
                 continue
             trades = raw.get('num_trades')
             active_months = raw.get('active_months')
-            period_evidence = validate_exact_period_evidence(
-                expected_start=panel.period_start,
-                expected_end=panel.period_end,
-                observed_start=raw.get('period_start'),
-                observed_end=raw.get('period_end'),
-                evidence_label=pair,
-                timeframe=panel.timeframe,
-            )
+            if isinstance(panel, RawMultiPairPanelV5):
+                period_evidence = validate_exact_period_timestamps_v5(
+                    expected_start=panel.period_start,
+                    expected_end=panel.period_end,
+                    observed_start=raw.get('period_start'),
+                    observed_end=raw.get('period_end'),
+                    evidence_label=pair,
+                    timeframe=panel.timeframe,
+                )
+            else:
+                period_evidence = validate_exact_period_evidence(
+                    expected_start=panel.period_start,
+                    expected_end=panel.period_end,
+                    observed_start=raw.get('period_start'),
+                    observed_end=raw.get('period_end'),
+                    evidence_label=pair,
+                    timeframe=panel.timeframe,
+                )
             if not period_evidence.valid:
                 scenarios.append(
                     PairScenario(
@@ -1070,7 +1107,11 @@ class FitnessEvaluator:
                 )
             )
 
-        result = score_raw_multipair(panel, scenarios)
+        result = (
+            score_raw_multipair_v5(panel, scenarios)
+            if isinstance(panel, RawMultiPairPanelV5)
+            else score_raw_multipair(panel, scenarios)
+        )
         raw_evidence = {scenario.pair: scenario.to_dict() for scenario in scenarios}
         per_pair_profit = {
             pair: float(metrics['profit'])
@@ -1088,6 +1129,37 @@ class FitnessEvaluator:
             and not isinstance(metrics.get('max_drawdown'), bool)
             and math.isfinite(float(metrics['max_drawdown']))
         ]
+        raw_behavior_vector: list[float] = []
+        if result.is_valid:
+            components_by_pair = result.pair_component_map()
+            for pair in (*panel.development_pairs, *panel.validation_pairs):
+                vector = components_by_pair[pair].components
+                raw_behavior_vector.extend(
+                    [
+                        vector.edge_score,
+                        vector.activity_score,
+                        vector.productive_frequency_score,
+                        vector.return_score,
+                        vector.drawdown_risk,
+                        vector.drawdown_duration_risk,
+                    ]
+                )
+        raw_logic_tokens = sorted(
+            {
+                *(
+                    f'indicator:{indicator.type}'
+                    for indicator in getattr(strategy_gene, 'indicators', [])
+                ),
+                *(
+                    f'entry:{condition.operator}:{condition.logic}'
+                    for condition in getattr(strategy_gene, 'entry_conditions', [])
+                ),
+                *(
+                    f'exit:{condition.operator}:{condition.logic}'
+                    for condition in getattr(strategy_gene, 'exit_conditions', [])
+                ),
+            }
+        )
         base_metrics: Dict[str, Any] = {
             'raw_multipair_score_version': result.score_version,
             'raw_multipair_panel_id': result.panel_id,
@@ -1097,6 +1169,8 @@ class FitnessEvaluator:
             # Behavioral diversity consumes actual six-pair outcomes.  These
             # values are descriptive only and never enter raw fitness.
             'per_pair_profit': per_pair_profit,
+            'raw_behavior_vector': raw_behavior_vector,
+            'raw_logic_tokens': raw_logic_tokens,
             'max_drawdown': max(measured_drawdowns, default=0.0),
             'independent_pair_evaluation': True,
             'training_pairs': ','.join(panel.development_pairs),

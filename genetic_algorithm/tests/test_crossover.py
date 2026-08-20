@@ -15,6 +15,7 @@ from genetic_algorithm.core.crossover import (
     single_point_crossover,
     uniform_crossover,
     component_crossover,
+    cross_niche_union_crossover,
     crossover,
     _enforce_min_entry_conditions,
     _uniform_crossover_lists,
@@ -363,3 +364,22 @@ class TestEdgeCases:
             assert len(c1.strategy_gene.entry_conditions) >= 1
             assert len(c2.strategy_gene.indicators) >= 1
             assert len(c2.strategy_gene.entry_conditions) >= 1
+
+
+class TestCrossNicheUnion:
+    def test_one_indicator_parents_retain_material_from_both_niches(self):
+        edge = _make_parent('A', n_indicators=1, n_entry=1, n_exit=1)
+        activity = _make_parent('B', n_indicators=1, n_entry=1, n_exit=1)
+        child, sibling = cross_niche_union_crossover(
+            edge,
+            activity,
+            generation=3,
+            ind_id=10,
+            config={'indicators': {'max_per_strategy': 5, 'min_entry_conditions': 1}},
+        )
+        for offspring in (child, sibling):
+            types = {item.type for item in offspring.strategy_gene.indicators}
+            assert 'RSI' in types
+            assert 'STOCH' in types
+            assert offspring.strategy_gene.generation == 3
+            assert len(offspring.strategy_gene.entry_conditions) >= 1

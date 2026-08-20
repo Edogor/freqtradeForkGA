@@ -58,6 +58,8 @@ def _timeframe_delta(timeframe: str) -> timedelta:
         return timedelta(minutes=15)
     if timeframe == "1h":
         return timedelta(hours=1)
+    if timeframe == "4h":
+        return timedelta(hours=4)
     raise ValueError(f"unsupported exact-panel timeframe: {timeframe!r}")
 
 
@@ -139,4 +141,53 @@ def validate_exact_period_evidence(
         period_end=parsed_end.day,
         measured_start=parsed_start.timestamp,
         measured_end=parsed_end.timestamp,
+    )
+
+
+def validate_exact_period_timestamps_v5(
+    *,
+    expected_start: datetime,
+    expected_end: datetime,
+    observed_start: Any,
+    observed_end: Any,
+    evidence_label: str,
+    timeframe: str,
+) -> ExactPeriodEvidence:
+    """V5 exact-candle provenance with non-midnight 4h panel support.
+
+    V4 intentionally accepted date declarations and derived its first/last
+    candle.  V5 binds timestamps directly because the honest 4h PEPE panel
+    starts at 04:00 UTC after its required warmup history.
+    """
+
+    if expected_start.tzinfo is None or expected_end.tzinfo is None:
+        raise ValueError("expected V5 period timestamps must be timezone aware")
+    _timeframe_delta(timeframe)  # Reject unsupported lanes consistently.
+    start = _as_boundary(observed_start)
+    end = _as_boundary(observed_end)
+    if start is None or end is None or start.timestamp is None or end.timestamp is None:
+        return ExactPeriodEvidence(
+            period_start=start.day if start is not None else None,
+            period_end=end.day if end is not None else None,
+            measured_start=start.timestamp if start is not None else None,
+            measured_end=end.timestamp if end is not None else None,
+            error_code=MISSING_PERIOD_EVIDENCE,
+            error_detail=f"{evidence_label} requires exact {timeframe} UTC timestamps",
+        )
+    expected = (expected_start.astimezone(UTC), expected_end.astimezone(UTC))
+    observed = (start.timestamp, end.timestamp)
+    if observed != expected:
+        return ExactPeriodEvidence(
+            period_start=start.day,
+            period_end=end.day,
+            measured_start=start.timestamp,
+            measured_end=end.timestamp,
+            error_code=PERIOD_COVERAGE_MISMATCH,
+            error_detail=f"{evidence_label} measured={observed}, expected={expected}",
+        )
+    return ExactPeriodEvidence(
+        period_start=start.day,
+        period_end=end.day,
+        measured_start=start.timestamp,
+        measured_end=end.timestamp,
     )

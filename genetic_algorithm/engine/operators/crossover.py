@@ -7,6 +7,7 @@ strategies to create offspring.
 
 import copy
 import random
+from itertools import zip_longest
 from typing import Tuple
 
 from genetic_algorithm.core.individual import Individual
@@ -596,6 +597,108 @@ def component_crossover(parent1: Individual, parent2: Individual,
             Individual(strategy_gene=child2_gene, parent_ids=[parent1.id, parent2.id]))
 
 
+def cross_niche_union_crossover(
+    parent1: Individual,
+    parent2: Individual,
+    generation: int,
+    ind_id: int,
+    config: dict | None = None,
+) -> Tuple[Individual, Individual]:
+    """Create bridge children that retain structural material from both parents.
+
+    Normal point crossover cannot exchange a one-indicator parent.  This
+    operator is deliberately generic: it unions genes and conditions without
+    prescribing an entry/exit rule, then lets the normal crossover cleanup and
+    later mutation decide the executable strategy.
+    """
+
+    child1_gene = parent1.strategy_gene.copy()
+    child2_gene = parent2.strategy_gene.copy()
+    child1_gene.indicators = _interleaved_indicator_union(
+        parent1.strategy_gene.indicators,
+        parent2.strategy_gene.indicators,
+        config,
+    )
+    child2_gene.indicators = _interleaved_indicator_union(
+        parent2.strategy_gene.indicators,
+        parent1.strategy_gene.indicators,
+        config,
+    )
+    for attr in (
+        "entry_conditions",
+        "exit_conditions",
+        "short_entry_conditions",
+        "short_exit_conditions",
+    ):
+        setattr(
+            child1_gene,
+            attr,
+            _interleaved_condition_union(
+                getattr(parent1.strategy_gene, attr),
+                getattr(parent2.strategy_gene, attr),
+            ),
+        )
+        setattr(
+            child2_gene,
+            attr,
+            _interleaved_condition_union(
+                getattr(parent2.strategy_gene, attr),
+                getattr(parent1.strategy_gene, attr),
+            ),
+        )
+
+    # Risk/execution scalars remain ordinary heritable material rather than a
+    # bridge-specific trading rule.
+    if random.random() < 0.5:
+        for attr in ("stoploss", "minimal_roi", "trailing_stop", "trailing_stop_positive", "trailing_stop_positive_offset"):
+            left, right = getattr(parent1.strategy_gene, attr), getattr(parent2.strategy_gene, attr)
+            setattr(child1_gene, attr, copy.deepcopy(right))
+            setattr(child2_gene, attr, copy.deepcopy(left))
+    for offset, gene in enumerate((child1_gene, child2_gene)):
+        gene.generation = generation
+        gene.individual_id = ind_id + offset
+        _finalize_crossover_gene(gene, config or {})
+    return (
+        Individual(strategy_gene=child1_gene, parent_ids=[parent1.id, parent2.id]),
+        Individual(strategy_gene=child2_gene, parent_ids=[parent1.id, parent2.id]),
+    )
+
+
+def _interleaved_indicator_union(first, second, config: dict | None):
+    """Union indicators while reserving a slot for both parent sources."""
+
+    maximum = int((config or {}).get("indicators", {}).get("max_per_strategy", 5))
+    maximum = max(2, maximum)
+    result = []
+    seen = set()
+    for left, right in zip_longest(first, second):
+        for indicator in (left, right):
+            if indicator is None:
+                continue
+            key = (
+                indicator.type,
+                tuple(sorted((indicator.parameters or {}).items())),
+                indicator.timeframe,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(copy.deepcopy(indicator))
+            if len(result) >= maximum:
+                return result
+    return result
+
+
+def _interleaved_condition_union(first, second):
+    result = []
+    for left, right in zip_longest(first, second):
+        if left is not None:
+            result.append(copy.deepcopy(left))
+        if right is not None:
+            result.append(copy.deepcopy(right))
+    return result
+
+
 def crossover(parent1: Individual, parent2: Individual,
              generation: int, ind_id: int,
              method: str = 'single_point',
@@ -620,6 +723,7 @@ def crossover(parent1: Individual, parent2: Individual,
         'single_point': single_point_crossover,
         'uniform': uniform_crossover,
         'component': component_crossover,
+        'cross_niche_union': cross_niche_union_crossover,
     }
     
     if method not in crossover_methods:

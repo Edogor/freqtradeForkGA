@@ -75,6 +75,7 @@ from genetic_algorithm.engine.operators.crossover import (
     _enforce_min_entry_conditions,
     _fix_invalid_operators,
     crossover,
+    cross_niche_union_crossover,
 )
 from genetic_algorithm.engine.operators.mutation import mutate
 from genetic_algorithm.evaluation.fitness import FitnessEvaluator
@@ -307,6 +308,9 @@ class GenericIslandModelEvolution:
         )
         self.cross_niche_offspring_per_generation = int(
             archive_cfg.get('cross_niche_offspring_per_generation', 0)
+        )
+        self.cross_niche_union_enabled = bool(
+            archive_cfg.get('cross_niche_union_crossover', False)
         )
         graceful_marker = gim_cfg.get('graceful_stop_marker')
         self.graceful_stop_marker = (
@@ -1768,17 +1772,39 @@ class GenericIslandModelEvolution:
         island_name: str,
         generation: int,
     ) -> None:
-        """Reserve a tiny bridge budget for EDGE x ACTIVITY recombination."""
+        """Reserve a bridge budget for EDGE/Productive/Activity recombination."""
 
         count = self.cross_niche_offspring_per_generation
         if count <= 0 or island_name not in self.archive_seeding_island_names:
             return
         seeds = self._archive_initial_seeds.get(island_name, [])
-        edge = [item for item in seeds if item.metrics.get('archive_niche') == 'EDGE']
+        evaluated = self._evaluated_generation_populations.get(island_name, [])
+
+        def component(individual: Individual, name: str) -> float:
+            result = individual.metrics.get('raw_multipair_result', {})
+            aggregate = result.get('aggregate_components', {}) if isinstance(result, dict) else {}
+            value = aggregate.get(name) if isinstance(aggregate, dict) else None
+            return float(value) if isinstance(value, (int, float)) else float('-inf')
+
+        def live_top(name: str) -> list[Individual]:
+            return sorted(
+                [
+                    item for item in evaluated
+                    if item.metrics.get('raw_multipair_status') == 'VALID'
+                ],
+                key=lambda item: component(item, name),
+                reverse=True,
+            )[:3]
+
+        # Archive parents preserve across-run learning, while live leaders
+        # make the bridge react to newly discovered niches in this generation.
+        edge = [item for item in seeds if item.metrics.get('archive_niche') == 'EDGE'] + live_top('edge_score')
         activity = [
-            item for item in seeds if item.metrics.get('archive_niche') == 'ACTIVITY'
-        ]
-        if not edge or not activity:
+            item for item in seeds if item.metrics.get('archive_niche') == 'ACTIVITY'] + live_top('activity_score')
+        productive = [
+            item for item in seeds if item.metrics.get('archive_niche') == 'PRODUCTIVE'] + live_top('productive_frequency_score')
+        secondary = productive or activity
+        if not edge or not secondary:
             return
         replacements: list[Individual] = []
         attempts = 0
@@ -1791,16 +1817,40 @@ class GenericIslandModelEvolution:
                 )
                 break
             parent_edge = random.choice(edge)
-            parent_activity = random.choice(activity)
+            # Alternate productive and activity secondary parents when both
+            # frontiers exist; this gives each bridge two cross-niche children
+            # of each kind in the V5 production configuration.
+            selected_secondary = (
+                productive if productive and (len(replacements) // 2) % 2 == 0 else activity
+            ) or secondary
+            parent_secondary = random.choice(selected_secondary)
+            parent_niches = [
+                'EDGE',
+                'PRODUCTIVE' if selected_secondary is productive else 'ACTIVITY',
+            ]
             try:
-                child1, child2 = crossover(
-                    parent_edge,
-                    parent_activity,
-                    generation=generation,
-                    ind_id=max(0, population.size - count + len(replacements)),
-                    config=ga.config,
-                    method=ga.crossover_method,
+                crossover_fn = (
+                    cross_niche_union_crossover
+                    if self.cross_niche_union_enabled
+                    else crossover
                 )
+                if self.cross_niche_union_enabled:
+                    child1, child2 = crossover_fn(
+                        parent_edge,
+                        parent_secondary,
+                        generation=generation,
+                        ind_id=max(0, population.size - count + len(replacements)),
+                        config=ga.config,
+                    )
+                else:
+                    child1, child2 = crossover_fn(
+                        parent_edge,
+                        parent_secondary,
+                        generation=generation,
+                        ind_id=max(0, population.size - count + len(replacements)),
+                        config=ga.config,
+                        method=ga.crossover_method,
+                    )
             except (TypeError, ValueError) as exc:
                 self.logger.warning(
                     '[BRIDGE] Quarantined incompatible EDGE/ACTIVITY mating on %s: %s',
@@ -1819,7 +1869,11 @@ class GenericIslandModelEvolution:
                 child.raw_fitness = None
                 child.metrics = {
                     'origin': 'cross_niche_bridge',
-                    'parent_niches': ['EDGE', 'ACTIVITY'],
+                    'parent_niches': parent_niches,
+                    'cross_niche_operator': (
+                        'union' if self.cross_niche_union_enabled else ga.crossover_method
+                    ),
+                    'parent_ids': [parent_edge.id, parent_secondary.id],
                 }
                 replacements.append(child)
         if replacements:

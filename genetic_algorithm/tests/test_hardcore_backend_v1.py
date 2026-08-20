@@ -21,6 +21,7 @@ from genetic_algorithm.orchestration.hardcore_backend_v1 import (
     _live_engine_progress,
     _live_pair_metrics,
     _materialized_config,
+    _quarantine_incompatible_archive_seeds,
     _scenario_from_record,
     _strict_replay_top_n,
 )
@@ -36,6 +37,38 @@ from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
 
 
 NOW = datetime(2026, 8, 12, tzinfo=UTC)
+
+
+def test_incompatible_optional_archive_seed_is_quarantined_not_a_lane_failure(monkeypatch):
+    import genetic_algorithm.orchestration.hardcore_backend_v1 as backend
+
+    good = SimpleNamespace(candidate_id="good")
+    stale = SimpleNamespace(candidate_id="stale")
+    config = {
+        "generic_island_model": {
+            "archive_seeding": {
+                "assignments": {
+                    "bridge-1": [
+                        {"candidate_id": "good", "niche": "EDGE"},
+                        {"candidate_id": "stale", "niche": "PRODUCTIVE"},
+                    ]
+                }
+            }
+        }
+    }
+
+    def validate(seed, _config):
+        if seed.candidate_id == "stale":
+            raise evolution_worker_v2.EvolutionWorkerError("seed cannot reproduce")
+
+    monkeypatch.setattr(backend, "validate_evolution_seed", validate)
+    accepted, quarantined = _quarantine_incompatible_archive_seeds(config, [good, stale])
+
+    assert [item.candidate_id for item in accepted] == ["good"]
+    assert quarantined == [{"candidate_id": "stale", "reason": "seed cannot reproduce"}]
+    assert config["generic_island_model"]["archive_seeding"]["assignments"]["bridge-1"] == [
+        {"candidate_id": "good", "niche": "EDGE"}
+    ]
 
 
 def test_live_progress_uses_raw_score_and_checkpoint_plateau(tmp_path):

@@ -9,6 +9,7 @@ import pytest
 from genetic_algorithm.evaluation.direct_backtester import BacktestResult
 from genetic_algorithm.evaluation.fitness import FitnessEvaluator
 from genetic_algorithm.evaluation.raw_multipair_score import RawMultiPairPanel
+from genetic_algorithm.evaluation.raw_multipair_score_v5 import RawMultiPairPanelV5
 from genetic_algorithm.engine.population import calculate_behavioral_distance
 
 
@@ -119,6 +120,22 @@ def test_raw_pair_outcomes_drive_behavioral_diversity():
     )
     assert distance is not None
     assert distance > 0.0
+
+
+def test_v5_behavioral_distance_combines_pair_profile_and_logic_tokens():
+    first = SimpleNamespace(
+        metrics={
+            "raw_behavior_vector": [0.2, 0.3, 0.1, 0.2, 0.1, 0.1] * 6,
+            "raw_logic_tokens": ["indicator:ATR", "entry:>:AND"],
+        }
+    )
+    second = SimpleNamespace(
+        metrics={
+            "raw_behavior_vector": [0.2, 0.3, 0.1, 0.2, 0.1, 0.1] * 6,
+            "raw_logic_tokens": ["indicator:CMF", "entry:<:OR"],
+        }
+    )
+    assert calculate_behavioral_distance(first, second) == pytest.approx(0.5)
 
 
 def test_missing_raw_metric_marks_candidate_as_technical_evidence_failure():
@@ -246,3 +263,35 @@ def test_raw_search_and_strict_replay_share_exact_wallet_net_return():
 
     assert raw_metrics["net_return"] == pytest.approx(0.0123456)
     assert raw_metrics["net_return"] != result.profit_percent / 100.0
+
+
+def test_v5_fitness_path_accepts_exact_4h_panel_only():
+    evaluator = object.__new__(FitnessEvaluator)
+    evaluator.raw_multipair_panel = RawMultiPairPanelV5(timeframe="4h")
+    panel = evaluator.raw_multipair_panel
+    start = panel.period_start.isoformat()
+    end = panel.period_end.isoformat()
+    train = _summary(panel.development_pairs)
+    val = _summary(panel.validation_pairs)
+    for group in (train, val):
+        for item in group["independent_pair_metrics"].values():
+            item["period_start"] = start
+            item["period_end"] = end
+    score, metrics = evaluator._score_raw_complete_panel(
+        train_metrics=train,
+        val_metrics=val,
+        strategy_gene=_gene(),
+    )
+    assert score != 0.0
+    assert metrics["raw_multipair_score_version"] == "raw-multipair-score-v5"
+
+    train["independent_pair_metrics"]["BTC/USDT"]["period_start"] = (
+        "2023-05-18T08:00:00+00:00"
+    )
+    score, metrics = evaluator._score_raw_complete_panel(
+        train_metrics=train,
+        val_metrics=val,
+        strategy_gene=_gene(),
+    )
+    assert score == 0.0
+    assert "PERIOD_COVERAGE_MISMATCH" in metrics["error"]

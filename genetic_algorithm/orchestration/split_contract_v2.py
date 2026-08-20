@@ -68,7 +68,9 @@ _TIMERANGE_PATTERN = re.compile(r"^(\d{8})-(\d{8})$")
 _EPOCH_TIMERANGE_PATTERN = re.compile(r"^(\d{10})-(\d{10})$")
 
 
-def _parse_closed_config_timerange(value: object) -> tuple[date, date]:
+def _parse_closed_config_timerange(
+    value: object, *, allow_intraday_start: bool = False
+) -> tuple[date, date]:
     if not isinstance(value, str):
         raise SplitContractError("backtesting.timerange must be an explicit closed timerange")
     match = _TIMERANGE_PATTERN.fullmatch(value)
@@ -85,7 +87,7 @@ def _parse_closed_config_timerange(value: object) -> tuple[date, date]:
         else:
             start_at = datetime.fromtimestamp(int(epoch_match.group(1)), tz=UTC)
             stop_at = datetime.fromtimestamp(int(epoch_match.group(2)), tz=UTC)
-            if start_at.time() != datetime.min.time():
+            if not allow_intraday_start and start_at.time() != datetime.min.time():
                 raise SplitContractError(
                     "epoch timerange must start at UTC midnight"
                 )
@@ -241,7 +243,16 @@ def build_evaluation_split_plan(
         evolution_pairs = sorted(set(training_pairs))
     else:
         evolution_pairs = configured_pairs
-    evolution_start, evolution_end = _parse_closed_config_timerange(backtesting.get("timerange"))
+    # V5 has one deliberately non-midnight 4h panel start: it retains honest
+    # PEPE warmup coverage instead of inventing pre-listing candles.  All
+    # historical/V2 contracts preserve the old midnight-only invariant.
+    raw_v5 = (
+        config.get("raw_multipair_score", {}).get("policy_version")
+        == "raw-multipair-score-v5"
+    )
+    evolution_start, evolution_end = _parse_closed_config_timerange(
+        backtesting.get("timerange"), allow_intraday_start=raw_v5
+    )
     split_config = config.get("split_v2", {})
     if not isinstance(split_config, Mapping):
         raise SplitContractError("split_v2 must be a mapping")

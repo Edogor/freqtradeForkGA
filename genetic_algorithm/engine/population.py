@@ -57,6 +57,30 @@ def calculate_behavioral_distance(ind1: Individual, ind2: Individual) -> Optiona
     m1 = ind1.metrics if ind1.metrics else {}
     m2 = ind2.metrics if ind2.metrics else {}
 
+    # V5 raw multi-pair candidates expose a fixed six-pair descriptor.  It
+    # captures economic behaviour (Q/A/F/R/D/U) and is paired with executable
+    # logic tokens, so ATR-like parameter variants no longer look diverse just
+    # because their genome IDs differ.  Legacy candidates retain the older
+    # descriptive path below.
+    raw1 = m1.get('raw_behavior_vector')
+    raw2 = m2.get('raw_behavior_vector')
+    if (
+        isinstance(raw1, (list, tuple))
+        and isinstance(raw2, (list, tuple))
+        and len(raw1) == len(raw2) == 36
+        and all(isinstance(value, (int, float)) for value in (*raw1, *raw2))
+    ):
+        signed_positions = {0, 2, 3}
+        economic = sum(
+            min(1.0, abs(float(left) - float(right)) / (2.0 if index % 6 in signed_positions else 1.0))
+            for index, (left, right) in enumerate(zip(raw1, raw2))
+        ) / 36.0
+        tokens1 = set(m1.get('raw_logic_tokens', []))
+        tokens2 = set(m2.get('raw_logic_tokens', []))
+        union = tokens1 | tokens2
+        logic = 0.0 if not union else 1.0 - len(tokens1 & tokens2) / len(union)
+        return 0.5 * economic + 0.5 * logic
+
     # Both must have been evaluated with per_pair_profit
     pp1: Dict = m1.get('per_pair_profit')  # type: ignore[assignment]
     pp2: Dict = m2.get('per_pair_profit')  # type: ignore[assignment]

@@ -32,8 +32,15 @@ from genetic_algorithm.evaluation.raw_multipair_score import (
     RawMultiPairStatus,
     score_raw_multipair,
 )
+from genetic_algorithm.evaluation.raw_multipair_score_v5 import (
+    RAW_MULTIPAIR_SCORE_V5_VERSION,
+    RawMultiPairPanelV5,
+    RawMultiPairPolicyV5,
+    score_raw_multipair_v5,
+)
 from genetic_algorithm.evaluation.period_provenance import (
     validate_exact_period_evidence,
+    validate_exact_period_timestamps_v5,
 )
 from genetic_algorithm.orchestration.artifact_store_v2 import (
     ArtifactIntegrityError,
@@ -49,9 +56,11 @@ from genetic_algorithm.orchestration.attempt_state_v2 import (
 )
 from genetic_algorithm.orchestration.data_manifest_v2 import resolve_spot_data_root
 from genetic_algorithm.orchestration.evolution_worker_v2 import (
+    EvolutionWorkerError,
     FrozenEvolutionSeedV2,
     evolution_worker_argv,
     prepare_evolution_worker,
+    validate_evolution_seed,
 )
 from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
     HARDCORE_PANEL_PAIRS,
@@ -232,6 +241,38 @@ def _archive_seeds(request: EvolutionRunRequestV1) -> list[FrozenEvolutionSeedV2
     return seeds
 
 
+def _quarantine_incompatible_archive_seeds(
+    config: dict[str, Any],
+    seeds: list[FrozenEvolutionSeedV2],
+) -> tuple[list[FrozenEvolutionSeedV2], list[dict[str, str]]]:
+    """Remove optional archive parents that cannot reproduce under this code.
+
+    A stale champion is evidence about an old executable, not a reason to
+    suspend an otherwise valid lane.  Base config/data failures are still
+    fail-closed elsewhere; this function only handles optional parent seeds.
+    """
+
+    accepted: list[FrozenEvolutionSeedV2] = []
+    quarantined: list[dict[str, str]] = []
+    for seed in seeds:
+        try:
+            validate_evolution_seed(seed, config)
+        except EvolutionWorkerError as exc:
+            quarantined.append({"candidate_id": seed.candidate_id, "reason": str(exc)})
+        else:
+            accepted.append(seed)
+    rejected_ids = {item["candidate_id"] for item in quarantined}
+    assignments = config.get("generic_island_model", {}).get("archive_seeding", {}).get("assignments", {})
+    if isinstance(assignments, dict) and rejected_ids:
+        for island_name, rows in list(assignments.items()):
+            if isinstance(rows, list):
+                assignments[island_name] = [
+                    row for row in rows
+                    if isinstance(row, dict) and row.get("candidate_id") not in rejected_ids
+                ]
+    return accepted, quarantined
+
+
 def _strict_replay_top_n(config: dict[str, Any]) -> int:
     """Resolve one fail-closed strict-replay bound from the lane preset."""
 
@@ -296,7 +337,9 @@ class V2HardcoreAttemptBackend:
     def _queue_impl(self, request: EvolutionRunRequestV1) -> AttemptHandleV1:
         config = _materialized_config(request)
         strict_replay_top_n = _strict_replay_top_n(config)
-        seeds = _archive_seeds(request)
+        seeds, quarantined_seeds = _quarantine_incompatible_archive_seeds(
+            config, _archive_seeds(request)
+        )
         policy = shadow_gate_policy_from_config(config)
         attempt_token = canonical_config_hash(
             {"request_hash": request.request_hash, "attempt": request.attempt_ordinal}
@@ -319,7 +362,11 @@ class V2HardcoreAttemptBackend:
             created_at=request.created_at,
             resolved_config=config,
             policy=policy,
-            fitness_policy_version=RAW_MULTIPAIR_SCORE_VERSION,
+            fitness_policy_version=str(
+                config.get("raw_multipair_score", {}).get(
+                    "policy_version", RAW_MULTIPAIR_SCORE_VERSION
+                )
+            ),
             seeds=[request.search_seed],
             worker_count=4,
             artifact_root=worker_root,
@@ -344,6 +391,18 @@ class V2HardcoreAttemptBackend:
             top_n=strict_replay_top_n,
             resume_checkpoint_path=request.resume_checkpoint_path,
         )
+        if quarantined_seeds:
+            _write_immutable(
+                worker_root / "runtime" / "seed_quarantine.json",
+                _canonical_json_bytes(
+                    {
+                        "schema_version": "2.0",
+                        "quarantine_version": "hardcore-seed-quarantine-v3",
+                        "quarantined": quarantined_seeds,
+                        "accepted_candidate_ids": [item.candidate_id for item in seeds],
+                    }
+                ),
+            )
         binding = WorkerBindingV2(
             worker_kind=WorkerKind.GENERIC_ISLAND_EVOLUTION,
             argv=evolution_worker_argv(
@@ -576,7 +635,11 @@ def _live_pair_metrics(root: str | Path) -> list[RawPairMetricsV1]:
         result = metrics.get("raw_multipair_result", {})
         pair_components = result.get("pair_components", {})
         timeframe = str(result.get("timeframe") or "")
-        panel = RawMultiPairPanel(timeframe=timeframe)
+        panel = (
+            RawMultiPairPanelV5(timeframe=timeframe)
+            if result.get("score_version") == RAW_MULTIPAIR_SCORE_V5_VERSION
+            else RawMultiPairPanel(timeframe=timeframe)
+        )
         rows: list[RawPairMetricsV1] = []
         for pair in HARDCORE_PANEL_PAIRS:
             raw = raw_pairs[pair]
@@ -750,24 +813,40 @@ def _holding_hours(trades: list[dict[str, Any]]) -> tuple[float | None, float | 
     return median(ordered), quantile(0.9)
 
 
-def _scenario_from_record(record, *, timeframe: CampaignLane) -> PairScenario:
+def _scenario_from_record(
+    record, *, timeframe: CampaignLane, score_version: str = RAW_MULTIPAIR_SCORE_VERSION
+) -> PairScenario:
     metrics = record.metrics
-    panel = RawMultiPairPanel(timeframe=timeframe.value)
+    panel = (
+        RawMultiPairPanelV5(timeframe=timeframe.value)
+        if score_version == RAW_MULTIPAIR_SCORE_V5_VERSION
+        else RawMultiPairPanel(timeframe=timeframe.value)
+    )
     declared_period = validate_exact_period_evidence(
-        expected_start=panel.period_start,
-        expected_end=panel.period_end,
+        expected_start=panel.period_start.date() if isinstance(panel, RawMultiPairPanelV5) else panel.period_start,
+        expected_end=panel.period_end.date() if isinstance(panel, RawMultiPairPanelV5) else panel.period_end,
         observed_start=getattr(metrics, "period_start", None),
         observed_end=getattr(metrics, "period_end", None),
         evidence_label=f"{metrics.pair} declared period",
     )
-    measured_period = validate_exact_period_evidence(
-        expected_start=panel.period_start,
-        expected_end=panel.period_end,
-        observed_start=getattr(metrics, "measured_period_start", None),
-        observed_end=getattr(metrics, "measured_period_end", None),
-        evidence_label=f"{metrics.pair} measured period",
-        timeframe=panel.timeframe,
-    )
+    if isinstance(panel, RawMultiPairPanelV5):
+        measured_period = validate_exact_period_timestamps_v5(
+            expected_start=panel.period_start,
+            expected_end=panel.period_end,
+            observed_start=getattr(metrics, "measured_period_start", None),
+            observed_end=getattr(metrics, "measured_period_end", None),
+            evidence_label=f"{metrics.pair} measured period",
+            timeframe=panel.timeframe,
+        )
+    else:
+        measured_period = validate_exact_period_evidence(
+            expected_start=panel.period_start,
+            expected_end=panel.period_end,
+            observed_start=getattr(metrics, "measured_period_start", None),
+            observed_end=getattr(metrics, "measured_period_end", None),
+            evidence_label=f"{metrics.pair} measured period",
+            timeframe=panel.timeframe,
+        )
     period_evidence = declared_period if not declared_period.valid else measured_period
 
     def failed(error_code: str, detail: str | None = None) -> PairScenario:
@@ -875,21 +954,29 @@ def candidate_snapshot_from_strict_replay(
     *,
     lane: CampaignLane,
     worker_root: Path,
-    policy: RawMultiPairPolicyV4,
+    policy: RawMultiPairPolicyV4 | RawMultiPairPolicyV5,
     strict_failure_codes: list[str] | None = None,
 ) -> CandidateSnapshotV1 | None:
-    panel = RawMultiPairPanel(
-        timeframe=lane.value,
-        policy=policy,
+    panel = (
+        RawMultiPairPanelV5(timeframe=lane.value, policy=policy)
+        if isinstance(policy, RawMultiPairPolicyV5)
+        else RawMultiPairPanel(timeframe=lane.value, policy=policy)
     )
     records = {record.metrics.pair: record for record in candidate.scenarios}
     if set(records) != set(HARDCORE_PANEL_PAIRS):
         return None
     scenarios = [
-        _scenario_from_record(records[pair], timeframe=lane)
+        _scenario_from_record(
+            records[pair], timeframe=lane,
+            score_version=(RAW_MULTIPAIR_SCORE_V5_VERSION if isinstance(panel, RawMultiPairPanelV5) else RAW_MULTIPAIR_SCORE_VERSION),
+        )
         for pair in HARDCORE_PANEL_PAIRS
     ]
-    score = score_raw_multipair(panel, scenarios)
+    score = (
+        score_raw_multipair_v5(panel, scenarios)
+        if isinstance(panel, RawMultiPairPanelV5)
+        else score_raw_multipair(panel, scenarios)
+    )
     if score.status != RawMultiPairStatus.VALID or score.score is None:
         if strict_failure_codes is not None:
             technical_codes = [
@@ -944,6 +1031,7 @@ def candidate_snapshot_from_strict_replay(
         evolutionary_phenotype_hash=phenotype_fingerprint(
             StrategyGene.from_dict_exact(seed.strategy_gene)
         ),
+        score_version=score.score_version,
         score=score.score,
         policy_hash=score.policy_hash,
         edge_score=aggregate.edge_score,
@@ -1001,8 +1089,11 @@ def _diversity_events(engine: dict[str, Any] | None) -> list[DiversityEventV1]:
 def _build_attempt_evidence(request, state) -> AttemptEvidenceV1:
     worker_root = Path(state.artifact_root).resolve()
     resolved_config = _materialized_config(request)
-    raw_policy = RawMultiPairPolicyV4.from_mapping(
-        resolved_config.get("raw_multipair_score", {}).get("policy")
+    raw_config = resolved_config.get("raw_multipair_score", {})
+    raw_policy = (
+        RawMultiPairPolicyV5.from_mapping(raw_config.get("policy"))
+        if raw_config.get("policy_version") == RAW_MULTIPAIR_SCORE_V5_VERSION
+        else RawMultiPairPolicyV4.from_mapping(raw_config.get("policy"))
     )
     engine = _verified_engine_outcome(worker_root)
     stop_reason = _engine_stop_reason(engine)
