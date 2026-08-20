@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -222,3 +223,41 @@ def test_v5_retries_quarantine_only_an_unprepared_conflicting_request(tmp_path):
         V2HardcoreAttemptBackendV5._quarantine_conflicting_unprepared_request(
             request_path, b"different-request"
         )
+
+
+def test_v5_records_incompatible_optional_archive_seed_quarantine(tmp_path, monkeypatch):
+    path = tmp_path / "bad.json"
+    path.write_bytes(b"bad-edge")
+    monkeypatch.setattr(
+        backend_v5.FrozenEvolutionSeedV2,
+        "model_validate_json",
+        staticmethod(lambda payload: SimpleNamespace(candidate_id=payload.decode("ascii"))),
+    )
+    monkeypatch.setattr(
+        backend_v5,
+        "validate_evolution_seed",
+        lambda seed, config: (_ for _ in ()).throw(ValueError("incompatible strategy gene")),
+    )
+    quarantined = []
+    seeds = V2HardcoreAttemptBackendV5._archive_seeds(
+        {
+            "archive_seeds": [
+                {
+                    "candidate_id": "bad-edge",
+                    "evolution_seed_path": str(path),
+                    "evolution_seed_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "niche": "EDGE",
+                }
+            ]
+        },
+        {"generic_island_model": {"islands": [], "archive_seeding": {}}},
+        quarantine=quarantined,
+    )
+    assert seeds == []
+    assert quarantined == [
+        {"candidate_id": "bad-edge", "niche": "EDGE", "reason": "incompatible strategy gene"}
+    ]
+    V2HardcoreAttemptBackendV5._persist_archive_seed_quarantine(tmp_path, quarantined)
+    report = json.loads((tmp_path / "archive_seed_quarantine_v5.json").read_text())
+    assert report["quarantined"] == quarantined
+    assert (tmp_path / "archive_seed_quarantine_v5.json.sha256").is_file()

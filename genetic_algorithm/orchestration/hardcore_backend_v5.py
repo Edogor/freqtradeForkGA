@@ -137,18 +137,20 @@ class V2HardcoreAttemptBackendV5:
         if lane not in {"15m", "1h", "4h"}:
             raise ValueError("V5 queue request has an invalid lane")
         config = self._materialize(request)
-        seeds = self._archive_seeds(request, config)
+        root = self.root / "runs" / str(request["run_id"]) / "attempt-0" / "worker"
+        root.parent.mkdir(parents=True, exist_ok=True)
+        request_path = root.parent / "run_request_v5.json"
+        archive_quarantine: list[dict[str, str]] = []
+        seeds = self._archive_seeds(request, config, quarantine=archive_quarantine)
         persisted_request = {
             "request": request,
             "resolved_config_sha256": canonical_config_hash(config),
         }
-        request_hash = hashlib.sha256(_canonical(persisted_request)).hexdigest()
-        attempt_id = f"hardcore-v5-{request_hash[:24]}"
-        root = self.root / "runs" / str(request["run_id"]) / "attempt-0" / "worker"
-        root.parent.mkdir(parents=True, exist_ok=True)
-        request_path = root.parent / "run_request_v5.json"
         request_payload = _canonical(persisted_request)
         self._quarantine_conflicting_unprepared_request(request_path, request_payload)
+        self._persist_archive_seed_quarantine(root.parent, archive_quarantine)
+        request_hash = hashlib.sha256(request_payload).hexdigest()
+        attempt_id = f"hardcore-v5-{request_hash[:24]}"
         policy = shadow_gate_policy_from_config(config)
         bundle = build_attempt_manifest_bundle(
             attempt_id=attempt_id,
@@ -247,8 +249,35 @@ class V2HardcoreAttemptBackendV5:
             checksum_path.replace(quarantined.with_suffix(".json.sha256"))
 
     @staticmethod
+    def _persist_archive_seed_quarantine(
+        attempt_root: Path, quarantined: list[dict[str, str]]
+    ) -> None:
+        """Make rejected optional archive parents inspectable and hash-bound."""
+
+        path = attempt_root / "archive_seed_quarantine_v5.json"
+        payload = _canonical(
+            {
+                "schema_version": "v5",
+                "quarantined": sorted(
+                    quarantined,
+                    key=lambda item: (item["candidate_id"], item["niche"]),
+                ),
+            }
+        )
+        checksum = hashlib.sha256(payload).hexdigest()
+        if path.exists():
+            if path.read_bytes() != payload:
+                raise ValueError("archive seed quarantine differs from immutable request")
+            return
+        path.write_bytes(payload)
+        path.with_suffix(".json.sha256").write_text(checksum + "\n", encoding="ascii")
+
+    @staticmethod
     def _archive_seeds(
-        request: dict[str, object], config: dict[str, Any]
+        request: dict[str, object],
+        config: dict[str, Any],
+        *,
+        quarantine: list[dict[str, str]] | None = None,
     ) -> list[FrozenEvolutionSeedV2]:
         """Load only compatible optional parents and assign bridges by niche.
 
@@ -272,13 +301,23 @@ class V2HardcoreAttemptBackendV5:
                 continue
             seed_path = Path(path)
             try:
-                if not seed_path.is_file() or _sha256_file(seed_path) != expected:
-                    continue
+                if not seed_path.is_file():
+                    raise ValueError("seed file is missing")
+                if _sha256_file(seed_path) != expected:
+                    raise ValueError("seed file checksum differs")
                 seed = FrozenEvolutionSeedV2.model_validate_json(seed_path.read_bytes())
                 if seed.candidate_id in seen:
                     continue
                 validate_evolution_seed(seed, config)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                if quarantine is not None:
+                    quarantine.append(
+                        {
+                            "candidate_id": str(entry.get("candidate_id", "unknown")),
+                            "niche": niche,
+                            "reason": str(exc),
+                        }
+                    )
                 continue
             seen.add(seed.candidate_id)
             accepted_by_id[seed.candidate_id] = seed
@@ -401,7 +440,9 @@ class V2HardcoreAttemptBackendV5:
             raise ValueError("active V5 request is malformed")
         request = stored["request"]
         config = self._materialize(request)
-        self._archive_seeds(request, config)
+        archive_quarantine: list[dict[str, str]] = []
+        self._archive_seeds(request, config, quarantine=archive_quarantine)
+        self._persist_archive_seed_quarantine(path.parent, archive_quarantine)
         if stored.get("resolved_config_sha256") != canonical_config_hash(config):
             raise ValueError("active V5 resolved config changed after queue")
         return request, config
