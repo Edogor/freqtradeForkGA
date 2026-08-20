@@ -212,6 +212,13 @@ def main(argv: list[str] | None = None) -> int:
     h5_status.add_argument("--automation-root", required=True)
     h5_stop = h5_sub.add_parser("stop", help="Request a V5 generation-boundary stop")
     h5_stop.add_argument("--automation-root", required=True)
+    h5_unit = h5_sub.add_parser("service-unit", help="Render the isolated V5 systemd user service")
+    h5_unit.add_argument("--campaign-id", required=True)
+    h5_unit.add_argument("--config-15m")
+    h5_unit.add_argument("--config-1h")
+    h5_unit.add_argument("--config-4h")
+    h5_unit.add_argument("--automation-root", required=True)
+    h5_unit.add_argument("--output", required=True)
 
     # --- experiment ---
     p_exp = sub.add_parser("experiment", help="Experiment management")
@@ -883,6 +890,43 @@ def _cmd_hardcore_campaign_v5(args) -> int:
         and load_config(path)["raw_multipair_score"]["policy_version"] == "raw-multipair-score-v5"
         for lane, path in configs.items()
     )
+    if command == "service-unit":
+        if not configs_valid:
+            return 2
+        root = Path(args.automation_root).resolve()
+        output = Path(args.output).resolve()
+        executable = repo / ".venv/bin/python"
+        if not executable.is_file():
+            raise RuntimeError("V5 systemd Python executable is missing")
+
+        def quote(value: Path | str) -> str:
+            text = str(value)
+            if any(character in text for character in ("\n", "\r", "\x00")):
+                raise ValueError("systemd argument contains a control character")
+            return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+        command_line = " ".join(
+            [
+                quote(executable), "-m", "genetic_algorithm", "hardcore-campaign-v5", "start",
+                "--campaign-id", quote(args.campaign_id), "--config-15m", quote(configs["15m"]),
+                "--config-1h", quote(configs["1h"]), "--config-4h", quote(configs["4h"]),
+                "--automation-root", quote(root),
+            ]
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            "[Unit]\n"
+            "Description=Evidence-driven V5 six-pair GA campaign\n"
+            "After=default.target\n\n"
+            "[Service]\nType=simple\n"
+            f"WorkingDirectory={repo}\nExecStart={command_line}\n"
+            "Restart=on-failure\nRestartSec=30s\n"
+            "TimeoutStopSec=infinity\nKillMode=mixed\nNoNewPrivileges=true\n\n"
+            "[Install]\nWantedBy=default.target\n",
+            encoding="utf-8",
+        )
+        print(f"Systemd user unit written: {output}")
+        return 0
     clean = (
         subprocess.run(
             ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=False
