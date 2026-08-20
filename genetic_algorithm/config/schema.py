@@ -1650,12 +1650,12 @@ def validate_config(config: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         raw_score = _nested_config(config, ("raw_multipair_score",))
         v5_policy = raw_score.get("policy_version") == "raw-multipair-score-v5"
         if not safety.get("canary", False):
-            allowed_sizes = {10, 12, 16} if v5_policy else {12}
-            allowed_generations = {12, 18, 30} if v5_policy else {30}
-            if (
-                ga.get("population_size") not in allowed_sizes
-                or ga.get("generations") not in allowed_generations
-            ):
+            allowed_shapes = (
+                {(4, 3), (10, 12), (12, 18), (12, 30)}
+                if v5_policy
+                else {(12, 30)}
+            )
+            if (ga.get("population_size"), ga.get("generations")) not in allowed_shapes:
                 errors.append(f"{label} has an unsupported population/generation budget")
             if generic_island.get("population_per_island") != ga.get("population_size"):
                 errors.append(

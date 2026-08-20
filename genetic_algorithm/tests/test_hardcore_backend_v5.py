@@ -38,6 +38,32 @@ def test_v5_backend_materializes_every_lane_and_profile(tmp_path):
         backend.close()
 
 
+def test_v5_backend_accepts_reduced_canary_shape(tmp_path):
+    repo = Path(__file__).resolve().parents[2]
+    backend = V2HardcoreAttemptBackendV5(
+        state_path=tmp_path / "attempts.sqlite3",
+        automation_root=tmp_path / "campaign",
+        repo_root=repo,
+        python_executable=repo / ".venv/bin/python",
+    )
+    try:
+        config = backend._materialize(
+            {
+                "campaign_id": "v5-test",
+                "run_id": "canary-15m",
+                "lane": "15m",
+                "profile": "edge",
+                "seed": 7,
+                "shape": {"population_size": 4, "generations": 3, "cross_niche_offspring": 2},
+                "config_path": str(repo / "genetic_algorithm/config/presets/hardcore_multipair_v5_15m.yaml"),
+            }
+        )
+        assert config["genetic_algorithm"]["population_size"] == 4
+        assert config["genetic_algorithm"]["generations"] == 3
+    finally:
+        backend.close()
+
+
 def test_v5_backend_queues_honest_intraday_4h_panel(tmp_path):
     repo = Path(__file__).resolve().parents[2]
     backend = V2HardcoreAttemptBackendV5(

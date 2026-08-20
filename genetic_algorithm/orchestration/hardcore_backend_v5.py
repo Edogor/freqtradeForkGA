@@ -278,7 +278,10 @@ class V2HardcoreAttemptBackendV5:
         if not isinstance(shape, dict):
             raise ValueError("V5 execution shape must be a mapping")
         population, generations = int(shape["population_size"]), int(shape["generations"])
-        if (population, generations) not in {(10, 12), (12, 18), (16, 30)}:
+        # Three evidence stages plus the deliberately reduced operational
+        # canary.  Keep this allow-list fail-closed so controllers cannot
+        # silently request an unreviewed resource shape.
+        if (population, generations) not in {(4, 3), (10, 12), (12, 18), (12, 30)}:
             raise ValueError("unapproved V5 execution shape")
         profile = str(request["profile"])
         weights = {"edge": (0.60, 0.30), "balanced": (0.45, 0.45), "productive": (0.30, 0.60)}
