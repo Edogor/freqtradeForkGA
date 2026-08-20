@@ -396,7 +396,19 @@ class V2HardcoreAttemptBackendV5:
         failure_class = FailureClass.NONE.value
         if not valid:
             stop_reason = "TECHNICAL_INVALID"
-            failure_class = _classify_failure(state.error_code, state.error_detail).value
+            engine_detail = str(engine.get("detail", "")) if engine else ""
+            if (
+                _engine_stop_reason(engine) is EvolutionStopReason.TECHNICAL_INVALID
+                and "zero valid backtest evidence" in engine_detail.lower()
+            ):
+                # The engine finished a whole generation and proved that no
+                # candidate has valid six-pair evidence.  Retrying the same
+                # config cannot repair that deterministic contract failure.
+                failure_class = FailureClass.DETERMINISTIC_CONFIG.value
+            else:
+                failure_class = _classify_failure(
+                    state.error_code, state.error_detail
+                ).value
         champion = candidates[0] if candidates else None
         components = champion["scores"] if champion else {}
         pairs = champion["pairs"] if champion else []
