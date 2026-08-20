@@ -1,0 +1,10 @@
+# A4: full quality stack with behavioral diversity and common-panel stopping.
+preset: quality_v3_a3_feasibility
+genetic_algorithm:
+  behavioral_distance_weight: 0.35
+  allow_self_crossover: false
+  random_immigrants: 2
+generic_island_model:
+  common_panel_replay: {enabled: true, interval: 3, top_n_per_island: 3, early_stop_patience: 4, min_improvement: 0.002}
+promotion_v2: {policy_version: quality-v3-a4-search}
+qualification_v3: {policy_version: quality-v3-a4-search}

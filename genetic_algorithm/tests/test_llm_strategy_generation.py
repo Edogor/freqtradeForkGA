@@ -174,7 +174,7 @@ def _build_full_config(llm_config: dict) -> dict:
     return config
 
 
-def test_raw_api_call(provider_config: dict) -> dict:
+def probe_raw_api_call(provider_config: dict) -> dict:
     """Test 1: Raw API connectivity — can we call the LLM at all?"""
     from genetic_algorithm.llm.provider import LLMProviderFactory
 
@@ -209,7 +209,7 @@ def test_raw_api_call(provider_config: dict) -> dict:
     return result
 
 
-def test_json_generation(provider_config: dict) -> dict:
+def probe_json_generation(provider_config: dict) -> dict:
     """Test 2: Can the LLM produce valid JSON via generate_json?"""
     from genetic_algorithm.llm.provider import LLMProviderFactory
 
@@ -251,7 +251,7 @@ def test_json_generation(provider_config: dict) -> dict:
     return result
 
 
-def test_strategy_prompt_and_parse(provider_config: dict) -> dict:
+def probe_strategy_prompt_and_parse(provider_config: dict) -> dict:
     """Test 3: Full pipeline — prompt builder → LLM → parser → StrategyGene."""
     from genetic_algorithm.llm.provider import LLMProviderFactory
     from genetic_algorithm.llm.prompts import StrategyPromptBuilder
@@ -338,7 +338,7 @@ def test_strategy_prompt_and_parse(provider_config: dict) -> dict:
     return result
 
 
-def test_designer_seed(provider_config: dict) -> dict:
+def probe_designer_seed(provider_config: dict) -> dict:
     """Test 4: StrategyDesigner.generate_seed_strategies() end-to-end."""
     from genetic_algorithm.llm.designer import StrategyDesigner
 
@@ -466,10 +466,10 @@ def main():
             continue
 
         tests = [
-            test_raw_api_call,
-            test_json_generation,
-            test_strategy_prompt_and_parse,
-            test_designer_seed,
+            probe_raw_api_call,
+            probe_json_generation,
+            probe_strategy_prompt_and_parse,
+            probe_designer_seed,
         ]
 
         provider_ok = True

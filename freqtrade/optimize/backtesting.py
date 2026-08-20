@@ -965,7 +965,8 @@ class Backtesting:
                         is_short=trade.is_short,
                         open_date=trade.date_last_filled_utc,
                         close_date=current_time,
-                    )
+                    ),
+                    event_time=current_time,
                 )
 
     def get_valid_entry_price_and_stake(

@@ -1,53 +1,36 @@
 ---
-description: "Generate a GA experiment YAML config for the automated evolution queue. Use when: creating new experiment configs, planning waves, designing SIS-enabled runs, or setting up A/B comparisons."
+description: "Generate a schema-V2 GA experiment proposal for the canonical planner."
 mode: "agent"
-tools: ["read_file", "create_file", "grep_search", "file_search", "semantic_search", "run_in_terminal", "runSubagent"]
+tools: ["read_file", "create_file", "grep_search", "file_search", "semantic_search", "run_in_terminal"]
 ---
 
-# Generate GA Experiment Config
+# Generate a GA Experiment Proposal
 
-Create a production-ready YAML experiment config for the GA queue.
+Create a schema-V2 config proposal, not a directly runnable legacy queue file.
 
-## Context Gathering
+## Evidence rules
 
-1. Read the latest results from `genetic_algorithm/data/hall_of_fame/` and `CONFIG_RANKING.md` to understand what has worked
-2. Check `KNOWN_ISSUES.md` and `GA_CONFIG_CHEATSHEET.md` for parameter constraints
-3. Review recent configs in `genetic_algorithm/config/done/` for the latest wave patterns
-4. If SIS is enabled, check `genetic_algorithm/intelligence/README.md` for integration requirements
+1. Read only hash-verified V2 parent results and their analyzer decision.
+2. Treat population, generations, pair count, mutation, elitism and tournament pressure as
+   hypotheses. Do not call fixed ranges “proven” from historical aggregate rankings.
+3. Change one declared factor per arm unless the plan explicitly declares a factorial experiment.
+4. Use paired seeds, the same comparison panel and the same budget for control and treatment.
+5. Profit never compensates for a failed drawdown, tail-risk, activity or sample-size gate.
 
-## Config Generation Rules
+## Mechanical constraints
 
-**Mandatory constraints (never violate):**
-- Standard GA: `population_size` 10-15
-- Island model: ≥ 60 per island (total pop = islands × per-island)
-- Never combine island model + walk-forward
-- `tournament_size` ≥ 3
-- `elite_size` ≈ 10% of population
-- Always set `enable_cache: true`
-- Always set `auto_download: false` only if data is verified present
+- Use `config_schema_version: 2` and the enforced `safe_v2` preset.
+- Keep elite, tournament and immigrant counts within the configured population.
+- Use only implemented selector/crossover names.
+- Keep pair lists non-empty and unique.
+- Supply explicit positive `parallel_evaluation.num_workers` for evolution materialization.
+- Do not enable features excluded by `safe_v2`.
 
-**SIS configuration:**
-- Enable with `sis.enabled: true` for production runs
-- SIS requires `genetic_algorithm/data/strategy_corpus.parquet` to exist
-- All 5 hooks are active by default when enabled
-- A/B testing available via `intelligence/ab_framework.py`
+Validate the proposal with:
 
-**Fitness weights (proven ranges):**
-- `profit_weight`: 0.3-0.5
-- `win_rate_weight`: 0.2-0.3
-- `drawdown_weight`: 0.15-0.25
-- `trade_count_weight`: 0.05-0.15
-
-## Output
-
-Place the generated config at: `genetic_algorithm/config/queue/<name>.yaml`
-Follow naming convention: `<wave>_<variant>_<description>.yaml` (e.g., `wave35_sis_momentum.yaml`)
-
-## Validation
-
-After generating, validate the config:
 ```bash
-python -c "import yaml; yaml.safe_load(open('genetic_algorithm/config/queue/<name>.yaml'))"
+python -m genetic_algorithm config validate <config.yaml>
 ```
 
-Confirm no constraint violations from the rules above.
+The proposal must enter `ChildWavePlanV2` and the approval/materialization path. Do not write a
+mutable file into `config/queue` as an execution instruction.

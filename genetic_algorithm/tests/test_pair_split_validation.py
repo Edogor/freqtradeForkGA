@@ -356,9 +356,22 @@ class TestPairSplitFitness:
         """Verify metrics dict contains all pair-split specific fields."""
         evaluator = self._make_evaluator()
 
-        result = _make_backtest_result(total_trades=50, sharpe=1.5)
+        train_result = _make_backtest_result(total_trades=50, sharpe=1.5)
+        train_result.per_pair_profit = {
+            'BTC/USDT': 4.0,
+            'BNB/USDT': 1.0,
+            'XRP/USDT': 0.0,
+        }
+        train_result.per_pair_trades = {
+            'BTC/USDT': 30,
+            'BNB/USDT': 20,
+            'XRP/USDT': 0,
+        }
+        val_result = _make_backtest_result(total_trades=50, sharpe=1.5)
+        val_result.per_pair_profit = {'ETH/USDT': 3.0, 'SOL/USDT': 2.0}
+        val_result.per_pair_trades = {'ETH/USDT': 18, 'SOL/USDT': 32}
         mock_bt = MagicMock()
-        mock_bt.backtest_strategy.return_value = result
+        mock_bt.backtest_strategy.side_effect = [train_result, val_result]
         evaluator.backtester = mock_bt
 
         mock_gen_instance = MagicMock()
@@ -371,9 +384,179 @@ class TestPairSplitFitness:
             'train_fitness', 'val_fitness', 'pair_generalization_ratio',
             'val_profit', 'val_sharpe', 'val_trades', 'val_max_drawdown',
             'val_win_rate', 'training_pairs', 'validation_pairs',
+            'train_per_pair_profit', 'train_per_pair_trades',
+            'train_worst_pair_trades', 'train_active_pair_ratio',
+            'train_pair_trade_coverage_multiplier',
+            'val_per_pair_profit', 'val_per_pair_trades',
+            'val_worst_pair_trades', 'val_active_pair_ratio',
+            'val_pair_trade_coverage_multiplier',
         ]
         for key in required_keys:
             assert key in metrics, f"Missing pair-split metric: {key}"
+        assert metrics['train_per_pair_trades']['XRP/USDT'] == 0
+        assert metrics['train_worst_pair_trades'] == 0
+        assert metrics['train_active_pair_ratio'] == pytest.approx(2 / 3)
+        assert metrics['val_per_pair_trades'] == {
+            'ETH/USDT': 18,
+            'SOL/USDT': 32,
+        }
+
+    @patch('genetic_algorithm.evaluation.fitness.StrategyGenerator')
+    def test_weakest_pair_coverage_is_non_compensable_across_split(self, MockGen):
+        evaluator = self._make_evaluator()
+        evaluator.fitness_penalties.update(
+            {
+                'target_trades_per_pair': 60,
+                'pair_trade_penalty_floor': 0.01,
+            }
+        )
+        train_result = _make_backtest_result(total_trades=60, sharpe=1.5)
+        train_result.per_pair_profit = {
+            'BTC/USDT': 0.0,
+            'BNB/USDT': 6.0,
+            'XRP/USDT': 0.0,
+        }
+        train_result.per_pair_trades = {
+            'BTC/USDT': 0,
+            'BNB/USDT': 60,
+            'XRP/USDT': 0,
+        }
+        val_result = _make_backtest_result(total_trades=120, sharpe=1.5)
+        val_result.per_pair_profit = {'ETH/USDT': 6.0, 'SOL/USDT': 6.0}
+        val_result.per_pair_trades = {'ETH/USDT': 60, 'SOL/USDT': 60}
+        evaluator.backtester = MagicMock()
+        evaluator.backtester.backtest_strategy.side_effect = [
+            train_result,
+            val_result,
+        ]
+        evaluator.strategy_generator = MagicMock()
+        evaluator.strategy_generator.generate_strategy_code.return_value = (
+            "class TestStrat: pass"
+        )
+
+        composite, metrics = evaluator.evaluate_pair_split(_make_gene())
+
+        unpenalized_composite = (
+            metrics['train_fitness']
+            * evaluator.pair_validation_config['weight_train']
+            + metrics['val_fitness']
+            * evaluator.pair_validation_config['weight_val']
+        )
+        assert metrics['pair_split_trade_coverage_multiplier'] == pytest.approx(
+            0.01
+        )
+        assert composite == pytest.approx(unpenalized_composite * 0.01)
+
+    @patch('genetic_algorithm.evaluation.fitness.StrategyGenerator')
+    def test_independent_mode_replays_each_pair_alone(self, MockGen):
+        cfg = _base_config(pair_validation={
+            'enabled': True,
+            'evaluation_mode': 'independent_pairs',
+            'training_pairs': ['BTC/USDT', 'SOL/USDT'],
+            'validation_pairs': ['ETH/USDT', 'BNB/USDT'],
+            'weight_train': 0.6,
+            'weight_val': 0.4,
+            'worst_pair_weight': 0.5,
+            'min_profitable_pair_ratio': 0.75,
+            'profitable_pair_penalty_floor': 0.1,
+            'max_pair_loss_pct': 5.0,
+            'worst_pair_loss_penalty_floor': 0.1,
+        })
+        evaluator = FitnessEvaluator(cfg)
+        evaluator.backtester = MagicMock()
+        pair_results = [
+            _make_backtest_result(profit_percent=8.0, total_trades=60),
+            _make_backtest_result(profit_percent=-4.0, total_trades=70),
+            _make_backtest_result(profit_percent=3.0, total_trades=80),
+            _make_backtest_result(profit_percent=2.0, total_trades=90),
+        ]
+        for index, result in enumerate(pair_results, start=1):
+            result.daily_profit_abs = [
+                [f"2025-0{month}-01", 1.0]
+                for month in range(1, index + 1)
+            ]
+            result.max_drawdown_duration_days = float(index * 10)
+            result.max_consecutive_losses = index
+        evaluator.backtester.backtest_strategy.side_effect = pair_results
+        evaluator.strategy_generator = MagicMock()
+        evaluator.strategy_generator.generate_strategy_code.return_value = (
+            "class TestStrat: pass"
+        )
+
+        _, metrics = evaluator.evaluate_pair_split(_make_gene())
+
+        calls = evaluator.backtester.backtest_strategy.call_args_list
+        assert [call.kwargs['pairs_override'] for call in calls] == [
+            ['BTC/USDT'],
+            ['SOL/USDT'],
+            ['ETH/USDT'],
+            ['BNB/USDT'],
+        ]
+        assert metrics['independent_pair_evaluation'] is True
+        assert metrics['train_per_pair_profit'] == pytest.approx({
+            'BTC/USDT': 8.0,
+            'SOL/USDT': -4.0,
+        })
+        assert metrics['val_per_pair_trades'] == {
+            'ETH/USDT': 80,
+            'BNB/USDT': 90,
+        }
+        assert metrics['train_per_pair_trades_per_active_month'] == {
+            'BTC/USDT': 60.0,
+            'SOL/USDT': 35.0,
+        }
+        assert metrics['val_per_pair_trades_per_active_month'] == {
+            'ETH/USDT': pytest.approx(80 / 3),
+            'BNB/USDT': 22.5,
+        }
+        assert metrics['max_drawdown_duration_days'] == 40.0
+        assert metrics['train_max_drawdown_duration_days'] == 20.0
+        assert metrics['val_max_drawdown_duration_days'] == 40.0
+        assert metrics['max_consecutive_losses'] == 4
+        assert metrics['pair_split_profitable_pair_ratio'] == pytest.approx(0.75)
+        assert metrics['pair_split_profitable_pair_multiplier'] == pytest.approx(1.0)
+        assert metrics['pair_split_worst_pair_loss_multiplier'] == pytest.approx(1.0)
+
+    @patch('genetic_algorithm.evaluation.fitness.StrategyGenerator')
+    def test_independent_mode_makes_losing_pairs_non_compensable(self, MockGen):
+        cfg = _base_config(pair_validation={
+            'enabled': True,
+            'evaluation_mode': 'independent_pairs',
+            'training_pairs': ['BTC/USDT', 'SOL/USDT'],
+            'validation_pairs': ['ETH/USDT', 'BNB/USDT'],
+            'weight_train': 0.6,
+            'weight_val': 0.4,
+            'worst_pair_weight': 0.5,
+            'min_profitable_pair_ratio': 0.75,
+            'profitable_pair_penalty_floor': 0.1,
+            'max_pair_loss_pct': 5.0,
+            'worst_pair_loss_penalty_floor': 0.1,
+        })
+        evaluator = FitnessEvaluator(cfg)
+        evaluator.backtester = MagicMock()
+        evaluator.backtester.backtest_strategy.side_effect = [
+            _make_backtest_result(profit_percent=5.0, total_trades=60),
+            _make_backtest_result(profit_percent=-10.0, total_trades=60),
+            _make_backtest_result(profit_percent=-2.0, total_trades=60),
+            _make_backtest_result(profit_percent=-1.0, total_trades=60),
+        ]
+        evaluator.strategy_generator = MagicMock()
+        evaluator.strategy_generator.generate_strategy_code.return_value = (
+            "class TestStrat: pass"
+        )
+
+        composite, metrics = evaluator.evaluate_pair_split(_make_gene())
+
+        base_composite = (
+            metrics['train_fitness'] * 0.6
+            + metrics['val_fitness'] * 0.4
+        )
+        assert metrics['pair_split_profitable_pair_ratio'] == pytest.approx(0.25)
+        assert metrics['pair_split_profitable_pair_multiplier'] == pytest.approx(0.2)
+        assert metrics['pair_split_worst_pair_loss_multiplier'] == pytest.approx(
+            0.325
+        )
+        assert composite == pytest.approx(base_composite * 0.2 * 0.325)
 
 
 # ═══════════════════════════════════════════════════════════════════

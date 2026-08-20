@@ -10,10 +10,37 @@ import logging
 import hashlib
 import math
 from collections import OrderedDict
+from datetime import date
 from typing import Tuple, Dict, Any, List, Optional
 
 from genetic_algorithm.core.strategy_gene import StrategyGene
-from genetic_algorithm.evaluation.direct_backtester import DirectBacktester, BacktestResult
+from genetic_algorithm.evaluation.activity_metrics import count_active_trade_months
+from genetic_algorithm.evaluation.direct_backtester import (
+    BacktestResult,
+    DirectBacktester,
+    exact_backtest_net_return,
+)
+from genetic_algorithm.evaluation.profit_factor_v2 import profit_factor_for_scoring
+from genetic_algorithm.evaluation.fitness_policy_v3 import (
+    apply_feasibility_first_v3,
+    fitness_policy_v3_from_config,
+)
+from genetic_algorithm.evaluation.raw_multipair_score import (
+    PairScenario,
+    RawMultiPairPanel,
+    RawMultiPairPolicyV4,
+    score_raw_multipair,
+)
+from genetic_algorithm.evaluation.raw_multipair_score_v5 import (
+    RAW_MULTIPAIR_SCORE_V5_VERSION,
+    RawMultiPairPanelV5,
+    RawMultiPairPolicyV5,
+    score_raw_multipair_v5,
+)
+from genetic_algorithm.evaluation.period_provenance import (
+    validate_exact_period_evidence,
+    validate_exact_period_timestamps_v5,
+)
 from genetic_algorithm.strategies.generator import StrategyGenerator
 from genetic_algorithm.utils.timerange import (
     create_walk_forward_windows,
@@ -87,6 +114,7 @@ class FitnessEvaluator:
             config.get('fitness_weights', {})
         )
         self.fitness_penalties = config.get('fitness_penalties', {})
+        self.feasibility_policy_v3 = fitness_policy_v3_from_config(config)
         self.backtest_config = config.get('backtesting', {})
         self.walk_forward_config = config.get('walk_forward', {})
         self.monte_carlo_config = config.get('monte_carlo', {})
@@ -95,6 +123,68 @@ class FitnessEvaluator:
         self.pair_validation_config = config.get('pair_validation', {})
         self.pair_validation_enabled = self.pair_validation_config.get('enabled', False)
         self.validate_top_n_only = self.pair_validation_config.get('validate_top_n_only', 0)
+        self.raw_multipair_score_config = config.get('raw_multipair_score', {})
+        self.raw_multipair_score_enabled = bool(
+            self.raw_multipair_score_config.get('enabled', False)
+        )
+        self.raw_multipair_panel: Optional[RawMultiPairPanel | RawMultiPairPanelV5] = None
+        self.raw_multipair_score_version = str(
+            self.raw_multipair_score_config.get(
+                'policy_version', 'raw-multipair-score-v4'
+            )
+        )
+        if self.raw_multipair_score_enabled:
+            if self.walk_forward_config.get('enabled', False):
+                raise ValueError(
+                    'raw-multipair-score forbids walk-forward evaluation'
+                )
+            if (
+                not self.pair_validation_enabled
+                or self.pair_validation_config.get('evaluation_mode')
+                != 'independent_pairs'
+                or self.validate_top_n_only != 0
+            ):
+                raise ValueError(
+                    'raw-multipair-score requires immediate independent '
+                    'evaluation of every pair'
+                )
+            common_panel_args = {
+                'timeframe': str(config.get('backtesting', {}).get('timeframe', '')),
+                'development_pairs': tuple(
+                    self.raw_multipair_score_config.get('development_pairs', [])
+                ),
+                'validation_pairs': tuple(
+                    self.raw_multipair_score_config.get('validation_pairs', [])
+                ),
+                'fee_rate': float(config.get('backtesting', {}).get('fee', 0.0)),
+                'slippage_rate': float(
+                    config.get('backtesting', {}).get('slippage_pct', 0.0)
+                ),
+            }
+            if self.raw_multipair_score_version == RAW_MULTIPAIR_SCORE_V5_VERSION:
+                self.raw_multipair_panel = RawMultiPairPanelV5(
+                    **common_panel_args,
+                    policy=RawMultiPairPolicyV5.from_mapping(
+                        self.raw_multipair_score_config.get('policy')
+                    ),
+                )
+            elif self.raw_multipair_score_version == 'raw-multipair-score-v4':
+                self.raw_multipair_panel = RawMultiPairPanel(
+                    **common_panel_args,
+                    period_start=date.fromisoformat(
+                        str(self.raw_multipair_score_config.get('period_start'))
+                    ),
+                    period_end=date.fromisoformat(
+                        str(self.raw_multipair_score_config.get('period_end'))
+                    ),
+                    policy=RawMultiPairPolicyV4.from_mapping(
+                        self.raw_multipair_score_config.get('policy')
+                    ),
+                )
+            else:
+                raise ValueError(
+                    'raw_multipair_score.policy_version must be v4 or v5'
+                )
         
         # Fitness bounds for clamping extreme values
         fitness_bounds = config.get('fitness_bounds', {})
@@ -106,6 +196,34 @@ class FitnessEvaluator:
         self.sortino_max = fitness_bounds.get('sortino_max', 12)
         self.profit_factor_max = fitness_bounds.get('profit_factor_max', 10)
         self.profit_factor_norm = fitness_bounds.get('profit_factor_normalization', 3.0)
+        self.profit_factor_break_even_normalization = bool(
+            fitness_bounds.get('profit_factor_break_even_normalization', False)
+        )
+        self.drawdown_normalization_target = fitness_bounds.get(
+            'drawdown_normalization_target'
+        )
+        if not (
+            isinstance(self.drawdown_normalization_target, (int, float))
+            and not isinstance(self.drawdown_normalization_target, bool)
+            and math.isfinite(float(self.drawdown_normalization_target))
+            and float(self.drawdown_normalization_target) > 0.0
+        ):
+            self.drawdown_normalization_target = None
+        promotion = config.get('promotion_v2', {})
+        self.drawdown_duration_target_days = float(
+            promotion.get('max_drawdown_duration_days', 90.0)
+        )
+        if (
+            not math.isfinite(self.drawdown_duration_target_days)
+            or self.drawdown_duration_target_days <= 0
+        ):
+            self.drawdown_duration_target_days = 90.0
+        self.active_months_target = float(promotion.get('min_active_months', 0.0))
+        if (
+            not math.isfinite(self.active_months_target)
+            or self.active_months_target <= 0.0
+        ):
+            self.active_months_target = 0.0
         
         # Trade frequency thresholds
         tf_config = config.get('trade_frequency_thresholds', {})
@@ -441,6 +559,12 @@ class FitnessEvaluator:
             Tuple of (composite_fitness, metrics_dict)
         """
         pv = self.pair_validation_config
+        if pv.get("evaluation_mode", "joint") == "independent_pairs":
+            return self._evaluate_pair_split_independent(
+                strategy_gene,
+                skip_validation=skip_validation,
+            )
+
         training_pairs = pv.get('training_pairs', [])
         validation_pairs = pv.get('validation_pairs', [])
         weight_train = pv.get('weight_train', 0.6)
@@ -473,7 +597,11 @@ class FitnessEvaluator:
             
             train_metrics = self._backtest_result_to_metrics(train_result)
             train_metrics['complexity'] = strategy_gene.calculate_complexity()
-            train_fitness = self.calculate_fitness(train_metrics, strategy_gene)
+            train_fitness = self.calculate_fitness(
+                train_metrics,
+                strategy_gene,
+                apply_pair_coverage=skip_validation,
+            )
             
             # When skip_validation is set, return training-only fitness (discounted)
             # Used by validate_top_n_only to defer validation backtest to top-N only
@@ -493,6 +621,29 @@ class FitnessEvaluator:
                     'training_only': True,
                     'training_pairs': ','.join(training_pairs),
                     'validation_pairs': ','.join(validation_pairs),
+                    'train_per_pair_profit': train_metrics.get(
+                        'per_pair_profit', {}
+                    ),
+                    'train_per_pair_trades': train_metrics.get(
+                        'per_pair_trades', {}
+                    ),
+                    'train_per_pair_trades_per_active_month': train_metrics.get(
+                        'per_pair_trades_per_active_month', {}
+                    ),
+                    'train_worst_pair_trades_per_active_month': (
+                        train_metrics.get(
+                            'worst_pair_trades_per_active_month'
+                        )
+                    ),
+                    'train_worst_pair_trades': train_metrics.get(
+                        'worst_pair_trades'
+                    ),
+                    'train_active_pair_ratio': train_metrics.get(
+                        'active_pair_ratio'
+                    ),
+                    'train_pair_trade_coverage_multiplier': train_metrics.get(
+                        'pair_trade_coverage_multiplier'
+                    ),
                 }
                 logger.info(f"[PAIR-SPLIT] {generated_name}: train_only={train_fitness:.4f} "
                            f"(deferred validation)")
@@ -511,10 +662,21 @@ class FitnessEvaluator:
             
             val_metrics = self._backtest_result_to_metrics(val_result)
             val_metrics['complexity'] = strategy_gene.calculate_complexity()
-            val_fitness = self.calculate_fitness(val_metrics, strategy_gene)
+            val_fitness = self.calculate_fitness(
+                val_metrics,
+                strategy_gene,
+                apply_pair_coverage=False,
+            )
             
             # === Composite fitness ===
-            composite_fitness = train_fitness * weight_train + val_fitness * weight_val
+            train_coverage = self._pair_trade_coverage_multiplier(train_metrics)
+            val_coverage = self._pair_trade_coverage_multiplier(val_metrics)
+            pair_split_coverage = min(train_coverage, val_coverage)
+            train_metrics["pair_trade_coverage_multiplier"] = train_coverage
+            val_metrics["pair_trade_coverage_multiplier"] = val_coverage
+            composite_fitness = (
+                train_fitness * weight_train + val_fitness * weight_val
+            ) * pair_split_coverage
             
             # Generalization ratio: how well does validation fitness track training
             gen_ratio = val_fitness / (train_fitness + 1e-8)
@@ -550,6 +712,45 @@ class FitnessEvaluator:
                 'val_win_rate': val_metrics.get('win_rate', 0.0),
                 'training_pairs': ','.join(training_pairs),
                 'validation_pairs': ','.join(validation_pairs),
+                # Preserve the evidence which actually shaped both component
+                # fitness values. Aggregate trade counts hid inactive pairs in
+                # real Generic-Island checkpoints and made search diagnostics
+                # disagree with the strict V2 replay panel.
+                'train_per_pair_profit': train_metrics.get(
+                    'per_pair_profit', {}
+                ),
+                'train_per_pair_trades': train_metrics.get(
+                    'per_pair_trades', {}
+                ),
+                'train_per_pair_trades_per_active_month': train_metrics.get(
+                    'per_pair_trades_per_active_month', {}
+                ),
+                'train_worst_pair_trades_per_active_month': train_metrics.get(
+                    'worst_pair_trades_per_active_month'
+                ),
+                'train_worst_pair_trades': train_metrics.get(
+                    'worst_pair_trades'
+                ),
+                'train_active_pair_ratio': train_metrics.get(
+                    'active_pair_ratio'
+                ),
+                'train_pair_trade_coverage_multiplier': train_metrics.get(
+                    'pair_trade_coverage_multiplier'
+                ),
+                'val_per_pair_profit': val_metrics.get('per_pair_profit', {}),
+                'val_per_pair_trades': val_metrics.get('per_pair_trades', {}),
+                'val_per_pair_trades_per_active_month': val_metrics.get(
+                    'per_pair_trades_per_active_month', {}
+                ),
+                'val_worst_pair_trades_per_active_month': val_metrics.get(
+                    'worst_pair_trades_per_active_month'
+                ),
+                'val_worst_pair_trades': val_metrics.get('worst_pair_trades'),
+                'val_active_pair_ratio': val_metrics.get('active_pair_ratio'),
+                'val_pair_trade_coverage_multiplier': val_metrics.get(
+                    'pair_trade_coverage_multiplier'
+                ),
+                'pair_split_trade_coverage_multiplier': pair_split_coverage,
                 # Map pair-split validation to holdout-compatible fields so
                 # overfit_analysis.classify_overfitting() can classify as
                 # SAFE/WARNING/OVERFIT instead of UNKNOWN.
@@ -586,6 +787,781 @@ class FitnessEvaluator:
                 'profit': 0.0, 'num_trades': 0,
                 'complexity': strategy_gene.calculate_complexity(),
                 'error': str(e)
+            }
+
+    def _aggregate_independent_pair_metrics(
+        self,
+        pair_metrics: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build a pessimistic split summary from independently replayed pairs.
+
+        Joint pair backtests with ``max_open_trades=1`` let pairs compete for a
+        single portfolio slot.  That portfolio-selection effect can make every
+        joint per-pair result look profitable while the same frozen strategy
+        loses when a pair is replayed on its own.  The strict V2 promotion
+        panel is pair-independent, so the search contract must use the same
+        evidence.
+        """
+
+        worst_weight = float(
+            self.pair_validation_config.get("worst_pair_weight", 0.5)
+        )
+        worst_weight = max(0.0, min(worst_weight, 1.0))
+
+        def pessimistic(key: str, *, lower_is_better: bool = False) -> float:
+            values = [
+                float(metrics[key])
+                for metrics in pair_metrics.values()
+                if isinstance(metrics.get(key), (int, float))
+                and not isinstance(metrics.get(key), bool)
+                and math.isfinite(float(metrics[key]))
+            ]
+            if not values:
+                return 0.0
+            mean_value = sum(values) / len(values)
+            worst_value = max(values) if lower_is_better else min(values)
+            return (1.0 - worst_weight) * mean_value + worst_weight * worst_value
+
+        per_pair_profit = {
+            pair: float(metrics.get("profit", 0.0))
+            for pair, metrics in pair_metrics.items()
+        }
+        per_pair_trades = {
+            pair: int(metrics.get("num_trades", 0))
+            for pair, metrics in pair_metrics.items()
+        }
+        per_pair_trades_per_active_month = {
+            pair: float(metrics.get("trades_per_active_month", 0.0))
+            for pair, metrics in pair_metrics.items()
+        }
+        per_pair_active_months = {
+            pair: int(metrics.get("active_months", 0))
+            for pair, metrics in pair_metrics.items()
+        }
+        profits = list(per_pair_profit.values())
+        mean_profit = sum(profits) / len(profits) if profits else 0.0
+        pair_profit_std = (
+            (
+                sum((profit - mean_profit) ** 2 for profit in profits)
+                / len(profits)
+            )
+            ** 0.5
+            if profits
+            else 0.0
+        )
+        total_trades = sum(per_pair_trades.values())
+
+        summary: Dict[str, Any] = {
+            "profit": pessimistic("profit"),
+            "sharpe_ratio": pessimistic("sharpe_ratio"),
+            "sortino_ratio": pessimistic("sortino_ratio"),
+            "profit_factor": pessimistic("profit_factor"),
+            "max_drawdown": pessimistic(
+                "max_drawdown",
+                lower_is_better=True,
+            ),
+            "win_rate": pessimistic("win_rate"),
+            "avg_profit": pessimistic("avg_profit"),
+            "num_trades": total_trades,
+            "per_pair_profit": per_pair_profit,
+            "per_pair_trades": per_pair_trades,
+            "per_pair_active_months": per_pair_active_months,
+            "per_pair_trades_per_active_month": per_pair_trades_per_active_month,
+            "pair_profit_std": pair_profit_std,
+            "worst_pair_profit": min(profits) if profits else 0.0,
+            "worst_pair_trades": (
+                min(per_pair_trades.values()) if per_pair_trades else 0
+            ),
+            "worst_pair_trades_per_active_month": (
+                min(per_pair_trades_per_active_month.values())
+                if per_pair_trades_per_active_month
+                else 0.0
+            ),
+            "worst_pair_active_months": (
+                min(per_pair_active_months.values())
+                if per_pair_active_months
+                else 0
+            ),
+            "active_pair_ratio": (
+                sum(trades > 0 for trades in per_pair_trades.values())
+                / len(per_pair_trades)
+                if per_pair_trades
+                else 0.0
+            ),
+            "independent_pair_evaluation": True,
+            "independent_pair_worst_weight": worst_weight,
+            "profit_factor_censored": any(
+                bool(metrics.get("profit_factor_censored", False))
+                for metrics in pair_metrics.values()
+            ),
+            "profit_factor_censored_trade_count": min(
+                (
+                    int(metrics.get("num_trades", 0))
+                    for metrics in pair_metrics.values()
+                    if metrics.get("profit_factor_censored", False)
+                ),
+                default=total_trades,
+            ),
+            "independent_pair_metrics": {
+                pair: {
+                    "profit": metrics.get("profit", 0.0),
+                    # Raw score inputs retain their native units: profit is
+                    # percent here and is converted to a decimal ratio only
+                    # when the six-pair contract is materialized.
+                    "avg_profit": metrics.get("avg_profit"),
+                    "period_start": metrics.get("period_start"),
+                    "period_end": metrics.get("period_end"),
+                    "num_trades": metrics.get("num_trades", 0),
+                    "active_months": metrics.get("active_months", 0),
+                    "trades_per_active_month": metrics.get(
+                        "trades_per_active_month",
+                        0.0,
+                    ),
+                    "max_drawdown": metrics.get("max_drawdown", 0.0),
+                    "max_drawdown_duration_days": metrics.get(
+                        "max_drawdown_duration_days"
+                    ),
+                    "max_consecutive_losses": metrics.get(
+                        "max_consecutive_losses"
+                    ),
+                    "sharpe_ratio": metrics.get("sharpe_ratio", 0.0),
+                    "profit_factor": metrics.get("profit_factor", 0.0),
+                    "profit_factor_censored": metrics.get(
+                        "profit_factor_censored",
+                        False,
+                    ),
+                    "profit_factor_contract_version": metrics.get(
+                        "profit_factor_contract_version"
+                    ),
+                    "median_holding_hours": metrics.get(
+                        "median_holding_hours"
+                    ),
+                    "p90_holding_hours": metrics.get("p90_holding_hours"),
+                }
+                for pair, metrics in pair_metrics.items()
+            },
+        }
+        drawdown_duration = [
+            metrics.get("max_drawdown_duration_days")
+            for metrics in pair_metrics.values()
+            if metrics.get("max_drawdown_duration_days") is not None
+        ]
+        if drawdown_duration:
+            summary["max_drawdown_duration_days"] = max(drawdown_duration)
+        consecutive_losses = [
+            metrics.get("max_consecutive_losses")
+            for metrics in pair_metrics.values()
+            if metrics.get("max_consecutive_losses") is not None
+        ]
+        if consecutive_losses:
+            summary["max_consecutive_losses"] = max(consecutive_losses)
+        return summary
+
+    def _evaluate_independent_pair_group(
+        self,
+        *,
+        strategy_code: str,
+        generated_name: str,
+        strategy_gene: StrategyGene,
+        pairs: List[str],
+        split_name: str,
+    ) -> Tuple[float, Dict[str, Any], Optional[str]]:
+        """Replay every pair alone and score a pessimistic split aggregate."""
+
+        pair_metrics: Dict[str, Dict[str, Any]] = {}
+        for pair in pairs:
+            result = self.backtester.backtest_strategy(
+                strategy_code,
+                generated_name,
+                strategy_max_open_trades=strategy_gene.max_open_trades,
+                pairs_override=[pair],
+            )
+            if not result.success:
+                logger.warning(
+                    "[PAIR-SPLIT] %s: independent %s backtest failed for %s",
+                    generated_name,
+                    split_name,
+                    pair,
+                )
+                return 0.0, {}, f"{split_name}_backtest_failed:{pair}"
+            metrics = self._backtest_result_to_metrics(result)
+            metrics["complexity"] = strategy_gene.calculate_complexity()
+            pair_metrics[pair] = metrics
+
+        summary = self._aggregate_independent_pair_metrics(pair_metrics)
+        summary["complexity"] = strategy_gene.calculate_complexity()
+        if self.raw_multipair_score_enabled:
+            # Group values are evidence containers only.  Selection is
+            # performed once over the complete six-pair panel below.
+            return 0.0, summary, None
+        fitness = self.calculate_fitness(
+            summary,
+            strategy_gene,
+            apply_pair_coverage=False,
+        )
+        return fitness, summary, None
+
+    def _score_raw_complete_panel(
+        self,
+        *,
+        train_metrics: Dict[str, Any],
+        val_metrics: Dict[str, Any],
+        strategy_gene: StrategyGene,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Materialize and score exactly six independent pair outcomes."""
+
+        panel = self.raw_multipair_panel
+        if panel is None:
+            raise RuntimeError('raw multi-pair panel was not initialized')
+        raw_by_pair = {
+            **train_metrics.get('independent_pair_metrics', {}),
+            **val_metrics.get('independent_pair_metrics', {}),
+        }
+        scenarios: List[PairScenario] = []
+        for pair in (*panel.development_pairs, *panel.validation_pairs):
+            raw = raw_by_pair.get(pair)
+            if not isinstance(raw, dict):
+                scenarios.append(
+                    PairScenario(
+                        pair=pair,
+                        timeframe=panel.timeframe,
+                        success=False,
+                        trade_count=0,
+                        active_months=0,
+                        technical_error='missing independent pair evidence',
+                    )
+                )
+                continue
+            trades = raw.get('num_trades')
+            active_months = raw.get('active_months')
+            if isinstance(panel, RawMultiPairPanelV5):
+                period_evidence = validate_exact_period_timestamps_v5(
+                    expected_start=panel.period_start,
+                    expected_end=panel.period_end,
+                    observed_start=raw.get('period_start'),
+                    observed_end=raw.get('period_end'),
+                    evidence_label=pair,
+                    timeframe=panel.timeframe,
+                )
+            else:
+                period_evidence = validate_exact_period_evidence(
+                    expected_start=panel.period_start,
+                    expected_end=panel.period_end,
+                    observed_start=raw.get('period_start'),
+                    observed_end=raw.get('period_end'),
+                    evidence_label=pair,
+                    timeframe=panel.timeframe,
+                )
+            if not period_evidence.valid:
+                scenarios.append(
+                    PairScenario(
+                        pair=pair,
+                        timeframe=panel.timeframe,
+                        success=False,
+                        trade_count=0,
+                        active_months=0,
+                        technical_error=(
+                            f'{period_evidence.error_code}: '
+                            f'{period_evidence.error_detail}'
+                        ),
+                    )
+                )
+                continue
+            scenarios.append(
+                PairScenario(
+                    pair=pair,
+                    timeframe=panel.timeframe,
+                    success=True,
+                    trade_count=(
+                        int(trades)
+                        if isinstance(trades, int) and not isinstance(trades, bool)
+                        else trades
+                    ),
+                    active_months=(
+                        int(active_months)
+                        if isinstance(active_months, int)
+                        and not isinstance(active_months, bool)
+                        else active_months
+                    ),
+                    period_start=period_evidence.measured_start,
+                    period_end=period_evidence.measured_end,
+                    net_return=(
+                        raw.get('net_return')
+                        if raw.get('net_return') is not None
+                        else (
+                            float(raw['profit']) / 100.0
+                            if raw.get('profit') is not None
+                            else None
+                        )
+                    ),
+                    net_expectancy=raw.get('avg_profit'),
+                    profit_factor=raw.get('profit_factor'),
+                    profit_factor_censored=raw.get('profit_factor_censored'),
+                    median_holding_hours=raw.get('median_holding_hours'),
+                    p90_holding_hours=raw.get('p90_holding_hours'),
+                    max_drawdown=raw.get('max_drawdown'),
+                    max_drawdown_duration_days=raw.get(
+                        'max_drawdown_duration_days'
+                    ),
+                    max_consecutive_losses=raw.get('max_consecutive_losses'),
+                )
+            )
+
+        result = (
+            score_raw_multipair_v5(panel, scenarios)
+            if isinstance(panel, RawMultiPairPanelV5)
+            else score_raw_multipair(panel, scenarios)
+        )
+        raw_evidence = {scenario.pair: scenario.to_dict() for scenario in scenarios}
+        per_pair_profit = {
+            pair: float(metrics['profit'])
+            for pair, metrics in raw_by_pair.items()
+            if isinstance(metrics, dict)
+            and isinstance(metrics.get('profit'), (int, float))
+            and not isinstance(metrics.get('profit'), bool)
+            and math.isfinite(float(metrics['profit']))
+        }
+        measured_drawdowns = [
+            float(metrics['max_drawdown'])
+            for metrics in raw_by_pair.values()
+            if isinstance(metrics, dict)
+            and isinstance(metrics.get('max_drawdown'), (int, float))
+            and not isinstance(metrics.get('max_drawdown'), bool)
+            and math.isfinite(float(metrics['max_drawdown']))
+        ]
+        raw_behavior_vector: list[float] = []
+        if result.is_valid:
+            components_by_pair = result.pair_component_map()
+            for pair in (*panel.development_pairs, *panel.validation_pairs):
+                vector = components_by_pair[pair].components
+                raw_behavior_vector.extend(
+                    [
+                        vector.edge_score,
+                        vector.activity_score,
+                        vector.productive_frequency_score,
+                        vector.return_score,
+                        vector.drawdown_risk,
+                        vector.drawdown_duration_risk,
+                    ]
+                )
+        raw_logic_tokens = sorted(
+            {
+                *(
+                    f'indicator:{indicator.type}'
+                    for indicator in getattr(strategy_gene, 'indicators', [])
+                ),
+                *(
+                    f'entry:{condition.operator}:{condition.logic}'
+                    for condition in getattr(strategy_gene, 'entry_conditions', [])
+                ),
+                *(
+                    f'exit:{condition.operator}:{condition.logic}'
+                    for condition in getattr(strategy_gene, 'exit_conditions', [])
+                ),
+            }
+        )
+        base_metrics: Dict[str, Any] = {
+            'raw_multipair_score_version': result.score_version,
+            'raw_multipair_panel_id': result.panel_id,
+            'raw_multipair_status': result.status.value,
+            'raw_multipair_result': result.to_dict(),
+            'raw_pair_metrics': raw_evidence,
+            # Behavioral diversity consumes actual six-pair outcomes.  These
+            # values are descriptive only and never enter raw fitness.
+            'per_pair_profit': per_pair_profit,
+            'raw_behavior_vector': raw_behavior_vector,
+            'raw_logic_tokens': raw_logic_tokens,
+            'max_drawdown': max(measured_drawdowns, default=0.0),
+            'independent_pair_evaluation': True,
+            'training_pairs': ','.join(panel.development_pairs),
+            'validation_pairs': ','.join(panel.validation_pairs),
+            'complexity': strategy_gene.calculate_complexity(),
+            'profit': train_metrics.get('profit', 0.0),
+            'val_profit': val_metrics.get('profit', 0.0),
+            'num_trades': train_metrics.get('num_trades', 0)
+            + val_metrics.get('num_trades', 0),
+            'train_independent_pair_metrics': train_metrics.get(
+                'independent_pair_metrics', {}
+            ),
+            'val_independent_pair_metrics': val_metrics.get(
+                'independent_pair_metrics', {}
+            ),
+        }
+        if not result.is_valid or result.score is None:
+            base_metrics['error'] = (
+                f'raw_multipair_invalid:{result.reason_code}:'
+                f'{result.reason_detail or "unspecified"}'
+            )
+            return 0.0, base_metrics
+        score = float(result.score)
+        base_metrics.update(
+            {
+                'raw_multipair_score': score,
+                # Compatibility fields contain only this same raw score.  No
+                # legacy train/validation fitness is calculated or blended.
+                'train_fitness': score,
+                'val_fitness': score,
+            }
+        )
+        if any(scenario.trade_count == 0 for scenario in scenarios):
+            base_metrics['no_trades'] = True
+        logger.info(
+            '[RAW-MULTIPAIR] %s: score=%.4f panel=%s',
+            strategy_gene.individual_id,
+            score,
+            panel.panel_id,
+        )
+        return score, base_metrics
+
+    def _profitable_pair_multiplier(self, per_pair_profit: Dict[str, float]) -> float:
+        if not per_pair_profit:
+            return 0.0
+        required = float(
+            self.pair_validation_config.get("min_profitable_pair_ratio", 0.0)
+        )
+        if required <= 0.0:
+            return 1.0
+        ratio = sum(profit > 0.0 for profit in per_pair_profit.values()) / len(
+            per_pair_profit
+        )
+        if ratio >= required:
+            return 1.0
+        floor = float(
+            self.pair_validation_config.get(
+                "profitable_pair_penalty_floor",
+                0.1,
+            )
+        )
+        floor = max(0.0, min(floor, 1.0))
+        progress = max(0.0, min(ratio / required, 1.0))
+        return floor + (1.0 - floor) * progress**2
+
+    def _worst_pair_loss_multiplier(
+        self,
+        per_pair_profit: Dict[str, float],
+    ) -> float:
+        if not per_pair_profit:
+            return 0.0
+        max_loss = float(
+            self.pair_validation_config.get("max_pair_loss_pct", 0.0)
+        )
+        if max_loss <= 0.0:
+            return 1.0
+        worst_profit = min(per_pair_profit.values())
+        if worst_profit >= -max_loss:
+            return 1.0
+        floor = float(
+            self.pair_validation_config.get(
+                "worst_pair_loss_penalty_floor",
+                0.1,
+            )
+        )
+        floor = max(0.0, min(floor, 1.0))
+        progress = max(0.0, min(max_loss / abs(worst_profit), 1.0))
+        return floor + (1.0 - floor) * progress**2
+
+    def _evaluate_pair_split_independent(
+        self,
+        strategy_gene: StrategyGene,
+        *,
+        skip_validation: bool,
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Evaluate pair-split fitness on the same independent panel as V2."""
+
+        pv = self.pair_validation_config
+        training_pairs = list(pv.get("training_pairs", []))
+        validation_pairs = list(pv.get("validation_pairs", []))
+        weight_train = float(pv.get("weight_train", 0.6))
+        weight_val = float(pv.get("weight_val", 0.4))
+        weight_total = weight_train + weight_val
+        if weight_total > 0.0:
+            weight_train /= weight_total
+            weight_val /= weight_total
+        generated_name = (
+            f"GAStrategy_Gen{strategy_gene.generation}_Ind"
+            f"{strategy_gene.individual_id}"
+        )
+
+        try:
+            strategy_code = self.strategy_generator.generate_strategy_code(
+                strategy_gene
+            )
+            train_fitness, train_metrics, error = (
+                self._evaluate_independent_pair_group(
+                    strategy_code=strategy_code,
+                    generated_name=generated_name,
+                    strategy_gene=strategy_gene,
+                    pairs=training_pairs,
+                    split_name="train",
+                )
+            )
+            if error:
+                return 0.0, {
+                    "profit": 0.0,
+                    "num_trades": 0,
+                    "error": error,
+                }
+
+            if self.raw_multipair_score_enabled and skip_validation:
+                return 0.0, {
+                    "profit": 0.0,
+                    "num_trades": 0,
+                    "error": "raw_multipair_forbids_deferred_validation",
+                }
+
+            train_coverage = self._pair_trade_coverage_multiplier(train_metrics)
+            train_profitability = self._profitable_pair_multiplier(
+                train_metrics["per_pair_profit"]
+            )
+            train_loss = self._worst_pair_loss_multiplier(
+                train_metrics["per_pair_profit"]
+            )
+            if skip_validation:
+                discount = weight_train + weight_val * 0.8
+                score = (
+                    train_fitness
+                    * discount
+                    * train_coverage
+                    * train_profitability
+                    * train_loss
+                )
+                return score, {
+                    **train_metrics,
+                    "train_fitness": train_fitness,
+                    "val_fitness": None,
+                    "training_only": True,
+                    "training_pairs": ",".join(training_pairs),
+                    "validation_pairs": ",".join(validation_pairs),
+                    "train_per_pair_profit": train_metrics["per_pair_profit"],
+                    "train_per_pair_trades": train_metrics["per_pair_trades"],
+                    "train_per_pair_active_months": train_metrics[
+                        "per_pair_active_months"
+                    ],
+                    "train_per_pair_trades_per_active_month": train_metrics[
+                        "per_pair_trades_per_active_month"
+                    ],
+                    "train_worst_pair_trades_per_active_month": train_metrics[
+                        "worst_pair_trades_per_active_month"
+                    ],
+                    "train_worst_pair_trades": train_metrics[
+                        "worst_pair_trades"
+                    ],
+                    "train_active_pair_ratio": train_metrics[
+                        "active_pair_ratio"
+                    ],
+                    "train_pair_trade_coverage_multiplier": train_coverage,
+                    "pair_split_profitable_pair_multiplier": train_profitability,
+                    "pair_split_worst_pair_loss_multiplier": train_loss,
+                }
+
+            val_fitness, val_metrics, error = (
+                self._evaluate_independent_pair_group(
+                    strategy_code=strategy_code,
+                    generated_name=generated_name,
+                    strategy_gene=strategy_gene,
+                    pairs=validation_pairs,
+                    split_name="val",
+                )
+            )
+            if error:
+                return 0.0, {
+                    "profit": 0.0,
+                    "num_trades": 0,
+                    "error": error,
+                }
+
+            if self.raw_multipair_score_enabled:
+                return self._score_raw_complete_panel(
+                    train_metrics=train_metrics,
+                    val_metrics=val_metrics,
+                    strategy_gene=strategy_gene,
+                )
+
+            train_coverage = self._pair_trade_coverage_multiplier(train_metrics)
+            val_coverage = self._pair_trade_coverage_multiplier(val_metrics)
+            pair_coverage = min(train_coverage, val_coverage)
+            all_pair_profit = {
+                **train_metrics["per_pair_profit"],
+                **val_metrics["per_pair_profit"],
+            }
+            profitable_pair_ratio = sum(
+                profit > 0.0 for profit in all_pair_profit.values()
+            ) / len(all_pair_profit)
+            profitable_pair_multiplier = self._profitable_pair_multiplier(
+                all_pair_profit
+            )
+            worst_pair_loss_multiplier = self._worst_pair_loss_multiplier(
+                all_pair_profit
+            )
+            composite = (
+                train_fitness * weight_train + val_fitness * weight_val
+            )
+            worst_split_weight = float(pv.get("worst_split_weight", 0.0))
+            worst_split_weight = max(0.0, min(worst_split_weight, 1.0))
+            composite = (
+                (1.0 - worst_split_weight) * composite
+                + worst_split_weight * min(train_fitness, val_fitness)
+            )
+            composite *= (
+                pair_coverage
+                * profitable_pair_multiplier
+                * worst_pair_loss_multiplier
+            )
+
+            min_val_fitness = float(pv.get("min_val_fitness", 0.0))
+            if min_val_fitness > 0.0 and val_fitness < min_val_fitness:
+                composite *= max(0.0, val_fitness / min_val_fitness)
+
+            split_drawdown_durations = [
+                float(value)
+                for value in (
+                    train_metrics.get("max_drawdown_duration_days"),
+                    val_metrics.get("max_drawdown_duration_days"),
+                )
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ]
+            split_loss_streaks = [
+                int(value)
+                for value in (
+                    train_metrics.get("max_consecutive_losses"),
+                    val_metrics.get("max_consecutive_losses"),
+                )
+                if isinstance(value, int) and not isinstance(value, bool)
+            ]
+            metrics: Dict[str, Any] = {
+                "profit": train_metrics["profit"],
+                "sharpe_ratio": train_metrics["sharpe_ratio"],
+                "sortino_ratio": train_metrics["sortino_ratio"],
+                "max_drawdown": train_metrics["max_drawdown"],
+                "win_rate": train_metrics["win_rate"],
+                "num_trades": train_metrics["num_trades"],
+                "profit_factor": train_metrics["profit_factor"],
+                "complexity": train_metrics["complexity"],
+                "max_drawdown_duration_days": (
+                    max(split_drawdown_durations)
+                    if split_drawdown_durations
+                    else None
+                ),
+                "max_consecutive_losses": (
+                    max(split_loss_streaks) if split_loss_streaks else None
+                ),
+                "train_fitness": train_fitness,
+                "val_fitness": val_fitness,
+                "pair_generalization_ratio": val_fitness
+                / (train_fitness + 1e-8),
+                "val_profit": val_metrics["profit"],
+                "val_sharpe": val_metrics["sharpe_ratio"],
+                "val_trades": val_metrics["num_trades"],
+                "val_max_drawdown": val_metrics["max_drawdown"],
+                "val_win_rate": val_metrics["win_rate"],
+                "training_pairs": ",".join(training_pairs),
+                "validation_pairs": ",".join(validation_pairs),
+                "train_per_pair_profit": train_metrics["per_pair_profit"],
+                "train_per_pair_trades": train_metrics["per_pair_trades"],
+                "train_per_pair_active_months": train_metrics[
+                    "per_pair_active_months"
+                ],
+                "train_per_pair_trades_per_active_month": train_metrics[
+                    "per_pair_trades_per_active_month"
+                ],
+                "train_worst_pair_trades_per_active_month": train_metrics[
+                    "worst_pair_trades_per_active_month"
+                ],
+                "train_worst_pair_trades": train_metrics[
+                    "worst_pair_trades"
+                ],
+                "train_active_pair_ratio": train_metrics["active_pair_ratio"],
+                "train_pair_trade_coverage_multiplier": train_coverage,
+                "train_max_drawdown_duration_days": train_metrics.get(
+                    "max_drawdown_duration_days"
+                ),
+                "val_per_pair_profit": val_metrics["per_pair_profit"],
+                "val_per_pair_trades": val_metrics["per_pair_trades"],
+                "val_per_pair_active_months": val_metrics[
+                    "per_pair_active_months"
+                ],
+                "val_per_pair_trades_per_active_month": val_metrics[
+                    "per_pair_trades_per_active_month"
+                ],
+                "val_worst_pair_trades_per_active_month": val_metrics[
+                    "worst_pair_trades_per_active_month"
+                ],
+                "val_worst_pair_trades": val_metrics["worst_pair_trades"],
+                "val_active_pair_ratio": val_metrics["active_pair_ratio"],
+                "val_pair_trade_coverage_multiplier": val_coverage,
+                "val_max_drawdown_duration_days": val_metrics.get(
+                    "max_drawdown_duration_days"
+                ),
+                "pair_split_trade_coverage_multiplier": pair_coverage,
+                "pair_split_profitable_pair_ratio": profitable_pair_ratio,
+                "pair_split_profitable_pair_multiplier": (
+                    profitable_pair_multiplier
+                ),
+                "pair_split_worst_split_weight": worst_split_weight,
+                "pair_split_worst_pair_profit": min(all_pair_profit.values()),
+                "pair_split_worst_pair_loss_multiplier": (
+                    worst_pair_loss_multiplier
+                ),
+                "independent_pair_evaluation": True,
+                "independent_pair_worst_weight": train_metrics[
+                    "independent_pair_worst_weight"
+                ],
+                "train_independent_pair_metrics": train_metrics[
+                    "independent_pair_metrics"
+                ],
+                "val_independent_pair_metrics": val_metrics[
+                    "independent_pair_metrics"
+                ],
+                "holdout_fitness": val_fitness,
+                "holdout_degradation": (
+                    (train_fitness - val_fitness)
+                    / max(abs(train_fitness), 1e-4)
+                    if train_fitness > 1e-8
+                    else 0.0
+                ),
+                "holdout_profit": val_metrics["profit"],
+                "holdout_trades": val_metrics["num_trades"],
+                "holdout_drawdown": val_metrics["max_drawdown"],
+                "train_val_gap": (
+                    (train_fitness - val_fitness)
+                    / max(abs(train_fitness), 1e-4)
+                    if train_fitness > 1e-4
+                    else 0.0
+                ),
+            }
+            if any(
+                trades == 0
+                for trades in (
+                    list(train_metrics["per_pair_trades"].values())
+                    + list(val_metrics["per_pair_trades"].values())
+                )
+            ):
+                metrics["no_trades"] = True
+            logger.info(
+                "[PAIR-SPLIT-INDEPENDENT] %s: train=%.4f val=%.4f "
+                "composite=%.4f positive_pairs=%.2f worst_pair=%.2f%%",
+                generated_name,
+                train_fitness,
+                val_fitness,
+                composite,
+                profitable_pair_ratio,
+                min(all_pair_profit.values()),
+            )
+            return composite, metrics
+        except Exception as exc:
+            logger.error(
+                "[PAIR-SPLIT-INDEPENDENT] Error evaluating %s: %s",
+                generated_name,
+                exc,
+                exc_info=True,
+            )
+            return 0.0, {
+                "profit": 0.0,
+                "num_trades": 0,
+                "complexity": strategy_gene.calculate_complexity(),
+                "error": str(exc),
             }
     
     def run_deferred_validation(self, population) -> int:
@@ -1091,6 +2067,13 @@ class FitnessEvaluator:
         
         return avg_metrics
     
+    @staticmethod
+    def _active_months_from_result(result: BacktestResult) -> int:
+        return count_active_trade_months(
+            result.trades,
+            daily_profit_abs=result.daily_profit_abs,
+        )
+
     def _backtest_result_to_metrics(self, result: BacktestResult) -> Dict[str, float]:
         """
         Convert BacktestResult to metrics dictionary for fitness calculation.
@@ -1101,14 +2084,90 @@ class FitnessEvaluator:
         Returns:
             Dictionary of metrics
         """
+        active_months = self._active_months_from_result(result)
+        holding_minutes: List[float] = []
+        for trade in result.trades or []:
+            duration = trade.get('trade_duration') if isinstance(trade, dict) else None
+            if duration is None and isinstance(trade, dict):
+                opened = trade.get('open_timestamp')
+                closed = trade.get('close_timestamp')
+                if (
+                    isinstance(opened, (int, float))
+                    and not isinstance(opened, bool)
+                    and isinstance(closed, (int, float))
+                    and not isinstance(closed, bool)
+                    and math.isfinite(float(opened))
+                    and math.isfinite(float(closed))
+                    and float(closed) >= float(opened)
+                ):
+                    # Freqtrade serializes these timestamps in milliseconds.
+                    duration = (float(closed) - float(opened)) / 60_000.0
+            if (
+                isinstance(duration, (int, float))
+                and not isinstance(duration, bool)
+                and math.isfinite(float(duration))
+                and float(duration) >= 0.0
+            ):
+                holding_minutes.append(float(duration))
+
+        def quantile(values: List[float], probability: float) -> Optional[float]:
+            if not values:
+                return None
+            ordered = sorted(values)
+            location = probability * (len(ordered) - 1)
+            lower = math.floor(location)
+            upper = math.ceil(location)
+            if lower == upper:
+                return ordered[lower]
+            weight = location - lower
+            return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+        median_holding_minutes = quantile(holding_minutes, 0.5)
+        p90_holding_minutes = quantile(holding_minutes, 0.9)
+        # Raw multipair search and strict replay must consume the identical
+        # daily-equity drawdown definition.  Legacy fitness keeps its historic
+        # trade-level field; missing daily evidence in raw mode remains None
+        # and therefore fails closed in raw-multipair-score-v4.
+        max_drawdown = (
+            result.daily_max_drawdown
+            if getattr(self, 'raw_multipair_score_enabled', False)
+            else result.max_drawdown
+        )
         metrics = {
             'profit': result.profit_percent,
+            'net_return': exact_backtest_net_return(result),
             'sharpe_ratio': max(-10.0, min(50.0, result.sharpe_ratio)),  # Clamp to sane display range
-            'max_drawdown': result.max_drawdown,
+            'max_drawdown': max_drawdown,
             'win_rate': result.win_rate,
             'num_trades': result.total_trades,
+            'active_months': active_months,
+            'trades_per_active_month': (
+                result.total_trades / active_months if active_months else 0.0
+            ),
             'profit_factor': result.profit_factor,
+            'profit_factor_censored': result.profit_factor_censored,
+            'profit_factor_contract_version': (
+                result.profit_factor_contract_version
+            ),
             'sortino_ratio': max(-10.0, min(50.0, result.sortino_ratio)),  # Clamp to sane display range
+            # FreqTrade's ``profit_mean`` is already a decimal ratio.
+            'avg_profit': result.avg_profit,
+            # Measured period provenance is retained per independent replay;
+            # the complete raw panel refuses both missing and mismatched dates.
+            'period_start': result.backtest_start,
+            'period_end': result.backtest_end,
+            'avg_duration': result.avg_duration,
+            'median_holding_hours': (
+                median_holding_minutes / 60.0
+                if median_holding_minutes is not None
+                else None
+            ),
+            'p90_holding_hours': (
+                p90_holding_minutes / 60.0
+                if p90_holding_minutes is not None
+                else None
+            ),
+            'trades': result.trades or [],
         }
         
         # Include per-pair profits for robustness analysis
@@ -1121,14 +2180,55 @@ class FitnessEvaluator:
             if len(pair_profits) > 1:
                 mean_pp = sum(pair_profits) / len(pair_profits)
                 metrics['pair_profit_std'] = (sum((p - mean_pp) ** 2 for p in pair_profits) / len(pair_profits)) ** 0.5
+        if result.per_pair_trades:
+            metrics['per_pair_trades'] = result.per_pair_trades
+            metrics['worst_pair_trades'] = min(result.per_pair_trades.values())
+            metrics['active_pair_ratio'] = (
+                sum(count > 0 for count in result.per_pair_trades.values())
+                / len(result.per_pair_trades)
+            )
         
-        # Include tail-risk metrics
-        metrics['max_consecutive_losses'] = result.max_consecutive_losses
-        metrics['max_drawdown_duration_days'] = result.max_drawdown_duration_days
+        # Include tail-risk metrics. Missing values stay absent instead of
+        # becoming a perfect zero-risk observation.
+        if result.max_consecutive_losses is not None:
+            metrics['max_consecutive_losses'] = result.max_consecutive_losses
+        if result.max_drawdown_duration_days is not None:
+            metrics['max_drawdown_duration_days'] = result.max_drawdown_duration_days
+
+        # V2 daily-equity evidence is shadow data for now.  It is deliberately
+        # namespaced and does not replace the legacy search-score inputs until
+        # the policy has passed shadow calibration.
+        v2_fields = {
+            'v2_equity_method': result.equity_method,
+            'v2_daily_net_returns': result.daily_net_returns,
+            'v2_equity_curve': result.equity_curve,
+            'v2_annualized_net_return': result.annualized_net_return,
+            'v2_daily_sharpe_ratio': result.daily_sharpe_ratio,
+            'v2_daily_sortino_ratio': result.daily_sortino_ratio,
+            'v2_daily_expected_shortfall_5': result.daily_expected_shortfall_5,
+            'v2_calmar_ratio': result.calmar_ratio,
+            'v2_ulcer_index': result.ulcer_index,
+            'v2_time_under_water_ratio': result.time_under_water_ratio,
+            'v2_daily_max_drawdown': result.daily_max_drawdown,
+            'v2_risk_metric_contract_version': result.risk_metric_contract_version,
+            'v2_risk_periods_per_year': result.risk_periods_per_year,
+            'v2_annual_risk_free_rate': result.annual_risk_free_rate,
+            'v2_periodic_risk_free_rate': result.periodic_risk_free_rate,
+            'v2_equity_error': result.equity_error_message,
+            'v2_mark_to_market_error': result.mark_to_market_error_message,
+        }
+        metrics.update({key: value for key, value in v2_fields.items() if value is not None})
+        if result.trade_profit_ratios is not None:
+            metrics['trade_profit_ratios'] = result.trade_profit_ratios
 
         # Include monthly profits for stability analysis
         if result.monthly_profits and len(result.monthly_profits) > 1:
             metrics['monthly_profits'] = result.monthly_profits
+            if (
+                result.monthly_periods
+                and len(result.monthly_periods) == len(result.monthly_profits)
+            ):
+                metrics['monthly_periods'] = result.monthly_periods
             monthly = result.monthly_profits
             mean_monthly = sum(monthly) / len(monthly)
             metrics['monthly_return_std'] = (sum((m - mean_monthly) ** 2 for m in monthly) / len(monthly)) ** 0.5
@@ -1137,7 +2237,13 @@ class FitnessEvaluator:
         
         return metrics
     
-    def calculate_fitness(self, metrics: Dict[str, float], strategy_gene: StrategyGene = None) -> float:
+    def calculate_fitness(
+        self,
+        metrics: Dict[str, float],
+        strategy_gene: StrategyGene = None,
+        *,
+        apply_pair_coverage: bool = True,
+    ) -> float:
         """
         Calculate overall fitness score from metrics.
         
@@ -1160,6 +2266,14 @@ class FitnessEvaluator:
         drawdown = metrics.get('max_drawdown', 0)
         win_rate = metrics.get('win_rate', 0)
         trades = metrics.get('num_trades', 0)
+        profit_factor = profit_factor_for_scoring(
+            profit_factor,
+            censored=bool(metrics.get('profit_factor_censored', False)),
+            trade_count=int(
+                metrics.get('profit_factor_censored_trade_count', trades)
+            ),
+            normalization_cap=self.profit_factor_norm,
+        )
         
         # NaN/Inf protection: replace invalid values with minimum bounds
         # Using minimum bounds (not 0) prevents NaN Sharpe from scoring as 0.33
@@ -1193,10 +2307,39 @@ class FitnessEvaluator:
         norm_sharpe = (sharpe - self.sharpe_min) / sharpe_range if sharpe_range > 0 else 0
         sortino_range = self.sortino_max - self.sortino_min
         norm_sortino = (sortino - self.sortino_min) / sortino_range if sortino_range > 0 else 0
-        norm_profit_factor = min(1.0, profit_factor / self.profit_factor_norm)  # configurable via fitness_bounds.profit_factor_normalization
-        norm_drawdown = 1 - drawdown  # Lower drawdown is better
+        norm_profit_factor = self._normalize_profit_factor(profit_factor)
+        norm_drawdown = self._normalize_drawdown(drawdown)
         norm_win_rate = win_rate  # Already 0-1
-        norm_trades = self._normalize_trade_frequency(trades)
+        strict_trade_rate = metrics.get("worst_pair_trades_per_active_month")
+        target_trade_rate = self.fitness_penalties.get(
+            "target_trades_per_active_month",
+            0.0,
+        )
+        rate_target_enabled = (
+            isinstance(target_trade_rate, (int, float))
+            and not isinstance(target_trade_rate, bool)
+            and math.isfinite(float(target_trade_rate))
+            and float(target_trade_rate) > 0
+        )
+        if rate_target_enabled:
+            if (
+                isinstance(strict_trade_rate, (int, float))
+                and not isinstance(strict_trade_rate, bool)
+                and math.isfinite(float(strict_trade_rate))
+            ):
+                norm_trades = max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(strict_trade_rate) / float(target_trade_rate),
+                    ),
+                )
+            else:
+                # A rate target cannot be established from an aggregate count.
+                # Missing independent-pair evidence therefore fails closed.
+                norm_trades = 0.0
+        else:
+            norm_trades = self._normalize_trade_frequency(trades)
         
         # Clamp normalized values
         norm_profit = max(0, min(norm_profit, 1))
@@ -1219,28 +2362,38 @@ class FitnessEvaluator:
         w_trades = w.get('trade_frequency', 0.07)
         w_stability = w.get('monthly_stability', 0.06)
         w_cross_pair = w.get('cross_pair', 0.06)
-        w_dd_duration = w.get('drawdown_duration', 0.02)
-        w_consec_losses = w.get('consecutive_losses', 0.02)
+        # Optional metrics receive weight only when the resolved policy declares
+        # it.  Hidden default weights diluted the configured 1.0 weight sum and
+        # rewarded unavailable tail-risk fields in legacy results.
+        w_dd_duration = w.get('drawdown_duration', 0.0)
+        w_consec_losses = w.get('consecutive_losses', 0.0)
         
         # === Tail-risk scores ===
-        # Drawdown duration: 0 days = 1.0, 90+ days = 0.0 (linear)
-        dd_duration = metrics.get('max_drawdown_duration_days', 0)
-        norm_dd_duration = max(0.0, 1.0 - dd_duration / 90.0)
+        # Drawdown duration keeps a useful gradient even beyond the promotion
+        # boundary. The previous linear 90-day clip scored every observed
+        # 254-823 day candidate as the same zero and could not guide evolution.
+        dd_duration = metrics.get('max_drawdown_duration_days')
+        norm_dd_duration = self._normalize_drawdown_duration(dd_duration)
         # Consecutive losses: 0 = 1.0, 10+ = 0.0 (linear)
-        consec_losses = metrics.get('max_consecutive_losses', 0)
-        norm_consec_losses = max(0.0, 1.0 - consec_losses / 10.0)
+        consec_losses = metrics.get('max_consecutive_losses')
+        norm_consec_losses = (
+            max(0.0, 1.0 - consec_losses / 10.0)
+            if consec_losses is not None else 0.0
+        )
 
         # === Monthly stability score ===
         # Lower monthly return std = higher stability = better
-        monthly_return_std = metrics.get('monthly_return_std', 0)
-        positive_months = metrics.get('positive_months_ratio', 0.5)
-        if monthly_return_std > 0:
+        monthly_return_std = metrics.get('monthly_return_std')
+        positive_months = metrics.get('positive_months_ratio')
+        if monthly_return_std is None or positive_months is None:
+            norm_stability = 0.0
+        elif monthly_return_std > 0:
             # Normalize: std of 0 gets 1.0, std of 20+ gets ~0
             norm_stability = max(0, 1.0 - monthly_return_std / 20.0)
             # Bonus for high positive months ratio
             norm_stability = norm_stability * 0.7 + positive_months * 0.3
         else:
-            norm_stability = positive_months  # Zero std = perfectly stable; use positive_months ratio
+            norm_stability = positive_months  # Measured zero std; retain positive-month evidence
         
         # === Cross-pair consistency score ===
         # Penalize strategies that only work on 1-2 pairs
@@ -1253,7 +2406,7 @@ class FitnessEvaluator:
             # Low std across pairs = consistent = good
             norm_cross_pair = max(0, 1.0 - pair_profit_std / 30.0) * 0.5 + pair_consistency_ratio * 0.5
         else:
-            norm_cross_pair = 0.5  # Single pair or no data
+            norm_cross_pair = 0.0  # Missing/single-pair evidence must not earn robustness credit
         
         # Normalize weights to sum to 1.0 (handles missing or extra weights in configs)
         weights_dict = {
@@ -1371,8 +2524,23 @@ class FitnessEvaluator:
         self._dsr_tracker.register_evaluation(strategy_hash=strategy_hash)
         
         # Apply penalties and return
-        penalized_fitness = self._apply_penalties(fitness, metrics, strategy_gene)
+        penalized_fitness = self._apply_penalties(
+            fitness,
+            metrics,
+            strategy_gene,
+            apply_pair_coverage=apply_pair_coverage,
+        )
         
+        # Optional V3 ordering makes evidence and robust positive edge
+        # non-compensable while retaining a smooth gradient inside each band.
+        if self.feasibility_policy_v3 is not None:
+            penalized_fitness = apply_feasibility_first_v3(
+                penalized_fitness,
+                metrics,
+                self.feasibility_policy_v3,
+                resolved_profit_factor=profit_factor,
+            )
+
         # Ensure non-negative
         return max(0, penalized_fitness)
     
@@ -1426,8 +2594,132 @@ class FitnessEvaluator:
             score = math.exp(-z * z / 2.0)
         
         return max(0.15, min(1.0, score))
+
+    def _normalize_drawdown_duration(
+        self,
+        duration_days: Optional[float],
+    ) -> float:
+        """Return a smooth score around the configured promotion boundary."""
+
+        if duration_days is None:
+            return 0.0
+        try:
+            duration = float(duration_days)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(duration) or duration < 0:
+            return 0.0
+        target = self.drawdown_duration_target_days
+        return target / (target + duration)
+
+    def _normalize_profit_factor(self, profit_factor: float) -> float:
+        """Normalize PF with an opt-in break-even origin for edge search.
+
+        Legacy profiles retain the historical PF/normalization-cap mapping.
+        The automation profile maps PF <= 1 to zero so a merely break-even
+        strategy cannot receive the same free score as a measured edge.
+        """
+
+        value = max(0.0, float(profit_factor))
+        if not self.profit_factor_break_even_normalization:
+            return min(1.0, value / self.profit_factor_norm)
+        denominator = max(float(self.profit_factor_norm) - 1.0, 1e-12)
+        return max(0.0, min(1.0, (value - 1.0) / denominator))
+
+    def _normalize_drawdown(self, drawdown: float) -> float:
+        """Normalize drawdown with an optional, smooth policy-relative scale.
+
+        ``1 - drawdown`` compresses the realistic 4-15% range into 0.96-0.85.
+        A configured target keeps a materially useful gradient without adding
+        a pass/fail boundary.  Legacy configurations retain their old scale.
+        """
+
+        target = getattr(self, 'drawdown_normalization_target', None)
+        if target is None:
+            return 1.0 - drawdown
+        bounded_drawdown = max(0.0, float(drawdown))
+        return float(target) / (float(target) + bounded_drawdown)
     
-    def _apply_penalties(self, fitness: float, metrics: Dict[str, float], strategy_gene: StrategyGene = None) -> float:
+    def _pair_trade_coverage_multiplier(
+        self,
+        metrics: Dict[str, Any],
+    ) -> float:
+        penalties = self.fitness_penalties
+        target_rate = penalties.get('target_trades_per_active_month', 0.0)
+        worst_rate = metrics.get('worst_pair_trades_per_active_month')
+        rate_target_enabled = (
+            isinstance(target_rate, (int, float))
+            and not isinstance(target_rate, bool)
+            and math.isfinite(float(target_rate))
+            and float(target_rate) > 0
+        )
+        if rate_target_enabled:
+            coverage_floor = penalties.get('pair_trade_penalty_floor', 0.01)
+            coverage_floor = max(0.0, min(float(coverage_floor), 1.0))
+            if (
+                isinstance(worst_rate, (int, float))
+                and not isinstance(worst_rate, bool)
+                and math.isfinite(float(worst_rate))
+            ):
+                coverage_ratio = max(
+                    0.0,
+                    min(1.0, float(worst_rate) / float(target_rate)),
+                )
+            else:
+                coverage_ratio = 0.0
+            # A concentrated burst can satisfy trades/active-month while being
+            # dormant for most of the campaign.  Fold calendar coverage into
+            # this same smooth multiplier (rather than stacking another
+            # penalty) and use the weaker observation as the search signal.
+            active_target = getattr(self, 'active_months_target', 0.0)
+            if active_target > 0.0:
+                active_months = metrics.get(
+                    'worst_pair_active_months',
+                    metrics.get('active_months'),
+                )
+                if (
+                    isinstance(active_months, (int, float))
+                    and not isinstance(active_months, bool)
+                    and math.isfinite(float(active_months))
+                ):
+                    active_ratio = max(
+                        0.0,
+                        min(1.0, float(active_months) / active_target),
+                    )
+                else:
+                    active_ratio = 0.0
+                coverage_ratio = min(coverage_ratio, active_ratio)
+            exponent = penalties.get('pair_trade_coverage_exponent', 1.0)
+            if (
+                not isinstance(exponent, (int, float))
+                or isinstance(exponent, bool)
+                or not math.isfinite(float(exponent))
+                or float(exponent) <= 0.0
+            ):
+                exponent = 1.0
+            coverage_ratio = coverage_ratio ** float(exponent)
+            return coverage_floor + (1.0 - coverage_floor) * coverage_ratio
+        per_pair_target = penalties.get('target_trades_per_pair', 0)
+        per_pair_trades = metrics.get('per_pair_trades')
+        if per_pair_target <= 0 or not per_pair_trades:
+            return 1.0
+        worst_pair_trades = min(per_pair_trades.values())
+        coverage_floor = penalties.get('pair_trade_penalty_floor', 0.01)
+        coverage_floor = max(0.0, min(float(coverage_floor), 1.0))
+        coverage_ratio = max(
+            0.0,
+            min(1.0, float(worst_pair_trades) / float(per_pair_target)),
+        )
+        return coverage_floor + (1.0 - coverage_floor) * coverage_ratio
+
+    def _apply_penalties(
+        self,
+        fitness: float,
+        metrics: Dict[str, float],
+        strategy_gene: StrategyGene = None,
+        *,
+        apply_pair_coverage: bool = True,
+    ) -> float:
         """
         Apply penalties for constraint violations.
         
@@ -1464,6 +2756,16 @@ class FitnessEvaluator:
                 # Floor at 5% to avoid near-zero for strategies with very few trades
                 trade_penalty = max(0.05, trade_penalty)
                 fitness *= trade_penalty
+
+        # Search-time pair coverage must point in the same direction as the
+        # strict V2 replay panel. Aggregate counts can otherwise hide a
+        # strategy that produces dozens of trades on one pair and zero on
+        # another. Use the worst declared pair and a continuous ramp so early
+        # generations retain a useful gradient.
+        pair_trade_multiplier = 1.0
+        if apply_pair_coverage:
+            pair_trade_multiplier = self._pair_trade_coverage_multiplier(metrics)
+            metrics['pair_trade_coverage_multiplier'] = pair_trade_multiplier
         
         # Hard penalty for minimum trades per month
         # Unlike the S-curve above, this enforces a strict floor on trade frequency.
@@ -1645,13 +2947,16 @@ class FitnessEvaluator:
             fee = self.backtest_config.get('fee', 0.001)
             slippage = self.backtest_config.get('slippage_pct', 0.0)
             round_trip_cost = (fee + slippage) * 2  # entry + exit
-            avg_profit_pct = metrics.get('avg_profit', 0.0) / 100.0  # convert to decimal
+            # ``avg_profit`` is the decimal FreqTrade ``profit_mean`` value.
+            # Dividing it by 100 again made this penalty effectively trigger on
+            # almost every positive strategy.
+            avg_profit_ratio = metrics.get('avg_profit', 0.0)
             min_edge = penalties.get('spread_aware_min_edge_multiplier', 2.0)
-            if avg_profit_pct > 0 and avg_profit_pct < round_trip_cost * min_edge:
-                edge_ratio = avg_profit_pct / (round_trip_cost * min_edge) if round_trip_cost > 0 else 1.0
+            if avg_profit_ratio > 0 and avg_profit_ratio < round_trip_cost * min_edge:
+                edge_ratio = avg_profit_ratio / (round_trip_cost * min_edge) if round_trip_cost > 0 else 1.0
                 spread_penalty = max(0.5, edge_ratio)
                 fitness *= spread_penalty
-                logger.debug(f"Applied spread-aware penalty: avg_profit={avg_profit_pct:.4f}, "
+                logger.debug(f"Applied spread-aware penalty: avg_profit={avg_profit_ratio:.4f}, "
                            f"min_edge={round_trip_cost * min_edge:.4f}, penalty x{spread_penalty:.3f}")
 
         # Combined penalty floor: prevent penalty compounding from destroying
@@ -1660,6 +2965,13 @@ class FitnessEvaluator:
         min_penalized = penalties.get('min_penalty_floor', 0.10)
         if min_penalized > 0 and original_fitness > 0:
             fitness = max(fitness, original_fitness * min_penalized)
+
+        # Pair coverage is a non-compensable search constraint. Applying it
+        # before the generic penalty floor made a configured 0.01 multiplier
+        # become 0.10, allowing single-pair specialists to retain ten times
+        # their intended fitness. Keep the smooth gradient, but apply it after
+        # the floor so another penalty cannot silently weaken it.
+        fitness *= pair_trade_multiplier
         
         return fitness
 

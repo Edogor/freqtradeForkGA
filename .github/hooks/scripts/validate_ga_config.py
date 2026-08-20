@@ -2,8 +2,8 @@
 """
 GA Config Validator Hook — PreToolUse
 
-Validates YAML configs written to genetic_algorithm/config/queue/ against
-established GA constraints before the file is created.
+Validates YAML configs written to genetic_algorithm/config/ through the same
+versioned resolver used by the runtime before the file is created.
 
 Reads JSON from stdin (hook input), checks if the tool is creating/editing
 a YAML config in the queue directory, and validates constraints.
@@ -15,79 +15,19 @@ Exit codes:
 
 import json
 import sys
-import re
 
 import yaml
 
+from genetic_algorithm.config.schema import resolve_config_data
+
 
 def validate_ga_config(config: dict) -> list[str]:
-    """Return list of constraint violation messages."""
-    errors = []
-    ga = config.get("genetic_algorithm", {})
-    island = config.get("island_model", {})
-    wf = config.get("walk_forward", {})
-    fitness = config.get("fitness_weights", {})
+    """Return canonical runtime constraint violations for an inline mapping."""
 
-    # Population size for standard GA
-    pop_size = ga.get("population_size", 12)
-    island_enabled = island.get("enabled", False)
-
-    if not island_enabled and pop_size > 15:
-        errors.append(
-            f"population_size={pop_size} > 15 for standard GA. "
-            "Causes 59-65% overfitting (E19, E30). Use 10-15."
-        )
-
-    # Island model population check
-    if island_enabled:
-        islands = island.get("islands", [])
-        for isle in islands:
-            isle_pop = isle.get("population_size", 0)
-            if isle_pop < 60:
-                errors.append(
-                    f"Island '{isle.get('name', '?')}' has population_size={isle_pop} < 60. "
-                    "Causes 62-100% overfitting (E24). Use >= 60 per island."
-                )
-
-    # Island model + walk-forward incompatibility
-    wf_enabled = wf.get("enabled", False)
-    if island_enabled and wf_enabled:
-        errors.append(
-            "Island model + walk-forward are incompatible "
-            "(data partitioning conflict). Disable one."
-        )
-
-    # Tournament size
-    tournament = ga.get("tournament_size", 3)
-    if tournament < 3:
-        errors.append(
-            f"tournament_size={tournament} < 3. "
-            "Values < 3 reduce to random search. Use >= 3."
-        )
-    if tournament > 6:
-        errors.append(
-            f"tournament_size={tournament} > 6. "
-            "Causes premature convergence. Use 3-6."
-        )
-
-    # Elite size ratio
-    elite = ga.get("elite_size", 1)
-    if pop_size > 0 and elite / pop_size > 0.25:
-        errors.append(
-            f"elite_size={elite} is {elite/pop_size:.0%} of population_size={pop_size}. "
-            "Should be ~10%. High elitism kills exploration."
-        )
-
-    # NSGA-II + fitness sharing
-    mode = ga.get("selection_mode", "tournament")
-    sharing = ga.get("fitness_sharing", False)
-    if mode == "nsga2" and sharing:
-        errors.append(
-            "fitness_sharing=true with NSGA-II mode distorts Pareto front. "
-            "Disable fitness_sharing when using nsga2."
-        )
-
-    return errors
+    try:
+        return list(resolve_config_data(config).errors)
+    except (FileNotFoundError, TypeError, ValueError) as exc:
+        return [str(exc)]
 
 
 def main():

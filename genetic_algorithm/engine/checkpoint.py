@@ -3,22 +3,29 @@ Checkpoint Manager — Save/restore evolution state.
 
 Extracted from evolution.py to enable independent testing and reuse.
 The manager handles:
-  - Full checkpoint save/load (version 2 format with checksums)
+  - Full checkpoint save/load (version 3, fail-closed provenance contract)
   - Legacy checkpoint for web dashboard compatibility
   - Atomic writes (temp file + rename) to prevent corruption
   - Random state serialization for reproducible resume
 """
 
 import json
-import hashlib
+import logging
 import os
 import random
 import time
-import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from genetic_algorithm.engine.checkpoint_contract import (
+    CHECKPOINT_VERSION,
+    CheckpointCompatibilityError,
+    CheckpointProvenanceV3,
+    parse_checkpoint_provenance,
+    seal_checkpoint,
+    verify_resume_checkpoint,
+)
 from genetic_algorithm.engine.population import Population, PopulationStats
 from genetic_algorithm.genome.individual import Individual
 
@@ -49,7 +56,8 @@ class CheckpointManager:
              generation_stats: List[PopulationStats],
              extras: Optional[Dict[str, Any]] = None,
              filepath: Optional[str] = None,
-             monitor=None) -> str:
+             monitor=None,
+             provenance: CheckpointProvenanceV3 | Dict[str, Any] | None = None) -> str:
         """
         Save full evolution state to a checkpoint file.
 
@@ -65,6 +73,8 @@ class CheckpointManager:
                     aos_state, surrogate_state, map_elites_state data.
             filepath: If None, auto-generated in checkpoint_dir.
             monitor: Optional monitor to notify on save.
+            provenance: Immutable run identity.  Without it, the checkpoint is
+                        saved for diagnostics but cannot be resumed.
 
         Returns:
             Path to the saved checkpoint file.
@@ -74,9 +84,18 @@ class CheckpointManager:
             filepath = str(self.checkpoint_dir / f"checkpoint_gen{generation}_{timestamp}.json")
 
         extras = extras or {}
+        parsed_provenance = (
+            parse_checkpoint_provenance(provenance) if provenance is not None else None
+        )
 
         checkpoint = {
-            'version': 2,
+            'version': CHECKPOINT_VERSION,
+            'resume_eligible': parsed_provenance is not None,
+            'provenance': (
+                parsed_provenance.model_dump(mode='json')
+                if parsed_provenance is not None
+                else None
+            ),
             'timestamp': datetime.now().isoformat(),
             'generation': generation,
             'total_generations': ga_state.get('total_generations', 0),
@@ -131,8 +150,7 @@ class CheckpointManager:
 
         # Atomic write
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-        json_bytes = json.dumps(checkpoint, indent=2, default=str).encode('utf-8')
-        checkpoint['checksum'] = hashlib.sha256(json_bytes).hexdigest()
+        checkpoint = seal_checkpoint(checkpoint)
 
         tmp_path = filepath + '.tmp'
         with open(tmp_path, 'w') as f:
@@ -151,13 +169,20 @@ class CheckpointManager:
 
         return filepath
 
-    def load(self, filepath: str, population_size: int) -> Tuple[Population, int, Dict[str, Any]]:
+    def load(
+        self,
+        filepath: str,
+        population_size: int,
+        *,
+        expected_provenance: CheckpointProvenanceV3 | Dict[str, Any] | None = None,
+    ) -> Tuple[Population, int, Dict[str, Any]]:
         """
         Load evolution state from a checkpoint file.
 
         Args:
             filepath: Path to checkpoint JSON file.
-            population_size: Current configured population size (for warnings).
+            population_size: Current configured population size.
+            expected_provenance: Exact immutable identity of the current run.
 
         Returns:
             Tuple of (population, start_generation, state_dict).
@@ -169,35 +194,31 @@ class CheckpointManager:
         with open(filepath, 'r') as f:
             checkpoint = json.load(f)
 
-        # Verify checksum if present
-        stored_checksum = checkpoint.pop('checksum', None)
-        if stored_checksum:
-            json_bytes = json.dumps(checkpoint, indent=2, default=str).encode('utf-8')
-            computed = hashlib.sha256(json_bytes).hexdigest()
-            if computed != stored_checksum:
-                self.logger.warning(
-                    f"[CHECKPOINT] Checksum mismatch! File may be corrupted. "
-                    f"Expected {stored_checksum[:12]}..., got {computed[:12]}..."
-                )
-            else:
-                self.logger.debug("[CHECKPOINT] Checksum verified OK")
+        if expected_provenance is None:
+            raise CheckpointCompatibilityError(
+                "checkpoint load requires the current immutable provenance"
+            )
+        checkpoint = verify_resume_checkpoint(checkpoint, expected_provenance)
 
         saved_gen = checkpoint['generation']
-        ckpt_version = checkpoint.get('version', 1)
+        ckpt_version = checkpoint['version']
 
-        # Restore population — handle v1 (list) and v2 (dict) formats
+        # Resume only accepts the exact v3 population format.  Legacy formats
+        # remain readable through load_legacy() for dashboard/migration tools.
         pop_raw = checkpoint['population']
-        if isinstance(pop_raw, list):
-            # Legacy v1 format: population is a flat list of individual dicts
-            self.logger.debug("[CHECKPOINT] Detected legacy v1 checkpoint format")
-            individuals_data = pop_raw
-            pop_gen = saved_gen
-            pop_size = checkpoint.get('population_size', population_size)
-        else:
-            # v2 format: population is a dict with size/generation/individuals
-            individuals_data = pop_raw['individuals']
-            pop_gen = pop_raw.get('generation', saved_gen)
-            pop_size = pop_raw.get('size', population_size)
+        if not isinstance(pop_raw, dict):
+            raise CheckpointCompatibilityError("checkpoint population is not v3")
+        individuals_data = pop_raw['individuals']
+        pop_gen = pop_raw.get('generation', saved_gen)
+        pop_size = pop_raw.get('size', population_size)
+        if pop_size != population_size:
+            raise CheckpointCompatibilityError(
+                f"checkpoint population size differs: {pop_size} != {population_size}"
+            )
+        if len(individuals_data) != pop_size:
+            raise CheckpointCompatibilityError(
+                "checkpoint population count differs from its declared size"
+            )
 
         population = Population(size=pop_size, generation=pop_gen)
         for ind_data in individuals_data:
@@ -208,22 +229,9 @@ class CheckpointManager:
             f"individuals from generation {saved_gen} (v{ckpt_version} format)"
         )
 
-        # Build state dict — handle v1 (flat keys) and v2 (ga_state sub-dict)
-        if ckpt_version == 1 or 'ga_state' not in checkpoint:
-            # Legacy: ga state fields are top-level keys
-            best_ind_data = checkpoint.get('best_individual')
-            ga_state = {
-                'best_individual': Individual.from_dict(best_ind_data) if best_ind_data else None,
-                'best_fitness_ever': checkpoint.get('best_fitness_ever', 0.0),
-                'no_improvement_count': checkpoint.get('no_improvement_count', 0),
-                'current_mutation_rate': checkpoint.get('mutation_rate', 0.1),
-                'base_mutation_rate': checkpoint.get('mutation_rate', 0.1),
-                'catastrophic_restart_needed': False,
-            }
-        else:
-            ga_state = checkpoint.get('ga_state', {})
-            if ga_state.get('best_individual'):
-                ga_state['best_individual'] = Individual.from_dict(ga_state['best_individual'])
+        ga_state = checkpoint.get('ga_state', {})
+        if ga_state.get('best_individual'):
+            ga_state['best_individual'] = Individual.from_dict(ga_state['best_individual'])
 
         # Restore generation stats
         stats_data = checkpoint.get('generation_stats', [])
@@ -240,15 +248,6 @@ class CheckpointManager:
             )
             stat.genetic_diversity = s.get('genetic_diversity')
             restored_stats.append(stat)
-
-        # Warn on population size mismatch
-        saved_config = checkpoint.get('config_snapshot', {})
-        saved_pop_size = saved_config.get('genetic_algorithm', {}).get('population_size')
-        if saved_pop_size and saved_pop_size != population_size:
-            self.logger.warning(
-                f"[CHECKPOINT] Population size changed: checkpoint={saved_pop_size}, "
-                f"current={population_size}. Population will be adjusted."
-            )
 
         # Restore random state
         self._restore_random_state(checkpoint.get('random_state', {}))

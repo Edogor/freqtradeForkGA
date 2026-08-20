@@ -97,8 +97,7 @@ def test_full_ga_cycle():
             print(f"  ✗ Strategy {i}: {e}")
     
     if errors:
-        print(f"  FAILED: {len(errors)} generation errors")
-        return False
+        raise AssertionError(f"Generation errors: {errors}")
     print(f"  ✓ Generated {len(population)} strategies")
     
     # Step 2: Generate code for all
@@ -116,8 +115,7 @@ def test_full_ga_cycle():
             print(f"  ✗ Strategy {i} code: {e}")
     
     if errors:
-        print(f"  FAILED: {len(errors)} code generation errors")
-        return False
+        raise AssertionError(f"Code generation errors: {errors}")
     print(f"  ✓ Generated and validated {len(codes)} code files")
     
     # Step 3: Simulate backtest results and calculate fitness
@@ -156,8 +154,7 @@ def test_full_ga_cycle():
             print(f"  ✗ Strategy {i} fitness: {e}")
     
     if errors:
-        print(f"  FAILED: {len(errors)} fitness errors")
-        return False
+        raise AssertionError(f"Fitness errors: {errors}")
     
     avg_fitness = sum(fitness_scores) / len(fitness_scores)
     max_fitness = max(fitness_scores)
@@ -194,8 +191,7 @@ def test_full_ga_cycle():
             print(f"  ✗ Mutation {i}: {e}")
     
     if errors:
-        print(f"  FAILED: {len(errors)} mutation errors")
-        return False
+        raise AssertionError(f"Mutation errors: {errors}")
     print(f"  ✓ Mutated {len(mutated)} strategies")
     
     # Step 5: Simple crossover simulation (swap indicators)
@@ -231,8 +227,7 @@ def test_full_ga_cycle():
             print(f"  ✗ Crossover {i}: {e}")
     
     if errors:
-        print(f"  FAILED: {len(errors)} crossover errors")
-        return False
+        raise AssertionError(f"Crossover errors: {errors}")
     print(f"  ✓ Created {len(offspring)} offspring")
     
     # Summary
@@ -248,9 +243,6 @@ def test_full_ga_cycle():
     print("  ALL INTEGRATION TESTS PASSED!")
     print("=" * 60)
     
-    return True
-
-
 def test_strategy_code_sample():
     """Generate and print a sample strategy with new indicators."""
     print("\n" + "=" * 60)
@@ -285,7 +277,7 @@ def test_strategy_code_sample():
     print(code)
     print("\n--- End Code ---")
     
-    return code
+    assert code.strip()
 
 
 if __name__ == "__main__":
@@ -294,9 +286,9 @@ if __name__ == "__main__":
     parser.add_argument("--sample", action="store_true", help="Show sample strategy code")
     args = parser.parse_args()
     
-    success = test_full_ga_cycle()
+    test_full_ga_cycle()
     
     if args.sample:
         test_strategy_code_sample()
     
-    sys.exit(0 if success else 1)
+    sys.exit(0)

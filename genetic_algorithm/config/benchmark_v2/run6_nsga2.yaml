@@ -37,11 +37,11 @@ genetic_algorithm:
 nsga2:
   objectives:
     - name: 'profit'
-      direction: 'maximize'
-      weight: 1.0
+      type: 'maximize'
+      scale: 100.0
     - name: 'sharpe_ratio'
-      direction: 'maximize'
-      weight: 1.0
+      type: 'maximize'
+      scale: 3.0
   pareto_front_size: 20
 
 pareto_archive:

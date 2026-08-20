@@ -1,0 +1,223 @@
+# ============================================================================
+# SIS PRODUCTION — E: CONTROL — Compact 4h Variant (6×8 Ring)
+# ============================================================================
+# Compact, fast comparison run to use available CPU headroom.
+# Baseline control — no SIS. Paired with: F_sis_4h_6x8.yaml
+#
+# Target runtime: 30–60 min (sequential islands, 4h fast backtests)
+#
+# Design decisions based on wave analysis:
+#   - 4h timeframe: highest available TF (no 1d data), 4–5× faster than 15m
+#   - 6 islands × 8 pop = 48 total (compact, user-spec, within pop<15 guidance)
+#   - NO surrogate: pop=8 too small to build meaningful model in 15 gens
+#   - NO fitness sharing: added overhead not justified at this pop size
+#   - Rank selection: best fitness in E51 (0.7218) without LLM, stable convergence
+#   - Ring topology: O(n) overhead, proven best topology
+#   - 1 training pair (BTC) + 2 validation pairs (ETH+XRP): user spec, max generalization
+#   - validate_top_n_only: 5 (keep validation overhead minimal in small pop)
+#   - Fitness: profit 42%, profit_factor 22%, drawdown 18%, sharpe 13%
+#   - trade_frequency=0, win_rate=0 (wave26 lessons)
+#   - ROI [0.02, 0.15], SL [-0.20, -0.05]: calibrated for 4h candle motion
+#     (BTC 4h typical range: 1-3%; daily: 3-8% — SL -5% prevents noise stop-out)
+#   - min_trades: 8 (4h naturally produces few trades; ~2 per month realistic)
+#   - random_seed: 42 (identical to A-D for cross-experiment consistency)
+#   - No WF, holdout, MC (pair validation sufficient for exploration)
+# ============================================================================
+
+experiment_name: sis_prod_E_ctrl_4h_6x8
+
+genetic_algorithm:
+  random_seed: 42
+  population_size: 8
+  generations: 15
+  mutation_rate: 0.18
+  crossover_rate: 0.70
+  elite_size: 3
+  tournament_size: 3
+  selection_method: 'rank'
+  convergence_patience: 12
+  adaptive_mutation: true
+  max_adaptation_factor: 2.5
+  adaptation_step: 0.12
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: false
+  allow_self_crossover: false
+  random_immigrants: 1
+  mode: 'single_objective'
+
+surrogate:
+  enabled: false
+
+# === ISLAND MODEL (6 islands × 8 pop, ring topology) ===
+generic_island_model:
+  enabled: true
+  num_islands: 6
+  population_per_island: 8
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.40
+    pair_rotation: false
+  migration:
+    topology: 'ring'
+    interval: 3
+    count: 2
+    merge_rounds: false
+
+# === FITNESS — same weights as Performance variant (A/C) ===
+# profit 42% + profit_factor 22% + drawdown 18% + sharpe 13% + stability 5%
+# No trade_frequency, no win_rate
+fitness_weights:
+  profit: 0.42
+  profit_factor: 0.22
+  drawdown: 0.18
+  sharpe_ratio: 0.13
+  monthly_stability: 0.05
+
+fitness_bounds:
+  profit_min: -30.0
+  profit_max: 100.0
+
+trade_frequency_thresholds:
+  auto_scale_by_timeframe: true
+  shape: 'gaussian'
+
+fitness_penalties:
+  min_trades: 8
+  min_trades_per_month: 2
+  min_trades_per_month_penalty: 0.05
+  max_drawdown: 0.30
+  min_win_rate: 0.30
+  complexity_weight: 0.01
+
+# === BACKTESTING ===
+backtesting:
+  timerange: "20210101-20260331"
+  stake_amount: 100
+  pairs:
+    - "BTC/USDT"
+    - "ETH/USDT"
+    - "XRP/USDT"
+  max_open_trades: 2
+  fee: 0.001
+  slippage_pct: 0.0005
+  exchange: "binance"
+  auto_download_data: false
+  enable_cache: true
+  timeout: 120
+
+# === PAIR VALIDATION (1 train + 2 val — maximum generalization per user spec) ===
+pair_validation:
+  enabled: true
+  training_pairs:
+    - "BTC/USDT"
+  validation_pairs:
+    - "ETH/USDT"
+    - "XRP/USDT"
+  weight_train: 0.60
+  weight_val: 0.40
+  min_val_fitness: 0.0
+  validate_top_n_only: 5
+
+walk_forward:
+  enabled: false
+
+holdout_validation:
+  enabled: false
+
+holdout_monitoring:
+  enabled: false
+
+monte_carlo:
+  enabled: false
+
+# === STRATEGY CONSTRAINTS (calibrated for 4h candle motion) ===
+# 4h candle typical range: 1-3%; daily BTC vol: 3-8%
+# ROI [0.02, 0.15]: 2-15% per trade (one good 4h candle to multi-day move)
+# SL [-0.20, -0.05]: 5% tight to 20% loose (avoid daily-noise stop-out)
+strategy_constraints:
+  min_trades: 8
+  max_drawdown: 0.30
+  min_win_rate: 0.30
+  timeframes: ["4h"]
+  stoploss_range: [-0.200, -0.050]
+  roi_range: [0.020, 0.150]
+  max_open_trades_range: [1, 3]
+  trailing_stop_positive_range: [0.010, 0.050]
+  trailing_stop_offset_addition_range: [0.005, 0.025]
+
+# === INDICATORS ===
+indicators:
+  available:
+    - 'RSI'
+    - 'MACD'
+    - 'BBANDS'
+    - 'EMA'
+    - 'SMA'
+    - 'SUPERTREND'
+    - 'ADX'
+    - 'CCI'
+    - 'ATR'
+    - 'STOCH'
+    - 'DONCHIAN'
+    - 'WILLR'
+    - 'ROC'
+    - 'AROON'
+  min_per_strategy: 2
+  max_per_strategy: 4
+
+# === STORAGE ===
+storage:
+  database: "genetic_algorithm/data/sis_production/E_ctrl_4h.db"
+  strategy_dir: "user_data/strategies/sis_production/E_ctrl_4h"
+  checkpoint_dir: "genetic_algorithm/data/sis_production/E_ctrl_4h_checkpoints"
+  checkpoint_interval: 5
+  keep_history: true
+  min_disk_gb: 2.0
+  min_disk_gb_runtime: 1.0
+  max_cache_disk_mb: 3000
+
+# === LOGGING ===
+logging:
+  level: "INFO"
+  file: "genetic_algorithm/logs/sis_production/E_ctrl_4h_6x8.log"
+  console: true
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+visualization:
+  enabled: true
+  update_interval: 1
+  output_dir: "genetic_algorithm/output/sis_production/E_ctrl_4h/plots"
+
+terminal_monitor:
+  enabled: true
+  default_mode: "simple"
+
+hall_of_fame:
+  enabled: true
+  max_size: 30
+  inject_count: 2
+  min_fitness: 0.10
+  directory: "genetic_algorithm/data/sis_production/E_ctrl_4h_hof"
+
+deflated_sharpe:
+  enabled: true
+  min_trades: 5
+  benchmark_sr: 0.0
+  skewness_correction: true
+
+advanced:
+  parallel_evaluation: true
+  max_workers: 4
+  enable_dry_run: false
+  enable_ml_fitness: false
+
+  llm:
+    enabled: false
+
+island_model:
+  enabled: false
+
+sis:
+  enabled: false

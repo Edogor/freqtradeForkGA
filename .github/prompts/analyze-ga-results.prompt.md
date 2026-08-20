@@ -20,7 +20,8 @@ Review completed experiment results and provide actionable recommendations.
 
 ## Diagnosis Checklist
 
-- [ ] Population size within safe range?
+- [ ] Population/selection settings satisfy mechanical invariants and were compared with paired
+      seeds rather than treated as a universal “safe range”?
 - [ ] Sufficient generations for convergence?
 - [ ] Walk-forward validation applied?
 - [ ] SIS enabled and corpus fresh?

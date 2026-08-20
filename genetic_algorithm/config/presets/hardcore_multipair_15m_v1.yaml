@@ -1,0 +1,318 @@
+# Seven-day hardcore search lane: 15-minute candles.
+#
+# Search-only.  Every individual is independently evaluated on all six pairs.
+# The enabled promotion_v2 block is solely the immutable replay-panel manifest
+# required by the V2 worker; its confidence gates never enter raw multipair
+# fitness, archive ranking, recipe selection or inheritance.
+
+config_schema_version: 2
+preset: safe_v2
+
+safety_profile:
+  name: hardcore_multipair_v1
+  enforce: true
+  shadow_mode: true
+  automation_eligible: false
+  canary: false
+
+backtesting:
+  pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+  # Freqtrade stop timestamps are inclusive.  Use the final 15m candle open
+  # on 2026-03-26, not the following midnight.
+  timerange: "1683590400-1774568700"
+  timeframe: 15m
+  max_open_trades: 3
+  fee: 0.001
+  slippage_pct: 0.0005
+  fee_noise_std: 0.0
+  auto_download_data: false
+  enable_cache: true
+
+strategy_constraints:
+  timeframes: [15m]
+  canonicalize_executable_genome: true
+  # Maximum allowed genome lookback is MACD(50+14) plus the codegen buffer.
+  # 75 also fits the fixed PEPE 1h pre-listing history used by the sister lane.
+  startup_candle_floor: 75
+  startup_candle_cap: 75
+  stoploss_range: [-0.12, -0.03]
+  # Wide, low-ended execution ranges let evolution discover fast turnover;
+  # these are search bounds, not prescribed exits or profitability gates.
+  roi_range: [0.001, 0.10]
+  trailing_stop_positive_range: [0.001, 0.03]
+  trailing_stop_offset_addition_range: [0.001, 0.03]
+  max_open_trades_range: [3, 3]
+
+raw_multipair_score:
+  enabled: true
+  policy_version: raw-multipair-score-v4
+  development_pairs: [BTC/USDT, SOL/USDT, XRP/USDT]
+  validation_pairs: [BNB/USDT, ETH/USDT, PEPE/USDT]
+  period_start: "2023-05-09"
+  period_end: "2026-03-26"
+  # Continuous search policy. These are soft normalizations, never gates.
+  policy:
+    annual_return_scale: 0.20
+    expectancy_scale: 0.005
+    profit_factor_cap: 3.0
+    profit_factor_scale: 0.5
+    profit_factor_full_credit_trades: 30
+    activity_target_trades_per_month_15m: 17.0
+    activity_target_trades_per_month_1h: 10.0
+    activity_target_active_month_ratio: 0.75
+    holding_median_target_hours_15m: 8.0
+    holding_median_target_hours_1h: 12.0
+    holding_p90_target_hours_15m: 24.0
+    holding_p90_target_hours_1h: 36.0
+    max_drawdown_scale: 0.20
+    loss_streak_scale: 10.0
+    overtrading_free_trades_per_month: 60.0
+    overtrading_scale_trades_per_month: 60.0
+    development_group_weight: 0.40
+    validation_group_weight: 0.60
+    worst_pair_weight: 0.60
+    group_median_weight: 0.40
+    edge_return_weight: 0.50
+    edge_expectancy_weight: 0.30
+    edge_profit_factor_weight: 0.20
+    score_edge_weight: 0.60
+    score_productive_frequency_weight: 0.30
+    score_holding_weight: 0.02
+    score_drawdown_weight: -0.040
+    score_drawdown_duration_weight: -0.020
+    score_loss_streak_weight: -0.015
+    score_overtrading_weight: -0.005
+
+pair_validation:
+  enabled: true
+  evaluation_mode: independent_pairs
+  training_pairs: [BTC/USDT, SOL/USDT, XRP/USDT]
+  validation_pairs: [BNB/USDT, ETH/USDT, PEPE/USDT]
+  weight_train: 0.4
+  weight_val: 0.6
+  min_val_fitness: 0.0
+  validate_top_n_only: 0
+  worst_pair_weight: 0.6
+  worst_split_weight: 0.0
+  min_profitable_pair_ratio: 0.0
+  profitable_pair_penalty_floor: 1.0
+  max_pair_loss_pct: 0.0
+  worst_pair_loss_penalty_floor: 1.0
+
+# Keep the indicator universe broad while allowing evolution to explore both
+# selective conjunctions and frequent one-condition/disjunctive entries.
+indicators:
+  min_per_strategy: 1
+  max_per_strategy: 5
+  min_entry_conditions: 1
+  max_entry_conditions: 4
+  min_exit_conditions: 1
+  max_exit_conditions: 3
+  initial_or_probability: 0.50
+
+genetic_algorithm:
+  random_seed: 42
+  search_seed_salt: 0
+  # Reserve one hour inside the outer ten-hour watchdog for final common-panel
+  # and strict replay, outcome hashing and a clean checkpoint.
+  max_runtime_minutes: 540
+  population_size: 12
+  generations: 30
+  mutation_rate: 0.20
+  max_mutation_rate: 0.35
+  crossover_rate: 0.75
+  elite_size: 2
+  tournament_size: 3
+  random_immigrants: 2
+  adaptive_mutation: false
+  fitness_sharing: true
+  sharing_radius: 0.25
+  diversity_threshold: 0.10
+  behavioral_distance_weight: 0.25
+  allow_self_crossover: false
+  seed_known_archetypes: false
+  mode: single_objective
+
+parallel_evaluation:
+  enabled: true
+  num_workers: 4
+
+storage:
+  checkpoint_interval: 1
+
+generic_island_model:
+  enabled: true
+  num_islands: 12
+  population_per_island: 12
+  generations: 30
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.35
+    pair_rotation: false
+    pair_subset_size: 6
+  migration:
+    topology: ring
+    interval: 5
+    count: 1
+    merge_rounds: false
+    merge_interval: 30
+    tournament_size: 3
+  common_panel_replay:
+    enabled: true
+    interval: 3
+    top_n_per_island: 2
+    early_stop_patience: 4
+    min_improvement: 0.25
+    relative_min_improvement: 0.005
+    min_generation: 9
+  diversity_recovery:
+    enabled: true
+    island_threshold_count: 9
+    consecutive_checks_before_recovery: 2
+    consecutive_checks_after_recovery: 2
+    duplicate_fraction_threshold: 0.75
+    genetic_diversity_threshold: 0.10
+    replacement_fraction: 0.25
+    recovery_mutation_rate: 0.35
+  archive_seeding:
+    enabled: true
+    island_names: [bridge-1, bridge-2, bridge-3]
+    max_seeds_per_island: 4
+    assignments: {}
+    cross_niche_offspring_per_generation: 2
+  walk_forward:
+    enabled: false
+  external_migration:
+    enabled: false
+    directory: ""
+  islands:
+    - &momentum1
+      name: momentum-1
+      population_size: 12
+      generations: 30
+      seed: 42
+      indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - <<: *momentum1
+      name: momentum-2
+      seed: 43
+    - <<: *momentum1
+      name: momentum-3
+      seed: 44
+    - &trend1
+      name: trend-1
+      population_size: 12
+      generations: 30
+      seed: 45
+      indicator_pool: [EMA, SMA, TEMA, KAMA, SUPERTREND, AROON, PSAR]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - <<: *trend1
+      name: trend-2
+      seed: 46
+    - <<: *trend1
+      name: trend-3
+      seed: 47
+    - &volatility1
+      name: volatility-volume-1
+      population_size: 12
+      generations: 30
+      seed: 48
+      indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - <<: *volatility1
+      name: volatility-volume-2
+      seed: 49
+    - <<: *volatility1
+      name: volatility-volume-3
+      seed: 50
+    - &bridge1
+      name: bridge-1
+      population_size: 12
+      generations: 30
+      seed: 51
+      indicator_pool: [AROON, ATR, BBANDS, CCI, CMF, DONCHIAN, EMA, KAMA, MACD, MFI, OBV, PSAR, ROC, RSI, SMA, STOCH, SUPERTREND, TEMA, VROC, VWAP, WILLR]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - <<: *bridge1
+      name: bridge-2
+      seed: 52
+    - <<: *bridge1
+      name: bridge-3
+      seed: 53
+
+# Legacy weights are schema-complete only.  With raw_multipair_score enabled,
+# FitnessEvaluator bypasses calculate_fitness() and uses the versioned score.
+fitness_weights:
+  profit: 1.0
+  sharpe_ratio: 0.0
+  sortino_ratio: 0.0
+  profit_factor: 0.0
+  drawdown: 0.0
+  win_rate: 0.0
+  trade_frequency: 0.0
+  monthly_stability: 0.0
+  cross_pair: 0.0
+  drawdown_duration: 0.0
+  consecutive_losses: 0.0
+
+evaluation_v2:
+  enabled: true
+  mark_to_market: true
+  annual_risk_free_rate: 0.0
+  bootstrap_samples: 100
+  bootstrap_block_days: 10
+  expectancy_cluster_days: 1
+  trade_bootstrap_block: 5
+  bootstrap_confidence: 0.95
+
+promotion_v2:
+  enabled: true
+  policy_version: hardcore-six-pair-manifest-15m-v1
+  required_scenarios:
+    - {scenario_id: dev-btc, pair: BTC/USDT, timeframe: 15m, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-sol, pair: SOL/USDT, timeframe: 15m, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-xrp, pair: XRP/USDT, timeframe: 15m, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-bnb, pair: BNB/USDT, timeframe: 15m, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-eth, pair: ETH/USDT, timeframe: 15m, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-pepe, pair: PEPE/USDT, timeframe: 15m, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+  min_expectancy_lcb: -1.0
+  min_median_annual_return_lcb: -10.0
+  min_worst_scenario_return: -10.0
+  max_drawdown_ucb: 1.0
+  max_daily_es5_ucb: 1.0
+  min_effective_sample_size: 1
+  min_active_months: 1
+  min_trades_per_active_month: 0.0
+  min_profitable_scenario_ratio: 0.0
+  max_consecutive_losses: 1000000
+  max_drawdown_duration_days: 10000
+  require_final_test: false
+
+walk_forward:
+  enabled: false
+  gap_penalty: {enabled: false}
+holdout_validation: {enabled: false}
+holdout_monitoring: {enabled: false}
+monte_carlo: {enabled: false}
+deflated_sharpe: {enabled: false}
+surrogate: {enabled: false}
+regime_aware: {enabled: false}
+island_model: {enabled: false}
+cpcv: {enabled: false}
+sis: {enabled: false}
+llm: {enabled: false}
+advanced:
+  llm: {enabled: false}
+short_selling: {enabled: false}
+multi_timeframe: {enabled: false}
+qualification_v3: {enabled: false}
+fitness_policy_v3: {enabled: false}
+terminal_monitor: {enabled: false}
+
+output:
+  top_n: 12

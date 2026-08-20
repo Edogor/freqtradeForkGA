@@ -224,4 +224,12 @@ class ParetoArchive:
         clone.crowding_distance = ind.crowding_distance
         clone.metrics = dict(ind.metrics) if ind.metrics else {}
         clone.evaluated = ind.evaluated
+        clone.fitness_evidence = ind.fitness_evidence
+        clone.fitness_panel_id = ind.fitness_panel_id
+        clone.fitness_panel_role = ind.fitness_panel_role
+        clone.metrics['fitness_evidence'] = clone.fitness_evidence
+        if clone.fitness_panel_id is not None:
+            clone.metrics['fitness_panel_id'] = clone.fitness_panel_id
+        if clone.fitness_panel_role is not None:
+            clone.metrics['fitness_panel_role'] = clone.fitness_panel_role
         return clone

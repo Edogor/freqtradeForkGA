@@ -10,9 +10,9 @@ This module connects the regime detection pipeline to the GA fitness evaluation.
 
 import logging
 import hashlib
+import math
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple
-from statistics import harmonic_mean
+from typing import TYPE_CHECKING, Dict, Any, List, Optional, Tuple
 
 from genetic_algorithm.core.strategy_gene import StrategyGene
 from genetic_algorithm.evaluation.fitness import FitnessEvaluator
@@ -20,9 +20,11 @@ from genetic_algorithm.evaluation.direct_backtester import BacktestResult
 from genetic_algorithm.utils.regime_detector import (
     RegimeDetector,
     RegimeSegment,
-    RegimeType,
     load_ohlcv_data,
 )
+
+if TYPE_CHECKING:
+    from genetic_algorithm.utils.dataset_policy import DatasetPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,42 @@ class RegimeEvaluationResult:
     metrics: Dict[str, Any]
     success: bool
     error_message: Optional[str] = None
+
+    def trade_count(self) -> int:
+        """Return a non-negative trade count for the segment contract."""
+        if not self.success:
+            return 0
+        try:
+            return max(0, int(self.metrics.get('num_trades', 0)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    def outcome_status(self, min_segment_trades: int) -> str:
+        """Classify the result without allowing missing evidence to disappear."""
+        if not self.success:
+            return 'failed'
+        try:
+            raw_fitness = float(self.fitness)
+        except (TypeError, ValueError, OverflowError):
+            return 'invalid_fitness'
+        if not math.isfinite(raw_fitness):
+            return 'invalid_fitness'
+        trades = self.trade_count()
+        if trades == 0:
+            return 'zero_trades'
+        if trades < min_segment_trades:
+            return 'low_trades'
+        return 'ok'
+
+    def effective_fitness(self, min_segment_trades: int) -> float:
+        """Fitness used by aggregation; weak/missing evidence can never help."""
+        status = self.outcome_status(min_segment_trades)
+        if status in {'failed', 'invalid_fitness'}:
+            return 0.0
+        raw_fitness = float(self.fitness)
+        if status in {'zero_trades', 'low_trades'}:
+            return min(raw_fitness, 0.0)
+        return raw_fitness
 
 
 class RegimeAwareEvaluator:
@@ -65,7 +103,7 @@ class RegimeAwareEvaluator:
     ):
         """
         Initialize regime-aware evaluator.
-        
+
         Args:
             config: Configuration dictionary (includes regime_aware section)
             segments: Optional pre-computed segments dict with keys:
@@ -92,11 +130,20 @@ class RegimeAwareEvaluator:
         
         # CVaR parameters (for 'cvar' aggregation)
         self.cvar_alpha = self.regime_config.get('cvar_alpha', 0.2)  # Bottom 20%
-        
-        # Minimum trades per segment — segments with fewer trades produce noisy
-        # fitness values and are excluded from aggregation to prevent unreliable
-        # scores from dominating (especially under harmonic_mean).
+        if (isinstance(self.cvar_alpha, bool)
+                or not isinstance(self.cvar_alpha, (int, float))
+                or not math.isfinite(float(self.cvar_alpha))
+                or not 0.0 < float(self.cvar_alpha) <= 1.0):
+            raise ValueError("regime_aware.cvar_alpha must be finite and in (0, 1]")
+        self.cvar_alpha = float(self.cvar_alpha)
+
+        # Minimum trades per segment. Low-trade segments remain part of coverage,
+        # but positive scores are capped at zero because the evidence is weak.
         self.min_segment_trades = self.regime_config.get('min_segment_trades', 0)
+        if (isinstance(self.min_segment_trades, bool)
+                or not isinstance(self.min_segment_trades, int)
+                or self.min_segment_trades < 0):
+            raise ValueError("regime_aware.min_segment_trades must be a non-negative integer")
         
         # Cache for segment-level results: (strategy_hash, segment_id) -> RegimeEvaluationResult
         self._segment_cache: Dict[Tuple[str, str], RegimeEvaluationResult] = {}
@@ -113,6 +160,16 @@ class RegimeAwareEvaluator:
             'bearish': 1.0,
             'sideways': 1.0,
         })
+        if not isinstance(self.regime_weights, dict):
+            raise ValueError("regime_aware.regime_weights must be a mapping")
+        for regime_name, weight in self.regime_weights.items():
+            if (isinstance(weight, bool)
+                    or not isinstance(weight, (int, float))
+                    or not math.isfinite(float(weight))
+                    or float(weight) <= 0.0):
+                raise ValueError(
+                    f"regime_aware.regime_weights.{regime_name} must be finite and > 0"
+                )
         
         logger.info(
             f"RegimeAwareEvaluator initialized with {len(self._optimization_segments)} "
@@ -120,7 +177,10 @@ class RegimeAwareEvaluator:
             f"aggregation={self.aggregation_method}"
         )
         if self._holdout_segments:
-            logger.info(f"[HOLDOUT PROTECTION] Holdout segments are LOCKED - call unlock_holdout() for final validation")
+            logger.info(
+                "[HOLDOUT PROTECTION] Holdout segments are LOCKED - "
+                "call unlock_holdout() for final validation"
+            )
     
     def lock_holdout(self) -> None:
         """
@@ -189,8 +249,14 @@ class RegimeAwareEvaluator:
             segments = self._optimization_segments
             segment_type = 'optimization'
         
-        # If no segments available, fall back to standard evaluation
+        # An enabled evaluator without segments must not masquerade as a valid
+        # regime-aware run. The disabled factory path retains legacy fallback.
         if not segments:
+            if self.regime_config.get('enabled', False):
+                raise RuntimeError(
+                    f"Regime-aware evaluation is enabled but no {segment_type} "
+                    "segments are available"
+                )
             logger.warning(
                 f"No {segment_type} segments available, falling back to standard evaluation"
             )
@@ -288,7 +354,9 @@ class RegimeAwareEvaluator:
                 result = RegimeEvaluationResult(
                     segment=segment,
                     fitness=0.0,
-                    metrics={'error': backtest_result.error_message},
+                    metrics=self._failed_segment_metrics(
+                        segment, backtest_result.error_message
+                    ),
                     success=False,
                     error_message=backtest_result.error_message,
                 )
@@ -319,7 +387,7 @@ class RegimeAwareEvaluator:
             result = RegimeEvaluationResult(
                 segment=segment,
                 fitness=0.0,
-                metrics={'error': str(e)},
+                metrics=self._failed_segment_metrics(segment, str(e)),
                 success=False,
                 error_message=str(e),
             )
@@ -328,6 +396,26 @@ class RegimeAwareEvaluator:
         self._segment_cache[cache_key] = result
         
         return result
+
+    @staticmethod
+    def _failed_segment_metrics(
+        segment: RegimeSegment,
+        error_message: Optional[str],
+    ) -> Dict[str, Any]:
+        """Create a complete, conservative metric record for a failed segment."""
+        return {
+            'profit': 0.0,
+            'sharpe_ratio': 0.0,
+            'sortino_ratio': 0.0,
+            'profit_factor': 0.0,
+            'max_drawdown': 1.0,
+            'win_rate': 0.0,
+            'num_trades': 0,
+            'regime': segment.regime.value,
+            'segment_id': segment.segment_id,
+            'segment_confidence': segment.confidence,
+            'error': error_message,
+        }
     
     def _backtest_with_segment(
         self,
@@ -382,83 +470,71 @@ class RegimeAwareEvaluator:
         Returns:
             Tuple of (aggregated_fitness, aggregated_metrics)
         """
-        # Extract successful fitness scores with regime weights AND confidence
-        weighted_scores = []
+        # Every declared segment contributes an effective score. A failed,
+        # invalid, zero-trade, or low-trade segment is evidence about missing
+        # robustness and must never disappear from an aggregate.
+        weighted_scores: List[Tuple[float, float]] = []
         regime_scores: Dict[str, List[float]] = {}
         use_confidence = self.regime_config.get('confidence_weighting', True)
-        skipped_low_trades = 0
         
         # Phase 1B: regime specialization settings
         spec_config = self.regime_config.get('regime_specialization', {})
         spec_enabled = spec_config.get('enabled', False)
         specialist_boost = spec_config.get('specialist_boost', 1.5)
         diversity_weight = spec_config.get('diversity_weight', 0.05)
+        if (isinstance(specialist_boost, bool)
+                or not isinstance(specialist_boost, (int, float))
+                or not math.isfinite(float(specialist_boost))
+                or float(specialist_boost) <= 0.0):
+            raise ValueError("regime_specialization.specialist_boost must be finite and > 0")
+        if (isinstance(diversity_weight, bool)
+                or not isinstance(diversity_weight, (int, float))
+                or not math.isfinite(float(diversity_weight))
+                or float(diversity_weight) < 0.0):
+            raise ValueError("regime_specialization.diversity_weight must be finite and >= 0")
+        specialist_boost = float(specialist_boost)
+        diversity_weight = float(diversity_weight)
         
         preferred_regime = getattr(strategy_gene, 'preferred_regime', None)
         regime_mode = getattr(strategy_gene, 'regime_mode', 'generalist')
         
         for result in results:
-            if result.success and result.fitness is not None:
-                # Skip segments with too few trades — their fitness is noise
-                segment_trades = result.metrics.get('num_trades', 0)
-                if self.min_segment_trades > 0 and segment_trades < self.min_segment_trades:
-                    skipped_low_trades += 1
-                    logger.debug(
-                        f"Skipping segment {result.segment.segment_id} "
-                        f"({result.segment.regime.value}): only {segment_trades} trades "
-                        f"(min={self.min_segment_trades})"
-                    )
-                    continue
-                
-                # Phase 1B: exclusive mode — skip non-matching regimes
-                regime_type = result.segment.regime.value
-                if (spec_enabled and regime_mode == 'exclusive'
-                        and preferred_regime is not None
-                        and regime_type != preferred_regime):
-                    logger.debug(
-                        f"Exclusive mode: skipping segment {result.segment.segment_id} "
-                        f"({regime_type}) — strategy prefers {preferred_regime}"
-                    )
-                    continue
-                
-                # Apply regime weight
-                regime_weight = self.regime_weights.get(regime_type, 1.0)
-                
-                # Phase 1B: specialist mode — boost preferred regime segments
-                if (spec_enabled and regime_mode == 'specialist'
-                        and preferred_regime is not None
-                        and regime_type == preferred_regime):
-                    regime_weight *= specialist_boost
-                
-                # Apply confidence weight: scale from 0.5 (low conf) to 1.0 (high conf)
-                if use_confidence:
-                    confidence = result.segment.confidence
-                    conf_weight = 0.5 + 0.5 * max(0.0, min(1.0, confidence))
-                else:
-                    conf_weight = 1.0
-                
-                combined_weight = regime_weight * conf_weight
-                weighted_scores.append((result.fitness, combined_weight))
-                
-                # Track by regime type
-                if regime_type not in regime_scores:
-                    regime_scores[regime_type] = []
-                regime_scores[regime_type].append(result.fitness)
+            regime_type = result.segment.regime.value
+            effective_fitness = result.effective_fitness(self.min_segment_trades)
+
+            # Apply regime weight. ``exclusive`` deliberately does not remove
+            # non-preferred regimes: the gene currently changes evaluation only,
+            # not runtime trading behavior, so all phases remain in scope.
+            regime_weight = float(self.regime_weights.get(regime_type, 1.0))
+
+            # Specialist mode may emphasize its target but cannot erase others.
+            if (spec_enabled and regime_mode == 'specialist'
+                    and preferred_regime is not None
+                    and regime_type == preferred_regime):
+                regime_weight *= specialist_boost
+
+            # Apply confidence weight: scale from 0.5 (low conf) to 1.0 (high conf).
+            # Invalid confidence is conservatively treated as zero confidence.
+            if use_confidence:
+                try:
+                    confidence = float(result.segment.confidence)
+                except (TypeError, ValueError, OverflowError):
+                    confidence = 0.0
+                if not math.isfinite(confidence):
+                    confidence = 0.0
+                conf_weight = 0.5 + 0.5 * max(0.0, min(1.0, confidence))
+            else:
+                conf_weight = 1.0
+
+            combined_weight = regime_weight * conf_weight
+            weighted_scores.append((effective_fitness, combined_weight))
+            regime_scores.setdefault(regime_type, []).append(effective_fitness)
         
         if not weighted_scores:
-            logger.warning(
-                f"No successful segment evaluations (skipped {skipped_low_trades} "
-                f"low-trade segments), returning zero fitness"
-            )
-            return 0.0, {
-                'profit': 0.0,
-                'sharpe_ratio': 0.0,
-                'max_drawdown': 1.0,
-                'win_rate': 0.0,
-                'num_trades': 0,
-                'complexity': strategy_gene.calculate_complexity(),
-                'skipped_low_trade_segments': skipped_low_trades,
-            }
+            logger.warning("No regime segment results, returning fail-closed metrics")
+            aggregated_metrics = self._aggregate_metrics(results)
+            aggregated_metrics['complexity'] = strategy_gene.calculate_complexity()
+            return 0.0, aggregated_metrics
         
         # Calculate aggregated fitness
         fitness_values = [score for score, _ in weighted_scores]
@@ -473,21 +549,16 @@ class RegimeAwareEvaluator:
             aggregated_fitness = min(fitness_values)
         
         elif self.aggregation_method == 'harmonic_mean':
-            # Penalizes inconsistency (geometric interpretation: average rate)
-            # harmonic_mean requires ALL values > 0; negative/zero fitness values
-            # cause StatisticsError. Filter to positive values, fall back to
-            # weighted mean if not enough positive values remain.
-            positive_scores = [(s, w) for s, w in weighted_scores if s > 0]
-            if len(positive_scores) >= 2:
-                try:
-                    aggregated_fitness = harmonic_mean([s for s, _ in positive_scores])
-                except Exception:
-                    total_weight = sum(w for _, w in positive_scores)
-                    aggregated_fitness = sum(s * w for s, w in positive_scores) / total_weight
+            # Harmonic mean is defined here only when every segment is positive.
+            # A zero/negative outcome is the worst-case result, not a value to
+            # filter out. Positive inputs use the actual weighted harmonic mean.
+            if any(score <= 0.0 for score, _ in weighted_scores):
+                aggregated_fitness = min(fitness_values)
             else:
-                # Not enough positive values for harmonic_mean — use weighted mean
-                total_weight = sum(w for _, w in weighted_scores)
-                aggregated_fitness = sum(s * w for s, w in weighted_scores) / total_weight
+                total_weight = sum(weight for _, weight in weighted_scores)
+                aggregated_fitness = total_weight / sum(
+                    weight / score for score, weight in weighted_scores
+                )
         
         elif self.aggregation_method == 'cvar':
             # Conditional Value at Risk: average of worst alpha% outcomes
@@ -522,7 +593,13 @@ class RegimeAwareEvaluator:
 
                 # Apply as bonus/penalty for generalists only
                 # Specialists get no diversity penalty (they're supposed to focus)
-                if regime_mode == 'generalist':
+                coverage_complete = all(
+                    result.outcome_status(self.min_segment_trades) == 'ok'
+                    for result in results
+                )
+                if (regime_mode == 'generalist'
+                        and coverage_complete
+                        and aggregated_fitness > 0.0):
                     diversity_adjustment = diversity_weight * (regime_diversity_score - 0.5) * 2
                     aggregated_fitness *= (1.0 + diversity_adjustment)
                     logger.debug(
@@ -534,7 +611,6 @@ class RegimeAwareEvaluator:
         # Aggregate metrics
         aggregated_metrics = self._aggregate_metrics(results)
         aggregated_metrics['complexity'] = strategy_gene.calculate_complexity()
-        aggregated_metrics['skipped_low_trade_segments'] = skipped_low_trades
         
         # Phase 1B: add regime specialization metadata
         if spec_enabled:
@@ -558,41 +634,96 @@ class RegimeAwareEvaluator:
         Returns:
             Aggregated metrics dictionary
         """
-        successful_results = [r for r in results if r.success]
-        
-        if not successful_results:
-            return {
-                'profit': 0.0,
-                'sharpe_ratio': 0.0,
-                'max_drawdown': 1.0,
-                'win_rate': 0.0,
-                'num_trades': 0,
-            }
-        
-        # Average most metrics, but sum additive ones like num_trades
-        aggregated = {}
+        statuses = [
+            result.outcome_status(self.min_segment_trades)
+            for result in results
+        ]
+        expected_count = len(results)
+        successful_count = sum(1 for result in results if result.success)
+        eligible_count = statuses.count('ok')
+
+        # Average metrics over every expected segment. Failed segments therefore
+        # contribute conservative zeroes instead of shrinking the denominator.
+        aggregated: Dict[str, Any] = {}
         numeric_keys = ['profit', 'sharpe_ratio', 'sortino_ratio', 'profit_factor', 
                         'win_rate']
-        # Additive metrics: these should be summed, not averaged
-        additive_keys = ['num_trades']
-        
+
         for key in numeric_keys:
-            values = [r.metrics.get(key, 0) for r in successful_results if key in r.metrics]
-            aggregated[key] = sum(values) / len(values) if values else 0.0
-        
-        for key in additive_keys:
-            values = [r.metrics.get(key, 0) for r in successful_results if key in r.metrics]
-            aggregated[key] = sum(values) if values else 0
-        
-        # Max drawdown: use worst across segments
-        drawdowns = [r.metrics.get('max_drawdown', 0) for r in successful_results]
+            values = [self._finite_metric(result.metrics.get(key), 0.0) for result in results]
+            aggregated[key] = sum(values) / expected_count if expected_count else 0.0
+
+        aggregated['num_trades'] = sum(result.trade_count() for result in results)
+
+        # Missing/weak evidence cannot look like perfect zero drawdown.
+        drawdowns = []
+        for result, status in zip(results, statuses):
+            if status != 'ok':
+                drawdowns.append(1.0)
+            else:
+                drawdowns.append(
+                    max(0.0, self._finite_metric(result.metrics.get('max_drawdown'), 1.0))
+                )
         aggregated['max_drawdown'] = max(drawdowns) if drawdowns else 1.0
-        
-        # Add per-segment fitness values
-        aggregated['segment_fitness_values'] = [r.fitness for r in results]
-        aggregated['segment_success_rate'] = len(successful_results) / len(results)
+
+        outcomes = []
+        raw_fitness_values: List[Optional[float]] = []
+        effective_fitness_values: List[float] = []
+        for result, status in zip(results, statuses):
+            try:
+                raw_fitness = float(result.fitness)
+            except (TypeError, ValueError, OverflowError):
+                raw_fitness = None
+            if raw_fitness is not None and not math.isfinite(raw_fitness):
+                raw_fitness = None
+            effective_fitness = result.effective_fitness(self.min_segment_trades)
+            raw_fitness_values.append(raw_fitness)
+            effective_fitness_values.append(effective_fitness)
+            outcomes.append({
+                'segment_id': result.segment.segment_id,
+                'regime': result.segment.regime.value,
+                'status': status,
+                'num_trades': result.trade_count(),
+                'raw_fitness': raw_fitness,
+                'effective_fitness': effective_fitness,
+                'success': result.success,
+                'error': result.error_message or result.metrics.get('error'),
+            })
+
+        aggregated['segment_fitness_values'] = raw_fitness_values
+        aggregated['segment_effective_fitness_values'] = effective_fitness_values
+        aggregated['segment_outcomes'] = outcomes
+        aggregated['expected_segment_count'] = expected_count
+        aggregated['successful_segment_count'] = successful_count
+        aggregated['failed_segment_count'] = statuses.count('failed')
+        aggregated['invalid_fitness_segment_count'] = statuses.count('invalid_fitness')
+        aggregated['zero_trade_segment_count'] = statuses.count('zero_trades')
+        aggregated['low_trade_segment_count'] = statuses.count('low_trades')
+        aggregated['eligible_segment_count'] = eligible_count
+        aggregated['segment_success_rate'] = (
+            successful_count / expected_count if expected_count else 0.0
+        )
+        aggregated['segment_evidence_rate'] = (
+            eligible_count / expected_count if expected_count else 0.0
+        )
+        aggregated['segment_coverage_complete'] = (
+            expected_count > 0 and eligible_count == expected_count
+        )
+        # Legacy key retained truthfully: no low-trade segment is skipped now.
+        aggregated['skipped_low_trade_segments'] = 0
+        aggregated['penalized_low_trade_segments'] = (
+            statuses.count('zero_trades') + statuses.count('low_trades')
+        )
         
         return aggregated
+
+    @staticmethod
+    def _finite_metric(value: Any, default: float) -> float:
+        """Coerce a metric to a finite float without propagating NaN/inf."""
+        try:
+            result = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return default
+        return result if math.isfinite(result) else default
     
     def _get_regime_summary(
         self,
@@ -612,9 +743,24 @@ class RegimeAwareEvaluator:
         for result in results:
             regime_type = result.segment.regime.value
             if regime_type not in summary:
-                summary[regime_type] = {'fitness_values': [], 'count': 0}
+                summary[regime_type] = {
+                    'fitness_values': [],
+                    'raw_fitness_values': [],
+                    'eligible_count': 0,
+                    'count': 0,
+                }
             
-            summary[regime_type]['fitness_values'].append(result.fitness)
+            effective_fitness = result.effective_fitness(self.min_segment_trades)
+            summary[regime_type]['fitness_values'].append(effective_fitness)
+            try:
+                raw_fitness = float(result.fitness)
+            except (TypeError, ValueError, OverflowError):
+                raw_fitness = 0.0
+            if not math.isfinite(raw_fitness):
+                raw_fitness = 0.0
+            summary[regime_type]['raw_fitness_values'].append(raw_fitness)
+            if result.outcome_status(self.min_segment_trades) == 'ok':
+                summary[regime_type]['eligible_count'] += 1
             summary[regime_type]['count'] += 1
         
         # Calculate averages
@@ -623,7 +769,15 @@ class RegimeAwareEvaluator:
             data['avg_fitness'] = sum(values) / len(values) if values else 0.0
             data['min_fitness'] = min(values) if values else 0.0
             data['max_fitness'] = max(values) if values else 0.0
+            raw_values = data['raw_fitness_values']
+            data['raw_avg_fitness'] = (
+                sum(raw_values) / len(raw_values) if raw_values else 0.0
+            )
+            data['evidence_rate'] = (
+                data['eligible_count'] / data['count'] if data['count'] else 0.0
+            )
             del data['fitness_values']  # Remove raw values from summary
+            del data['raw_fitness_values']
         
         return summary
     
@@ -706,7 +860,7 @@ def create_regime_aware_evaluator(
         Configured RegimeAwareEvaluator
     """
     from pathlib import Path
-    from genetic_algorithm.utils.dataset_policy import DatasetPolicy, create_policy_from_config
+    from genetic_algorithm.utils.dataset_policy import create_policy_from_config
     
     regime_config = config.get('regime_aware', {})
     
@@ -788,7 +942,13 @@ def _auto_detect_segments(
             logger.warning(f"No data loaded for {benchmark_pair} {timeframe}, no segments created")
             return {}
         
-        # Create detector - support both 'method' and legacy 'detection_method' keys\n        # Default matches RegimeDetector's own default: 'adx_di_hysteresis'\n        method = regime_config.get('method', regime_config.get('detection_method', 'adx_di_hysteresis'))\n        detector = RegimeDetector(method=method)
+        # Create detector.  The legacy fallback remains readable for schema-v1
+        # configs; schema-v2 accepts only the canonical ``method`` key.
+        method = regime_config.get(
+            'method',
+            regime_config.get('detection_method', 'adx_di_hysteresis'),
+        )
+        detector = RegimeDetector(method=method)
         
         # Classify periods
         period_days = regime_config.get('period_days', 90)

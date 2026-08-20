@@ -272,9 +272,9 @@ class TestIslandCoordinator:
         backend = MagicMock()
         backend.evolve.return_value = ["result"]
         coord = IslandCoordinator(backend)
-        result = coord.evolve()
+        with pytest.raises(ValueError, match="must be a mapping"):
+            coord.evolve()
         backend.evolve.assert_called_once()
-        assert result == ["result"]
 
     def test_backend_property(self):
         backend = MagicMock()

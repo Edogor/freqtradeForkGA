@@ -165,6 +165,7 @@ def select_parents(population: Population,
     
     selector = selection_methods[method]
     parents = []
+    selected_ids = set()
     
     for _ in range(num_parents):
         max_attempts = 100  # Prevent infinite loop
@@ -179,14 +180,27 @@ def select_parents(population: Population,
                 parent = selector(population)
             
             # Check if we should accept this parent
-            if allow_duplicates or parent not in parents:
+            if allow_duplicates or id(parent) not in selected_ids:
                 parents.append(parent)
+                selected_ids.add(id(parent))
                 break
             
             attempt += 1
         
-        # If we couldn't find a unique parent after max attempts, accept duplicate
+        # A stochastic selector can repeatedly return the same best candidate.
+        # Fall back to a deterministic distinct object, never to self-crossover.
         if attempt == max_attempts and len(parents) < num_parents:
-            parents.append(parent)
+            fallback = next(
+                (
+                    candidate
+                    for candidate in population.individuals
+                    if id(candidate) not in selected_ids
+                ),
+                None,
+            )
+            if fallback is None:
+                break
+            parents.append(fallback)
+            selected_ids.add(id(fallback))
     
     return parents

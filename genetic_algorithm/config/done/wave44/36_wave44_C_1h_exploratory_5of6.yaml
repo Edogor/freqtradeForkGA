@@ -1,0 +1,152 @@
+# wave44_C_1h_exploratory_5of6
+# Auto-patched for warm-start in standard GA mode
+
+experiment_name: wave44_C_1h_exploratory_5of6
+genetic_algorithm:
+  random_seed: 4403
+  population_size: 48
+  generations: 32
+  mutation_rate: 0.28
+  crossover_rate: 0.7
+  elite_size: 3
+  tournament_size: 4
+  selection_method: rank
+  convergence_patience: 12
+  adaptive_mutation: true
+  max_adaptation_factor: 3.0
+  adaptation_step: 0.18
+  mutation_cooldown_factor: 0.5
+  fitness_sharing: true
+  sharing_radius: 0.34
+  diversity_threshold: 0.14
+  allow_self_crossover: false
+  random_immigrants: 4
+  mode: single_objective
+generic_island_model:
+  enabled: false
+  num_islands: 10
+  population_per_island: 36
+  parallel_islands: false
+  specialization:
+    rotate_seeds: true
+    indicator_pools: true
+    indicator_overlap: 0.45
+    pair_rotation: false
+  migration:
+    topology: fully_connected
+    interval: 5
+    count: 2
+    merge_rounds: true
+    merge_interval: 10
+fitness_weights:
+  trade_frequency: 0.16
+  win_rate: 0.15
+  sharpe_ratio: 0.15
+  drawdown: 0.16
+  profit: 0.14
+  sortino_ratio: 0.1
+  profit_factor: 0.08
+  monthly_stability: 0.03
+  cross_pair: 0.03
+fitness_bounds:
+  profit_min: -20.0
+  profit_max: 120.0
+  sharpe_min: -5
+  sharpe_max: 18.0
+  sortino_min: -5
+  sortino_max: 14.0
+  profit_factor_max: 10
+  profit_factor_normalization: 3.0
+fitness_penalties:
+  min_trades: 350
+  min_trades_per_month: 2.5
+  min_trades_per_month_penalty: 0.08
+  max_drawdown: 0.22
+  min_win_rate: 0.45
+  complexity_weight: 0.008
+backtesting:
+  timerange: 20210101-20260328
+  timeframe: 1h
+  datadir: user_data/data/binance
+  stake_amount: 100
+  pairs:
+  - BTC/USDT
+  - ETH/USDT
+  - BNB/USDT
+  - SOL/USDT
+  - XRP/USDT
+  - PEPE/USDT
+  max_open_trades: 3
+  fee: 0.001
+  exchange: binance
+  auto_download_data: false
+  enable_cache: true
+  timeout: 300
+pair_validation:
+  enabled: true
+  training_pairs:
+  - BTC/USDT
+  - ETH/USDT
+  - BNB/USDT
+  - SOL/USDT
+  - XRP/USDT
+  validation_pairs:
+  - PEPE/USDT
+  weight_train: 0.72
+  weight_val: 0.28
+  min_val_fitness: 0.02
+  validate_top_n_only: 12
+parallel_evaluation:
+  enabled: false
+  num_workers: 1
+walk_forward:
+  enabled: false
+holdout_validation:
+  enabled: false
+holdout_monitoring:
+  enabled: false
+monte_carlo:
+  enabled: false
+deflated_sharpe:
+  enabled: true
+  min_trades: 30
+strategy_constraints:
+  min_trades: 350
+  max_drawdown: 0.22
+  min_win_rate: 0.45
+  timeframes:
+  - 1h
+  stoploss_range:
+  - -0.13
+  - -0.06
+  roi_range:
+  - 0.005
+  - 0.03
+  max_open_trades_range:
+  - 1
+  - 3
+  max_indicators: 4
+warm_start:
+  enabled: true
+  source_type: population
+  source_checkpoint: genetic_algorithm/data/checkpoints_wave44_seed_top30.json
+  top_n: 30
+storage:
+  database: genetic_algorithm/data/wave44_C_1h_exploratory_5of6.db
+  strategy_dir: user_data/strategies/wave44_C_1h_exploratory_5of6
+  checkpoint_dir: genetic_algorithm/data/checkpoints_wave44_C_1h_exploratory_5of6
+  checkpoint_interval: 5
+  keep_history: true
+hall_of_fame:
+  enabled: true
+  max_size: 30
+  inject_count: 6
+  min_fitness: 0.1
+  directory: genetic_algorithm/data/hall_of_fame_wave44_C_1h_exploratory_5of6
+terminal_monitor:
+  enabled: true
+  default_mode: simple
+logging:
+  level: INFO
+  file: genetic_algorithm/logs/wave44_C_1h_exploratory_5of6.log
+  console: true

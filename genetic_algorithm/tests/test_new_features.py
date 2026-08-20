@@ -91,7 +91,6 @@ def test_new_trend_indicators_creation():
     if errors:
         raise AssertionError(f"Failed indicators: {errors}")
     print("  All trend indicators created successfully!")
-    return True
 
 
 def test_volume_indicators_creation():
@@ -111,7 +110,6 @@ def test_volume_indicators_creation():
     if errors:
         raise AssertionError(f"Failed indicators: {errors}")
     print("  All volume indicators created successfully!")
-    return True
 
 
 def test_candlestick_patterns_creation():
@@ -131,7 +129,6 @@ def test_candlestick_patterns_creation():
     if errors:
         raise AssertionError(f"Failed patterns: {errors}")
     print("  All candlestick patterns created successfully!")
-    return True
 
 
 # ============================================================================
@@ -157,7 +154,6 @@ def test_macd_parameter_validation():
         raise AssertionError(f"MACD validation failed: {errors[:5]}")
     
     print(f"  ✓ Created 50 MACD indicators, all have fast < slow")
-    return True
 
 
 # ============================================================================
@@ -214,7 +210,6 @@ def test_strategy_generation_with_new_indicators():
         raise AssertionError(f"Strategy generation errors: {errors}")
     
     print(f"  ✓ Generated 20 strategies, {strategies_with_new_indicators} use new indicators")
-    return True
 
 
 # ============================================================================
@@ -303,7 +298,6 @@ def test_code_generation_for_new_indicators():
         raise AssertionError(f"Code generation errors: {errors}")
     
     print("  All indicators generate valid code!")
-    return True
 
 
 # ============================================================================
@@ -364,7 +358,6 @@ def test_nan_protection_in_fitness():
         raise AssertionError(f"NaN protection errors: {errors}")
     
     print("  NaN protection working correctly!")
-    return True
 
 
 def test_bonus_capping():
@@ -430,7 +423,6 @@ def test_bonus_capping():
         print(f"  ⚠ Warning: Ratio seems high ({ratio:.2f}x), but may be due to normalized metric differences")
     
     print("  Bonus capping test complete!")
-    return True
 
 
 # ============================================================================

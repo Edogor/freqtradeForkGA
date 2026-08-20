@@ -1,333 +1,526 @@
-"""
-Tests for GA Config Validator
+"""Mechanical GA config invariants and anti-heuristic regressions."""
 
-Covers: basic validation, anti-pattern detection, preflight checks,
-and edge cases for all validation rules.
-"""
+from __future__ import annotations
+
+import copy
+import re
+import runpy
+from pathlib import Path
 
 import pytest
+import yaml
 
+from genetic_algorithm.config.invariants import (
+    CONFIG_INVARIANT_POLICY_VERSION,
+    derive_island_population_slots,
+    validate_runtime_invariants,
+)
+from genetic_algorithm.config.schema import (
+    DEFAULTS,
+    deep_merge,
+    resolve_config_data,
+    resolve_preset,
+)
 from genetic_algorithm.utils.config_validator import (
-    validate_ga_config,
-    _check_experiment_anti_patterns,
+    preflight_check,
     validate_and_log,
+    validate_ga_config,
 )
 
 
-# =============================================================================
-# HELPERS
-# =============================================================================
-
-
-def _base_config(**overrides):
-    """Create a minimal valid config, with optional overrides merged in."""
-    config = {
-        'genetic_algorithm': {
-            'population_size': 15,
-            'generations': 20,
-            'mutation_rate': 0.15,
-            'crossover_rate': 0.8,
-            'elite_size': 3,
-            'tournament_size': 3,
-            'mode': 'single_objective',
-        },
-        'backtesting': {
-            'pairs': ['BTC/USDT', 'ETH/USDT'],
-            'timerange': '20230101-20260101',
-            'datadir': 'user_data/data/binance',
-            'fee': 0.001,
-        },
-    }
-    for key, val in overrides.items():
-        if isinstance(val, dict) and key in config:
-            config[key].update(val)
-        else:
-            config[key] = val
+def _base_config() -> dict:
+    config = copy.deepcopy(DEFAULTS)
+    config["backtesting"]["timerange"] = "20230101-20260101"
     return config
 
 
-# =============================================================================
-# BASIC VALIDATION TESTS
-# =============================================================================
+def _messages(config: dict) -> tuple[list[str], list[str]]:
+    return validate_ga_config(config)
 
 
-class TestBasicValidation:
-
-    def test_valid_config_no_errors(self):
-        errors, warnings = validate_ga_config(_base_config())
-        assert errors == []
-
-    def test_missing_ga_section(self):
-        errors, _ = validate_ga_config({'backtesting': {'pairs': ['BTC/USDT']}})
-        assert any("genetic_algorithm" in e for e in errors)
-
-    def test_missing_backtesting_section(self):
-        errors, _ = validate_ga_config({'genetic_algorithm': _base_config()['genetic_algorithm']})
-        assert any("backtesting" in e for e in errors)
-
-    def test_population_size_too_small(self):
-        config = _base_config()
-        config['genetic_algorithm']['population_size'] = 1
-        errors, _ = validate_ga_config(config)
-        assert any("population_size" in e for e in errors)
-
-    def test_population_size_too_large(self):
-        config = _base_config()
-        config['genetic_algorithm']['population_size'] = 100001
-        errors, _ = validate_ga_config(config)
-        assert any("population_size" in e for e in errors)
-
-    def test_mutation_rate_out_of_range(self):
-        config = _base_config()
-        config['genetic_algorithm']['mutation_rate'] = 1.5
-        errors, _ = validate_ga_config(config)
-        assert any("mutation_rate" in e for e in errors)
-
-    def test_elite_size_exceeds_population(self):
-        config = _base_config()
-        config['genetic_algorithm']['elite_size'] = 20
-        config['genetic_algorithm']['population_size'] = 15
-        errors, _ = validate_ga_config(config)
-        assert any("elite_size" in e for e in errors)
-
-    def test_tournament_size_exceeds_population(self):
-        config = _base_config()
-        config['genetic_algorithm']['tournament_size'] = 20
-        errors, _ = validate_ga_config(config)
-        assert any("tournament_size" in e for e in errors)
-
-    def test_invalid_mode(self):
-        config = _base_config()
-        config['genetic_algorithm']['mode'] = 'invalid_mode'
-        errors, _ = validate_ga_config(config)
-        assert any("mode" in e for e in errors)
-
-    def test_empty_pairs(self):
-        config = _base_config()
-        config['backtesting']['pairs'] = []
-        errors, _ = validate_ga_config(config)
-        assert any("pairs" in e for e in errors)
-
-    def test_bad_timerange_format(self):
-        config = _base_config()
-        config['backtesting']['timerange'] = 'not-a-date'
-        errors, _ = validate_ga_config(config)
-        # Should not crash, may produce warning
-
-    def test_high_fee_warning(self):
-        config = _base_config()
-        config['backtesting']['fee'] = 0.10
-        _, warnings = validate_ga_config(config)
-        assert any("fee" in w for w in warnings)
+def _has(messages: list[str], text: str) -> bool:
+    return any(text in message for message in messages)
 
 
-# =============================================================================
-# FITNESS WEIGHTS TESTS
-# =============================================================================
+def test_policy_is_explicitly_versioned():
+    assert CONFIG_INVARIANT_POLICY_VERSION == "ga-config-invariants-v1"
 
 
-class TestFitnessWeightsValidation:
+@pytest.mark.parametrize(
+    ("population", "expected"),
+    [(2, (1, 1)), (3, (2, 1)), (10, (2, 2)), (100, (10, 10))],
+)
+def test_derived_island_slots_are_always_feasible(population, expected):
+    elite, immigrants = derive_island_population_slots(population)
 
-    def test_negative_weight_is_error(self):
-        config = _base_config()
-        config['fitness_weights'] = {'profit': -0.5, 'sharpe_ratio': 0.5}
-        errors, _ = validate_ga_config(config)
-        assert any("negative" in e for e in errors)
-
-    def test_sum_far_from_one_warns(self):
-        config = _base_config()
-        config['fitness_weights'] = {'profit': 0.1, 'sharpe_ratio': 0.1}
-        _, warnings = validate_ga_config(config)
-        assert any("sum" in w.lower() for w in warnings)
+    assert (elite, immigrants) == expected
+    assert 0 <= elite < population
+    assert 0 <= immigrants <= population - elite
 
 
-# =============================================================================
-# WALK-FORWARD VALIDATION
-# =============================================================================
+def test_default_runtime_config_satisfies_mechanical_contract():
+    errors, _ = _messages(_base_config())
+
+    assert errors == []
+    assert validate_runtime_invariants(_base_config()) == _messages(_base_config())
 
 
-class TestWalkForwardValidation:
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("population_size", 1, "population_size"),
+        ("population_size", 10_001, "population_size"),
+        ("generations", 0, "generations"),
+        ("generations", 100_001, "generations"),
+        ("elite_size", -1, "elite_size"),
+        ("tournament_size", 0, "tournament_size"),
+        ("random_immigrants", -1, "random_immigrants"),
+        ("convergence_patience", 0, "convergence_patience"),
+    ],
+)
+def test_integer_runtime_bounds_are_mechanical(field, value, expected):
+    config = _base_config()
+    config["genetic_algorithm"][field] = value
 
-    def test_short_train_days(self):
-        config = _base_config()
-        config['walk_forward'] = {'enabled': True, 'train_days': 3, 'validation_days': 7}
-        errors, _ = validate_ga_config(config)
-        assert any("train_days" in e for e in errors)
+    errors, _ = _messages(config)
 
-    def test_short_validation_days(self):
-        config = _base_config()
-        config['walk_forward'] = {'enabled': True, 'train_days': 30, 'validation_days': 0}
-        errors, _ = validate_ga_config(config)
-        assert any("validation_days" in e for e in errors)
-
-
-# =============================================================================
-# STRATEGY CONSTRAINTS VALIDATION
-# =============================================================================
-
-
-class TestStrategyConstraintValidation:
-
-    def test_inverted_stoploss_range(self):
-        config = _base_config()
-        config['strategy_constraints'] = {'stoploss_range': [-0.05, -0.20]}
-        errors, _ = validate_ga_config(config)
-        assert any("stoploss_range" in e for e in errors)
-
-    def test_positive_stoploss_upper_warns(self):
-        config = _base_config()
-        config['strategy_constraints'] = {'stoploss_range': [-0.20, 0.05]}
-        _, warnings = validate_ga_config(config)
-        assert any("stoploss" in w.lower() for w in warnings)
+    assert _has(errors, expected)
 
 
-# =============================================================================
-# INDICATOR VALIDATION
-# =============================================================================
-
-
-class TestIndicatorValidation:
-
-    def test_min_exceeds_max(self):
-        config = _base_config()
-        config['indicators'] = {'min_per_strategy': 8, 'max_per_strategy': 4}
-        errors, _ = validate_ga_config(config)
-        assert any("min_per_strategy" in e for e in errors)
-
-
-# =============================================================================
-# ANTI-PATTERN DETECTION TESTS
-# =============================================================================
-
-
-class TestAntiPatternWarnings:
-
-    def test_ap1_pop_over_15_standard_ga(self):
-        config = _base_config()
-        config['genetic_algorithm']['population_size'] = 20
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "population_size" in w for w in warnings)
-
-    def test_ap2_island_pop_over_6(self):
-        config = _base_config()
-        config['genetic_algorithm']['island_model'] = {
-            'enabled': True,
-            'population_per_island': 8,
+def test_population_slot_relationships_are_enforced():
+    config = _base_config()
+    config["genetic_algorithm"].update(
+        {
+            "population_size": 10,
+            "elite_size": 10,
+            "tournament_size": 11,
+            "random_immigrants": 11,
         }
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "island" in w.lower() for w in warnings)
+    )
 
-    def test_ap3_llm_plus_rank_selection(self):
-        config = _base_config()
-        config['genetic_algorithm']['selection_method'] = 'rank'
-        config['advanced'] = {'llm': {'enabled': True}}
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "rank" in w for w in warnings)
+    errors, _ = _messages(config)
 
-    def test_ap4_component_crossover_with_island(self):
-        config = _base_config()
-        config['genetic_algorithm']['crossover_method'] = 'component'
-        config['genetic_algorithm']['island_model'] = {'enabled': True}
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "component" in w for w in warnings)
-
-    def test_ap5_low_patience_low_elite(self):
-        config = _base_config()
-        config['genetic_algorithm']['early_stopping'] = {'patience': 4}
-        config['genetic_algorithm']['elite_size'] = 2
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "patience" in w for w in warnings)
-
-    def test_ap6_mc_permutations_over_15(self):
-        config = _base_config()
-        config['monte_carlo'] = {'enabled': True, 'num_permutations': 30}
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "permutation" in w.lower() for w in warnings)
-
-    def test_ap7_three_plus_pairs(self):
-        config = _base_config()
-        config['backtesting']['pairs'] = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "pair" in w.lower() for w in warnings)
-
-    def test_ap8_nsga2_with_fitness_sharing(self):
-        config = _base_config()
-        config['genetic_algorithm']['mode'] = 'nsga2'
-        config['genetic_algorithm']['fitness_sharing'] = True
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "fitness_sharing" in w for w in warnings)
-
-    def test_ap9_island_plus_walk_forward(self):
-        config = _base_config()
-        config['genetic_algorithm']['island_model'] = {'enabled': True}
-        config['walk_forward'] = {'enabled': True}
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "walk_forward" in w.lower() for w in warnings)
-
-    def test_ap10_island_plus_monte_carlo(self):
-        config = _base_config()
-        config['genetic_algorithm']['island_model'] = {'enabled': True}
-        config['monte_carlo'] = {'enabled': True}
-        _, warnings = validate_ga_config(config)
-        assert any("ANTI-PATTERN" in w and "monte_carlo" in w.lower() for w in warnings)
-
-    def test_no_antipatterns_for_good_config(self):
-        config = _base_config()
-        _, warnings = validate_ga_config(config)
-        assert not any("ANTI-PATTERN" in w for w in warnings)
+    assert _has(errors, "elite_size must be smaller")
+    assert _has(errors, "tournament_size must not exceed")
+    assert _has(errors, "random_immigrants exceeds")
 
 
-# =============================================================================
-# PAIR VALIDATION TESTS
-# =============================================================================
+def test_immigrants_must_fit_non_elite_slots():
+    config = _base_config()
+    config["genetic_algorithm"].update(
+        {"population_size": 10, "elite_size": 4, "random_immigrants": 7}
+    )
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, "non-elite population slots")
 
 
-class TestPairValidation:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mutation_rate", -0.01),
+        ("mutation_rate", 1.01),
+        ("max_mutation_rate", -0.01),
+        ("max_mutation_rate", 1.01),
+        ("crossover_rate", -0.01),
+        ("crossover_rate", 1.01),
+        ("sharing_radius", -0.01),
+        ("diversity_threshold", 1.01),
+        ("behavioral_distance_weight", 1.01),
+        ("mutation_cooldown_factor", 1.01),
+    ],
+)
+def test_probability_like_values_are_bounded(field, value):
+    config = _base_config()
+    config["genetic_algorithm"][field] = value
 
-    def test_valid_pair_split(self):
-        config = _base_config()
-        config['pair_validation'] = {
-            'enabled': True,
-            'training_pairs': ['BTC/USDT'],
-            'validation_pairs': ['ETH/USDT'],
-            'weight_train': 0.6,
-            'weight_val': 0.4,
+    errors, _ = _messages(config)
+
+    assert _has(errors, field)
+
+
+def test_base_mutation_cannot_exceed_adaptive_ceiling():
+    config = _base_config()
+    config["genetic_algorithm"].update(
+        {"mutation_rate": 0.4, "max_mutation_rate": 0.3}
+    )
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, "mutation_rate must not exceed")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mode", "multi_objective"),
+        ("selection_method", "best_only"),
+        ("crossover_method", "invented"),
+    ],
+)
+def test_runtime_dispatch_values_must_exist(field, value):
+    config = _base_config()
+    config["genetic_algorithm"][field] = value
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, field)
+
+
+def test_tournament_size_one_is_valid_but_explicitly_random():
+    config = _base_config()
+    config["genetic_algorithm"]["tournament_size"] = 1
+
+    errors, warnings = _messages(config)
+
+    assert errors == []
+    assert _has(warnings, "uniform random")
+
+
+def test_nsga2_reports_ignored_legacy_selection_without_false_failure():
+    config = _base_config()
+    config["genetic_algorithm"].update(
+        {"mode": "nsga2", "selection_method": "tournament"}
+    )
+
+    errors, warnings = _messages(config)
+
+    assert errors == []
+    assert _has(warnings, "engine forces nsga2 selection")
+
+
+@pytest.mark.parametrize(
+    ("pairs", "expected"),
+    [
+        ([], "non-empty list"),
+        (["BTC/USDT", "BTC/USDT"], "duplicate pairs"),
+        (["BTC/USDT", ""], "non-empty strings"),
+    ],
+)
+def test_pair_list_has_only_structural_constraints(pairs, expected):
+    config = _base_config()
+    config["backtesting"]["pairs"] = pairs
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, expected)
+
+
+def test_many_pairs_and_large_population_are_not_declared_unsafe():
+    config = _base_config()
+    config["genetic_algorithm"].update(
+        {
+            "population_size": 100,
+            "elite_size": 10,
+            "tournament_size": 8,
+            "random_immigrants": 15,
         }
-        errors, _ = validate_ga_config(config)
-        assert not any("pair_validation" in e for e in errors)
+    )
+    config["backtesting"]["pairs"] = [
+        "BTC/USDT",
+        "ETH/USDT",
+        "BNB/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "ADA/USDT",
+    ]
 
-    def test_empty_training_pairs(self):
-        config = _base_config()
-        config['pair_validation'] = {
-            'enabled': True,
-            'training_pairs': [],
-            'validation_pairs': ['ETH/USDT'],
+    errors, warnings = _messages(config)
+
+    assert errors == []
+    assert not _has(warnings, "safe ceiling")
+    assert not _has(warnings, "ANTI-PATTERN")
+    assert not _has(warnings, "generaliz")
+
+
+@pytest.mark.parametrize(
+    "timerange",
+    [
+        "not-a-date",
+        "20240230-20240301",
+        "20250101-20240101",
+        "20250101-20250101",
+    ],
+)
+def test_timerange_must_be_parseable_and_forward(timerange):
+    config = _base_config()
+    config["backtesting"]["timerange"] = timerange
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, "timerange")
+
+
+def test_empty_timerange_is_valid_with_factual_warning():
+    config = _base_config()
+    config["backtesting"]["timerange"] = ""
+
+    errors, warnings = _messages(config)
+
+    assert errors == []
+    assert _has(warnings, "all available data")
+
+
+def test_exact_epoch_timerange_is_valid_for_derived_worker_config():
+    config = _base_config()
+    config["backtesting"]["timerange"] = "1679702400-1774566000"
+
+    errors, _ = _messages(config)
+
+    assert not _has(errors, "timerange")
+
+
+def test_fitness_weights_are_normalized_not_forced_to_sum_to_one():
+    config = _base_config()
+    config["fitness_weights"] = {"profit": 3.0, "drawdown": 2.0}
+
+    errors, warnings = _messages(config)
+
+    assert errors == []
+    assert not _has(warnings, "sum")
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        {"profit": -0.1},
+        {"profit": float("nan")},
+        {"profit": 0.0, "drawdown": 0.0},
+        {"not_a_metric": 1.0},
+    ],
+)
+def test_fitness_weights_must_be_finite_nonnegative_and_effective(weights):
+    config = _base_config()
+    config["fitness_weights"] = weights
+
+    errors, _ = _messages(config)
+
+    assert errors
+
+
+def test_pair_validation_requires_disjoint_nonempty_sets():
+    config = _base_config()
+    config["pair_validation"] = {
+        "enabled": True,
+        "training_pairs": ["BTC/USDT"],
+        "validation_pairs": ["BTC/USDT"],
+        "weight_train": 0.6,
+        "weight_val": 0.4,
+    }
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, "must be disjoint")
+
+
+def test_pair_validation_accepts_any_positive_weight_scale():
+    config = _base_config()
+    config["pair_validation"] = {
+        "enabled": True,
+        "training_pairs": ["BTC/USDT"],
+        "validation_pairs": ["ETH/USDT"],
+        "weight_train": 3.0,
+        "weight_val": 1.0,
+    }
+
+    errors, _ = _messages(config)
+
+    assert errors == []
+
+
+@pytest.mark.parametrize("workers", [0, -1, True])
+def test_explicit_parallel_worker_count_must_be_positive_integer(workers):
+    config = _base_config()
+    config["parallel_evaluation"]["num_workers"] = workers
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, "num_workers")
+
+
+def test_auto_parallel_worker_count_remains_valid():
+    config = _base_config()
+    config["parallel_evaluation"]["num_workers"] = None
+
+    errors, _ = _messages(config)
+
+    assert errors == []
+
+
+@pytest.mark.parametrize("population", [2, 6, 8, 60, 100])
+def test_island_population_has_no_empirical_magic_number(population):
+    config = _base_config()
+    config["generic_island_model"].update(
+        {"enabled": True, "num_islands": 4, "population_per_island": population}
+    )
+    config["generic_island_model"]["migration"]["count"] = min(2, population)
+
+    errors, warnings = _messages(config)
+
+    assert errors == []
+    assert not _has(warnings, "safe limit")
+    assert not _has(warnings, "overfit")
+
+
+def test_generic_island_migration_must_fit_source_population():
+    config = _base_config()
+    config["generic_island_model"].update(
+        {"enabled": True, "num_islands": 4, "population_per_island": 3}
+    )
+    config["generic_island_model"]["migration"]["count"] = 4
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, "migration.count must not exceed")
+
+
+def test_classic_island_rejects_walk_forward_it_would_silently_disable():
+    config = _base_config()
+    config["island_model"]["enabled"] = True
+    config["walk_forward"]["enabled"] = True
+
+    errors, _ = _messages(config)
+
+    assert _has(errors, "classic island engine disables walk-forward")
+
+
+def test_generic_island_can_deliberately_run_walk_forward():
+    config = _base_config()
+    config["generic_island_model"]["enabled"] = True
+    config["walk_forward"]["enabled"] = True
+
+    errors, _ = _messages(config)
+
+    assert errors == []
+
+
+def test_canonical_resolver_does_not_emit_retired_tuning_claims():
+    raw = {
+        "genetic_algorithm": {
+            "population_size": 100,
+            "elite_size": 10,
+            "tournament_size": 8,
+            "random_immigrants": 10,
+        },
+        "backtesting": {
+            "pairs": [
+                "BTC/USDT",
+                "ETH/USDT",
+                "BNB/USDT",
+                "SOL/USDT",
+                "XRP/USDT",
+            ],
+            "timerange": "20230101-20260101",
+        },
+    }
+
+    resolution = resolve_config_data(raw)
+
+    assert resolution.errors == ()
+    joined = "\n".join(resolution.warnings)
+    assert "ANTI-PATTERN" not in joined
+    assert "safe ceiling" not in joined
+    assert "generaliz" not in joined
+
+
+def test_editor_hook_delegates_to_canonical_resolver():
+    hook_path = (
+        Path(__file__).resolve().parents[2]
+        / ".github"
+        / "hooks"
+        / "scripts"
+        / "validate_ga_config.py"
+    )
+    hook_validate = runpy.run_path(str(hook_path))["validate_ga_config"]
+    config = _base_config()
+    config["genetic_algorithm"].update(
+        {
+            "population_size": 100,
+            "elite_size": 10,
+            "tournament_size": 8,
+            "random_immigrants": 10,
         }
-        errors, _ = validate_ga_config(config)
-        assert any("training_pairs" in e for e in errors)
+    )
+    config["backtesting"]["pairs"] = [
+        "BTC/USDT",
+        "ETH/USDT",
+        "BNB/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+    ]
 
-    def test_weights_sum_not_one(self):
-        config = _base_config()
-        config['pair_validation'] = {
-            'enabled': True,
-            'training_pairs': ['BTC/USDT'],
-            'validation_pairs': ['ETH/USDT'],
-            'weight_train': 0.8,
-            'weight_val': 0.8,
-        }
-        _, warnings = validate_ga_config(config)
-        assert any("weight" in w.lower() for w in warnings)
+    assert hook_validate(config) == []
 
-
-# =============================================================================
-# VALIDATE AND LOG
-# =============================================================================
+    config["genetic_algorithm"]["population_size"] = 1
+    assert _has(hook_validate(config), "population_size")
 
 
-class TestValidateAndLog:
+def test_repo_config_inventory_has_only_known_historical_design_errors():
+    config_root = Path(__file__).resolve().parents[1] / "config"
+    expected_invalid = {
+        "done/06_E24_e7_pop8_gen15.yaml",
+        "exploration/wave1/E3_island_wf_stress.yaml",
+        "exploration/wave2/E7_island_wf_optimized.yaml",
+        "exploration/wave3/E10_island_wf_highmut.yaml",
+        "exploration/wave3/E11_island_wf_scaled.yaml",
+        "exploration/wave3/E13_island_wf_longwindow.yaml",
+        "exploration/wave3/E9_island_wf_llm.yaml",
+        "exploration/wave4/E14_island_wf_strict_mc.yaml",
+        "exploration/wave4/E16_island_wf_elite_mc.yaml",
+        "exploration/wave4/E18_island_wf_component_cx.yaml",
+    }
+    observed_invalid: set[str] = set()
+    for path in sorted(config_root.rglob("*.yaml")):
+        raw = yaml.safe_load(path.read_text()) or {}
+        resolved = deep_merge(DEFAULTS, resolve_preset(raw))
+        errors, warnings = validate_runtime_invariants(resolved)
+        if errors:
+            assert errors == [
+                "island_model and walk_forward cannot both be enabled because "
+                "the classic island engine disables walk-forward"
+            ]
+            observed_invalid.add(path.relative_to(config_root).as_posix())
+        joined = "\n".join(warnings)
+        assert "ANTI-PATTERN" not in joined
+        assert "safe ceiling" not in joined
+        assert "Sacred limit" not in joined
 
-    def test_valid_config_returns_true(self):
-        assert validate_and_log(_base_config()) is True
+    assert observed_invalid == expected_invalid
 
-    def test_invalid_config_returns_false(self):
-        assert validate_and_log({}) is False
+
+def test_active_validator_instructions_contain_no_retired_magic_limits():
+    root = Path(__file__).resolve().parents[2]
+    paths = [
+        root / "genetic_algorithm" / "config" / "invariants.py",
+        root / "genetic_algorithm" / "utils" / "config_validator.py",
+        root / ".github" / "hooks" / "scripts" / "validate_ga_config.py",
+        root / ".github" / "instructions" / "ga-config.instructions.md",
+        root / ".github" / "prompts" / "generate-ga-config.prompt.md",
+        root / ".github" / "prompts" / "plan-productionGaConfig.prompt.md",
+        root / ".github" / "prompts" / "plan-next-wave.prompt.md",
+        root / ".github" / "skills" / "launch-wave" / "SKILL.md",
+    ]
+    retired = re.compile(
+        r"safe ceiling|Sacred limit|population_size\s*[<>]=?\s*15|"
+        r"population_per_island\s*[<>]=?\s*(?:6|60)|"
+        r"tournament_size.*(?:3-6|3–6)",
+        re.IGNORECASE,
+    )
+
+    for path in paths:
+        assert not retired.search(path.read_text()), path
+
+
+def test_preflight_adds_only_contextual_data_availability(tmp_path):
+    config = _base_config()
+
+    errors, warnings = preflight_check(config, data_root=tmp_path / "missing")
+
+    assert errors == []
+    assert _has(warnings, "data directory")
+
+
+def test_validate_and_log_uses_canonical_schema():
+    assert validate_and_log(_base_config()) is True
+    assert validate_and_log({}) is False

@@ -81,6 +81,7 @@ def test_backtest_position_adjustment(default_conf, fee, mocker, testdatadir) ->
             "open_timestamp": [1517251200000, 1517283000000],
             "close_timestamp": [1517263200000, 1517285400000],
             "funding_fees": [0.0, 0.0],
+            "funding_fee_events": [[], []],
         }
     )
     results_no = results.drop(columns=["orders"])

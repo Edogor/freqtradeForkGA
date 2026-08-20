@@ -1,0 +1,58 @@
+# A1: current balanced objective on the fixed six-pair development panel.
+preset: automation_island_v2
+
+safety_profile:
+  name: quality_experiment_v3
+  enforce: true
+  shadow_mode: true
+  automation_eligible: false
+
+backtesting:
+  pairs: [BTC/USDT, SOL/USDT, XRP/USDT, ETH/USDT, BNB/USDT, PEPE/USDT]
+  timerange: "20230509-20260327"
+
+generic_island_model:
+  islands:
+    - {name: momentum, population_size: 10, generations: 12, seed: 42, indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR], pairs: [BTC/USDT, SOL/USDT, XRP/USDT, ETH/USDT, BNB/USDT, PEPE/USDT]}
+    - {name: trend, population_size: 10, generations: 12, seed: 43, indicator_pool: [EMA, SMA, TEMA, KAMA, SUPERTREND, AROON, PSAR], pairs: [BTC/USDT, SOL/USDT, XRP/USDT, ETH/USDT, BNB/USDT, PEPE/USDT]}
+    - {name: volatility-volume, population_size: 10, generations: 12, seed: 44, indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP], pairs: [BTC/USDT, SOL/USDT, XRP/USDT, ETH/USDT, BNB/USDT, PEPE/USDT]}
+    - {name: mixed, population_size: 10, generations: 12, seed: 45, indicator_pool: [RSI, MACD, EMA, SUPERTREND, BBANDS, ATR, CMF, VWAP], pairs: [BTC/USDT, SOL/USDT, XRP/USDT, ETH/USDT, BNB/USDT, PEPE/USDT]}
+
+pair_validation:
+  training_pairs: [BTC/USDT, SOL/USDT, XRP/USDT]
+  validation_pairs: [BNB/USDT, ETH/USDT, PEPE/USDT]
+  min_profitable_pair_ratio: 0.6666666666666666
+
+promotion_v2:
+  policy_version: quality-v3-a1-search
+  required_scenarios:
+    - {scenario_id: dev-btc, pair: BTC/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-sol, pair: SOL/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-xrp, pair: XRP/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-bnb, pair: BNB/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-eth, pair: ETH/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-pepe, pair: PEPE/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+  min_profitable_scenario_ratio: 0.6666666666666666
+
+qualification_v3:
+  enabled: true
+  schema_version: "3.0"
+  policy_version: quality-v3-a1-search
+  required_scenarios:
+    - {scenario_id: dev-btc, pair: BTC/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: dev-sol, pair: SOL/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: dev-xrp, pair: XRP/USDT, pair_group: development, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: val-bnb, pair: BNB/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: val-eth, pair: ETH/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+    - {scenario_id: val-pepe, pair: PEPE/USDT, pair_group: validation, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end_exclusive: "2026-03-27", cost_multiplier: 1.0}
+  pair_groups:
+    - {group_id: development, pairs: [BTC/USDT, SOL/USDT, XRP/USDT], min_profitable_pairs: 2, min_group_expectancy_lcb: 0.0, min_group_annual_return_lcb: 0.0, min_worst_pair_scenario_return: -0.05}
+    - {group_id: validation, pairs: [BNB/USDT, ETH/USDT, PEPE/USDT], min_profitable_pairs: 2, min_group_expectancy_lcb: 0.0, min_group_annual_return_lcb: 0.0, min_worst_pair_scenario_return: -0.05}
+  development_evidence: {min_effective_sample_size: 30.0, min_active_months: 12}
+  final_test_evidence: {min_effective_sample_size: 20.0, min_active_months: 1}
+  max_drawdown_ucb: 0.20
+  max_daily_es5_ucb: 0.05
+  max_consecutive_losses: 12
+  max_drawdown_duration_days: 120.0
+  require_final_test: false
+  soft_targets: {target_trades_per_day_min: 0.5, target_trades_per_day_max: 1.5, median_hold_hours_target: 24.0, p90_hold_hours_target: 72.0}

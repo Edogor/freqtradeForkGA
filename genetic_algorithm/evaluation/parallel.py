@@ -7,7 +7,7 @@ significant speedup on multi-core systems.
 Features:
     - Per-backtest timeout to prevent pathological strategies from blocking workers
     - Automatic orphaned worker cleanup via atexit handlers
-    - Walk-forward disabled in workers (use post-hoc WF validation on elites instead)
+    - Walk-forward uses the same per-candidate evaluator semantics in workers
 
 Usage:
     Enable in ga_config.yaml:
@@ -23,11 +23,13 @@ Benchmark results (8-core system, 50 strategies):
 """
 
 import atexit
+import copy
 import logging
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from concurrent.futures.process import BrokenProcessPool
+from pathlib import Path
 from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass
 
@@ -39,6 +41,140 @@ _worker_config = None
 
 # Track active executors for cleanup
 _active_executors: List['ProcessPoolExecutor'] = []
+
+
+def _metrics_error(metrics: Any) -> Optional[str]:
+    """Return an evaluator-reported error, if present."""
+    if not isinstance(metrics, dict):
+        return None
+    error = metrics.get('error')
+    return str(error) if error else None
+
+
+def _build_worker_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a detached worker config without changing runtime semantics."""
+    return copy.deepcopy(config)
+
+
+def _isolate_worker_strategy_directory(
+    config: Dict[str, Any],
+    *,
+    worker_pid: int,
+) -> Path:
+    """Give one worker exclusive ownership of its generated strategy files.
+
+    Candidate ids are local to an island.  A common-panel batch therefore
+    legitimately contains many ``GenN_Ind0`` and ``GenN_Ind1`` candidates.
+    Atomic file replacement prevents partial files, but it does not prevent
+    separate processes from replacing the same complete file before
+    Freqtrade imports it.  A process-private directory removes that race at
+    the filesystem boundary.
+    """
+
+    storage = config.setdefault('storage', {})
+    configured = storage.get('generated_strategy_dir')
+    if configured:
+        base = Path(configured)
+    else:
+        base = (
+            Path(__file__).resolve().parents[2]
+            / 'user_data'
+            / 'strategies'
+            / 'ga_generated'
+        )
+    isolated = base / '_parallel_workers' / f'worker-{worker_pid}'
+    storage['generated_strategy_dir'] = str(isolated)
+    return isolated
+
+
+def _prepopulate_shared_bt_data_cache(
+    evaluator: Any,
+    worker_config: Dict[str, Any],
+    shared_dfs: Dict[str, Any],
+    shared_meta: Dict[str, Any],
+) -> int:
+    """Install every shared-OHLCV cache key used by worker evaluations.
+
+    Hardcore raw-multipair evaluation invokes the direct backtester once per
+    pair via ``pairs_override=[pair]``.  Preloading only the full, development,
+    and validation group keys therefore caused the six singleton lookups to
+    miss and reload OHLCV from disk for every candidate.  Singleton entries
+    are cheap views over the already attached shared frames, so keep all of
+    them resident alongside the aggregate keys.
+    """
+    if not shared_dfs or not hasattr(evaluator, 'backtester'):
+        return 0
+
+    from freqtrade.configuration import TimeRange
+
+    bt_cfg = worker_config.get('backtesting', {})
+    tr_str = bt_cfg.get('timerange', '')
+    tr_obj = TimeRange.parse_timerange(tr_str)
+    all_pairs = tuple(sorted(shared_dfs.keys()))
+
+    # SharedDataManager only enables this path for one exact timeframe.
+    # Reusing one OHLCV frame under other timeframe cache keys would silently
+    # evaluate the wrong candles.
+    sc = worker_config.get('strategy_constraints', {})
+    configured_timeframes = list(sc.get('timeframes', ['5m']))
+    shared_timeframe = shared_meta.get('timeframe')
+    if shared_timeframe not in configured_timeframes:
+        raise ValueError(
+            "shared OHLCV timeframe differs from strategy constraints"
+        )
+    required_shared_startup = int(sc.get('startup_candle_cap') or 0)
+    if int(shared_meta.get('startup_candles', 0)) != required_shared_startup:
+        raise ValueError(
+            "shared OHLCV startup coverage differs from strategy constraints"
+        )
+
+    # Key structure must stay aligned with DirectBacktester:
+    #   (pair_whitelist, timerange, timeframe, override_tr, override_pairs)
+    cache_keys_and_data = [
+        ((all_pairs, tr_str, shared_timeframe, '', ()), shared_dfs),
+    ]
+
+    pv_cfg = worker_config.get('pair_validation', {})
+    if pv_cfg.get('enabled', False):
+        configured_panel_pairs: List[str] = []
+        for subset_key in ('training_pairs', 'validation_pairs'):
+            subset = pv_cfg.get(subset_key, [])
+            if not subset:
+                continue
+            subset_sorted = tuple(sorted(subset))
+            subset_data = {p: shared_dfs[p] for p in subset if p in shared_dfs}
+            if subset_data:
+                cache_keys_and_data.append((
+                    (subset_sorted, tr_str, shared_timeframe, '', subset_sorted),
+                    subset_data,
+                ))
+            configured_panel_pairs.extend(subset)
+
+        # Independent-pair evaluation always calls the backtester with one
+        # pair override at a time.  Materialize those exact singleton keys so
+        # every candidate reuses the attached shared frame.
+        if pv_cfg.get('evaluation_mode') == 'independent_pairs':
+            for pair in dict.fromkeys(configured_panel_pairs):
+                if pair not in shared_dfs:
+                    continue
+                singleton = (pair,)
+                cache_keys_and_data.append((
+                    (singleton, tr_str, shared_timeframe, '', singleton),
+                    {pair: shared_dfs[pair]},
+                ))
+
+    bt_cache = evaluator.backtester._bt_data_cache
+    for key, data in cache_keys_and_data:
+        bt_cache[key] = (data, tr_obj)
+
+    # The existing LRU default is intentionally small for disk-loaded data.
+    # Shared-backed mappings duplicate only dictionaries/references, not the
+    # DataFrames themselves, and must not evict one another during the panel.
+    evaluator.backtester._bt_data_cache_max = max(
+        evaluator.backtester._bt_data_cache_max,
+        len(bt_cache),
+    )
+    return len(cache_keys_and_data)
 
 
 def _cleanup_executors():
@@ -101,9 +237,9 @@ def _init_worker(config: Dict[str, Any]):
     Called once when each worker starts. Creates a separate evaluator
     instance to avoid sharing state between processes.
     
-    Walk-forward is always disabled in workers to prevent the N×W
-    backtest explosion that causes deadlocks. Walk-forward validation
-    should be applied post-hoc on elite candidates only.
+    Walk-forward remains enabled when configured.  Each worker evaluates one
+    candidate's windows sequentially, so concurrency stays bounded by the
+    worker count while matching the sequential evaluator exactly.
     
     Args:
         config: Configuration dictionary
@@ -141,12 +277,14 @@ def _init_worker(config: Dict[str, Any]):
     # Import here to avoid circular imports and ensure each process has its own imports
     from genetic_algorithm.evaluation.fitness import FitnessEvaluator
     
-    # Disable walk-forward in worker processes to prevent N×W backtest explosion
-    # Walk-forward validation is applied post-hoc on elites instead
-    worker_config = dict(config)
-    if 'walk_forward' in worker_config:
-        worker_config['walk_forward'] = dict(worker_config['walk_forward'])
-        worker_config['walk_forward']['enabled'] = False
+    # Keep a detached config, but do not rewrite feature semantics for worker
+    # execution.  The old post-hoc top-K shortcut evaluated a different
+    # algorithm than the sequential path.
+    worker_config = _build_worker_config(config)
+    _isolate_worker_strategy_directory(
+        worker_config,
+        worker_pid=_os.getpid(),
+    )
     
     _worker_config = worker_config
     _worker_evaluator = FitnessEvaluator(worker_config)
@@ -157,56 +295,16 @@ def _init_worker(config: Dict[str, Any]):
         try:
             from genetic_algorithm.evaluation.shared_data import attach_shared_data
             shared_dfs = attach_shared_data(shared_meta)
-            if shared_dfs and hasattr(_worker_evaluator, 'backtester'):
-                from freqtrade.configuration import TimeRange
-                bt_cfg = worker_config.get('backtesting', {})
-                tr_str = bt_cfg.get('timerange', '')
-                tr_obj = TimeRange.parse_timerange(tr_str)
-                all_pairs = tuple(sorted(shared_dfs.keys()))
-
-                # Determine all timeframes the GA may produce so we pre-populate
-                # cache entries for each.  Falls back to ['5m'] if not configured.
-                sc = worker_config.get('strategy_constraints', {})
-                timeframes = sc.get('timeframes', ['5m'])
-                if not timeframes:
-                    timeframes = ['5m']
-
-                # Build all cache key variants that _run_backtest_direct will
-                # look up.  Key structure:
-                #   (pair_whitelist, timerange, timeframe, override_tr, override_pairs)
-                #
-                # Without pair_validation: whitelist=all, override=()
-                # With pair_validation:    whitelist=subset, override=subset
-                cache_keys_and_data = []
-
-                for tf in timeframes:
-                    # 1) Full pair set (no override) — used when pair_validation off
-                    cache_keys_and_data.append((
-                        (all_pairs, tr_str, tf, '', ()),
-                        shared_dfs,
-                    ))
-
-                    # 2) Pair validation subsets — training and validation
-                    pv_cfg = worker_config.get('pair_validation', {})
-                    if pv_cfg.get('enabled', False):
-                        for subset_key in ('training_pairs', 'validation_pairs'):
-                            subset = pv_cfg.get(subset_key, [])
-                            if subset:
-                                subset_sorted = tuple(sorted(subset))
-                                subset_data = {p: shared_dfs[p] for p in subset if p in shared_dfs}
-                                if subset_data:
-                                    cache_keys_and_data.append((
-                                        (subset_sorted, tr_str, tf, '', subset_sorted),
-                                        subset_data,
-                                    ))
-
-                bt_cache = _worker_evaluator.backtester._bt_data_cache
-                for key, data in cache_keys_and_data:
-                    bt_cache[key] = (data, tr_obj)
-
+            if shared_dfs:
+                cache_entry_count = _prepopulate_shared_bt_data_cache(
+                    _worker_evaluator,
+                    worker_config,
+                    shared_dfs,
+                    shared_meta,
+                )
                 logging.getLogger(__name__).info(
                     f"[PARALLEL-WORKER] Pre-populated _bt_data_cache with "
-                    f"{len(cache_keys_and_data)} key(s) from shared memory "
+                    f"{cache_entry_count} key(s) from shared memory "
                     f"({len(shared_dfs)} pairs)"
                 )
         except Exception as e:
@@ -220,6 +318,7 @@ def _evaluate_strategy_in_worker(
     strategy_index: int,
     nsga2_mode: bool = False,
     objectives_config: List[Dict[str, Any]] = None,
+    strategy_execution_id: Optional[int] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -263,16 +362,37 @@ def _evaluate_strategy_in_worker(
         
         # Reconstruct StrategyGene from dict
         strategy_gene = StrategyGene.from_dict(strategy_gene_dict)
+        # Individual ids are island-local and collide heavily.  Batch-local
+        # indexes are not sufficient either: the persistent worker pool sees
+        # many three-candidate island batches, and reusing ``Ind0..Ind2`` can
+        # make Python/Freqtrade reuse stale imported bytecode after the file is
+        # replaced.  The parent therefore assigns a monotonic id for the whole
+        # pool lifetime.  It only names the generated evaluation class and
+        # never mutates the persisted genome.
+        strategy_gene.individual_id = (
+            strategy_index
+            if strategy_execution_id is None
+            else strategy_execution_id
+        )
         
         # Evaluate
         fitness, metrics = _worker_evaluator.evaluate(strategy_gene)
+        evaluation_error = _metrics_error(metrics)
         
         result = {
             'index': strategy_index,
             'fitness': fitness,
             'metrics': metrics,
-            'success': True
+            'success': evaluation_error is None,
+            # Code generation canonicalizes redundant conditions and neutral
+            # indicators.  Return that exact executable genome so the parent
+            # evolves what was measured rather than the pre-repair payload.
+            'canonical_strategy_gene': strategy_gene.to_dict(),
         }
+
+        if evaluation_error is not None:
+            result['error'] = evaluation_error
+            return result
         
         # Extract objectives for NSGA-II if needed
         if nsga2_mode and objectives_config:
@@ -359,14 +479,18 @@ def _evaluate_wf_in_worker(
         
         strategy_gene = StrategyGene.from_dict(strategy_gene_dict)
         fitness, metrics = _wf_worker_evaluator.evaluate(strategy_gene)
+        evaluation_error = _metrics_error(metrics)
         
-        return {
+        result = {
             'index': candidate_index,
             'id': individual_id,
             'fitness': fitness,
             'metrics': metrics,
-            'success': True,
+            'success': evaluation_error is None,
         }
+        if evaluation_error is not None:
+            result['error'] = evaluation_error
+        return result
     except Exception as e:
         return {
             'index': candidate_index,
@@ -900,16 +1024,20 @@ def _evaluate_parsimony_candidate_in_worker(
 
         strategy_gene = StrategyGene.from_dict(trial_gene_dict)
         fitness, metrics = _worker_evaluator.evaluate(strategy_gene)
+        evaluation_error = _metrics_error(metrics)
 
-        return {
+        result = {
             'elite_index': elite_index,
             'candidate_index': candidate_index,
             'kind': candidate_kind,
             'component_index': candidate_component_index,
             'fitness': fitness,
             'metrics': metrics,
-            'success': True,
+            'success': evaluation_error is None,
         }
+        if evaluation_error is not None:
+            result['error'] = evaluation_error
+        return result
     except Exception as e:
         return {
             'elite_index': elite_index,
@@ -1180,7 +1308,7 @@ class ParallelEvaluator:
       generations, avoiding the expensive data-reload on each pool
       creation and eliminating zombie-process accumulation.
     - Per-backtest timeout prevents pathological strategies from blocking
-    - Walk-forward disabled in workers (applied post-hoc on elites instead)
+    - Walk-forward evaluated per candidate inside workers for parity
     - Automatic cleanup of worker processes on shutdown/exit
     - Context manager support (``with ParallelEvaluator(...) as pe:``)
     
@@ -1232,12 +1360,19 @@ class ParallelEvaluator:
         # Track whether WF is configured (for post-hoc validation)
         wf_config = config.get('walk_forward', {})
         self.walk_forward_configured = wf_config.get('enabled', False)
+        self.walk_forward_in_workers = self.walk_forward_configured
         if self.walk_forward_configured:
-            logger.info("[PARALLEL] Walk-forward detected — will be run post-hoc on elites, not inside workers")
+            logger.info(
+                "[PARALLEL] Walk-forward detected — using identical "
+                "per-candidate worker evaluation"
+            )
         
         # Persistent pool — created lazily on first evaluate_batch()
         self._executor: Optional[ProcessPoolExecutor] = None
         self._pool_generation_count = 0  # How many batches this pool has served
+        # Generated strategy modules must never be reused within a persistent
+        # worker pool.  Island-local ids and per-batch indexes both repeat.
+        self._next_strategy_execution_id = 0
 
         # Shared OHLCV data manager — created with the pool, cleaned up on shutdown
         self._shared_data_manager = None
@@ -1474,14 +1609,18 @@ class ParallelEvaluator:
         # Prepare tasks: serialize strategies to dicts for pickling
         tasks = []
         nsga2_min_trades = self.config.get('nsga2', {}).get('min_trades', 0)
+        next_execution_id = getattr(self, '_next_strategy_execution_id', 0)
         for i, ind in enumerate(individuals):
             tasks.append({
                 'strategy_gene_dict': ind.strategy_gene.to_dict(),
                 'strategy_index': i,
+                'strategy_execution_id': next_execution_id,
                 'nsga2_mode': self.nsga2_mode,
                 'objectives_config': self.objectives_config,
                 'nsga2_min_trades': nsga2_min_trades,
             })
+            next_execution_id += 1
+        self._next_strategy_execution_id = next_execution_id
         
         self._pool_generation_count += 1
         logger.info(f"[PARALLEL] Evaluating {len(tasks)} strategies with {self.num_workers} workers "
@@ -1503,7 +1642,9 @@ class ParallelEvaluator:
                     task['strategy_gene_dict'],
                     task['strategy_index'],
                     task['nsga2_mode'],
-                    task['objectives_config']
+                    task['objectives_config'],
+                    strategy_execution_id=task['strategy_execution_id'],
+                    nsga2_min_trades=task['nsga2_min_trades'],
                 ): task['strategy_index']
                 for task in tasks
             }
@@ -1515,7 +1656,16 @@ class ParallelEvaluator:
                     idx = result['index']
                     ind = individuals[idx]
                     
-                    if result['success']:
+                    result_error = _metrics_error(result.get('metrics'))
+                    if result['success'] and result_error is None:
+                        canonical_payload = result.get('canonical_strategy_gene')
+                        if canonical_payload is not None:
+                            from genetic_algorithm.core.strategy_gene import StrategyGene
+
+                            canonical_gene = StrategyGene.from_dict_exact(canonical_payload)
+                            canonical_gene.generation = ind.strategy_gene.generation
+                            canonical_gene.individual_id = ind.strategy_gene.individual_id
+                            ind.strategy_gene = canonical_gene
                         ind.set_fitness(result['fitness'], result['metrics'])
                         
                         # Set objectives for NSGA-II
@@ -1528,8 +1678,9 @@ class ParallelEvaluator:
                             f"profit={result['metrics'].get('profit', 0):.2f}%"
                         )
                     else:
+                        error = result.get('error') or result_error or 'Unknown error'
                         ind.set_fitness(0.0, {
-                            'error': result.get('error', 'Unknown error'),
+                            'error': error,
                             'profit': 0.0,
                             'sharpe_ratio': 0.0,
                             'max_drawdown': 1.0,
@@ -1537,7 +1688,7 @@ class ParallelEvaluator:
                             'num_trades': 0
                         })
                         failed += 1
-                        logger.warning(f"[PARALLEL] {ind.id} failed: {result.get('error')}")
+                        logger.warning(f"[PARALLEL] {ind.id} failed: {error}")
                     
                 except FuturesTimeoutError:
                     timed_out += 1

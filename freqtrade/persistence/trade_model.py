@@ -643,6 +643,9 @@ class LocalTrade:
             setattr(self, key, kwargs[key])
         self.recalc_open_trade_value()
         self.orders = []
+        # Backtest-only, timestamped wallet cashflows. Live/database trades do
+        # not persist this diagnostic ledger.
+        self._funding_fee_events: list[dict[str, int | float]] = []
         if self.trading_mode == TradingMode.MARGIN and self.interest_rate is None:
             raise OperationalException(
                 f"{self.trading_mode} trading requires param interest_rate on trades"
@@ -751,6 +754,15 @@ class LocalTrade:
             "is_short": self.is_short,
             "trading_mode": self.trading_mode,
             "funding_fees": self.funding_fees,
+            **(
+                {
+                    "funding_fee_events": [
+                        dict(event) for event in getattr(self, "_funding_fee_events", [])
+                    ]
+                }
+                if minified
+                else {}
+            ),
             "amount_precision": self.amount_precision,
             "price_precision": self.price_precision,
             "precision_mode": self.precision_mode,
@@ -791,15 +803,46 @@ class LocalTrade:
             liquidation_price, self.price_precision, self.precision_mode_price
         )
 
-    def set_funding_fees(self, funding_fee: float) -> None:
+    def set_funding_fees(
+        self,
+        funding_fee: float,
+        *,
+        event_time: datetime | None = None,
+    ) -> None:
         """
-        Assign funding fees to Trade.
+        Assign cumulative funding fees since the last fill to the trade.
+
+        During backtesting, ``event_time`` records the change from the already
+        exported funding ledger to the newly accounted total. This remains
+        exact when a fill transfers running funding to an order or a subsequent
+        trade recalculation resets the aggregate bookkeeping fields.
         """
         if funding_fee is None:
             return
-        self.funding_fee_running = funding_fee
         prior_funding_fees = sum([o.funding_fee for o in self.orders if o.funding_fee])
-        self.funding_fees = prior_funding_fees + funding_fee
+        new_total = prior_funding_fees + funding_fee
+        if event_time is not None:
+            events = getattr(self, "_funding_fee_events", None)
+            if events is None:
+                events = []
+                self._funding_fee_events = events
+            recorded_total = sum(event["amount"] for event in events)
+            event_delta = new_total - recorded_total
+            if not isclose(event_delta, 0.0, abs_tol=1e-15):
+                events.append({"timestamp": dt_ts(event_time), "amount": event_delta})
+        self.funding_fee_running = funding_fee
+        self.funding_fees = new_total
+
+    def _reconcile_funding_fee_events(self, event_time: datetime | None) -> None:
+        """Bind fill-time accounting resets back to the backtest cashflow ledger."""
+
+        events = getattr(self, "_funding_fee_events", None)
+        if events is None or event_time is None:
+            return
+        recorded_total = sum(event["amount"] for event in events)
+        event_delta = (self.funding_fees or 0.0) - recorded_total
+        if not isclose(event_delta, 0.0, abs_tol=1e-15):
+            events.append({"timestamp": dt_ts(event_time), "amount": event_delta})
 
     def __set_stop_loss(self, stop_loss: float, percent: float):
         """
@@ -1285,6 +1328,8 @@ class LocalTrade:
                 total_stake += self._calc_open_trade_value(tmp_amount, price)
                 max_stake_amount += tmp_amount * price
         self.funding_fees = funding_fees
+        if getattr(self, "_funding_fee_events", None) is not None:
+            self._reconcile_funding_fee_events(self.date_last_filled_utc)
         self.max_stake_amount = float(max_stake_amount) / (self.leverage or 1.0)
 
         if close_profit:

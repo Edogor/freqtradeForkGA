@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 from multiprocessing import shared_memory
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -106,6 +107,15 @@ SHARED_FLOAT_COLS = ['open', 'high', 'low', 'close', 'volume']
 DATE_COL = 'date'
 
 
+def _resolve_data_dir(configured: str | Path) -> Path:
+    """Resolve GA data paths independently from an attempt output cwd."""
+
+    data_dir = Path(configured)
+    if data_dir.is_absolute():
+        return data_dir
+    return Path(__file__).resolve().parents[2] / data_dir
+
+
 class SharedDataManager:
     """
     Manages shared OHLCV data for parallel worker processes.
@@ -153,19 +163,43 @@ class SharedDataManager:
         bt_config = config.get('backtesting', {})
         pairs = bt_config.get('pairs', [])
         timerange_str = bt_config.get('timerange', '')
-        # Strategy timeframes vary per individual, but the data directory
-        # is the same. We always load 5m data since it's the base; higher
-        # timeframes are resampled by FreqTrade at runtime.
+        configured_timeframes = list(
+            config.get('strategy_constraints', {}).get('timeframes', ['5m'])
+        )
+        timeframes = list(dict.fromkeys(str(item) for item in configured_timeframes if item))
 
         if not pairs:
             logger.warning("[SHARED] No pairs configured, cannot load shared data")
             return {}
+        if len(timeframes) != 1:
+            logger.warning(
+                "[SHARED] Shared memory requires exactly one strategy timeframe; "
+                "configured=%s. Workers will load exact timeframe data from disk.",
+                timeframes,
+            )
+            return {}
+        timeframe = timeframes[0]
+        startup_candles = int(
+            config.get('strategy_constraints', {}).get(
+                'startup_candle_cap'
+            )
+            or 0
+        )
 
-        logger.info(f"[SHARED] Loading OHLCV data for {len(pairs)} pairs, timerange={timerange_str}")
+        logger.info(
+            f"[SHARED] Loading {timeframe} OHLCV data for {len(pairs)} pairs, "
+            f"timerange={timerange_str}"
+        )
         start = time.time()
 
         # Use FreqTrade's data loading to get the same data workers would load
-        data = self._load_ohlcv_data(config, pairs, timerange_str)
+        data = self._load_ohlcv_data(
+            config,
+            pairs,
+            timerange_str,
+            timeframe,
+            startup_candles=startup_candles,
+        )
 
         if not data:
             logger.warning("[SHARED] No data loaded — shared memory disabled")
@@ -181,6 +215,8 @@ class SharedDataManager:
         self._metadata = {
             'pairs': pair_metadata,
             'timerange': timerange_str,
+            'timeframe': timeframe,
+            'startup_candles': startup_candles,
             'loaded_at': time.time(),
         }
         self._loaded = True
@@ -219,6 +255,9 @@ class SharedDataManager:
         config: Dict[str, Any],
         pairs: List[str],
         timerange_str: str,
+        timeframe: str,
+        *,
+        startup_candles: int = 0,
     ) -> Dict[str, pd.DataFrame]:
         """
         Load OHLCV data using FreqTrade's data loading utilities.
@@ -230,10 +269,11 @@ class SharedDataManager:
         try:
             from freqtrade.configuration import TimeRange
             from freqtrade.data.history import load_pair_history
-            from pathlib import Path
 
             bt_config = config.get('backtesting', {})
-            data_dir = Path(bt_config.get('datadir', 'user_data/data/binance'))
+            data_dir = _resolve_data_dir(
+                bt_config.get('datadir', 'user_data/data/binance')
+            )
             dataformat = bt_config.get('dataformat_ohlcv', 'feather')
 
             # Parse timerange
@@ -244,9 +284,10 @@ class SharedDataManager:
                 try:
                     df = load_pair_history(
                         pair=pair,
-                        timeframe='5m',  # Load base resolution; higher TFs resampled at runtime
+                        timeframe=timeframe,
                         datadir=data_dir,
                         timerange=timerange,
+                        startup_candles=startup_candles,
                         data_format=dataformat,
                     )
                     if df is not None and len(df) > 0:

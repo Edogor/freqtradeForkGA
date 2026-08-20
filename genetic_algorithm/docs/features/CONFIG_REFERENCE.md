@@ -72,6 +72,19 @@ This document provides a comprehensive reference for all configuration options a
 | `enable_cache` | Cache backtest results to speed up re-evaluation. |
 | `timeout` | Maximum seconds allowed per individual backtest. |
 
+### V2 Evaluation
+
+| Option | Description |
+|--------|-------------|
+| `enabled` | Produce strict V2 shadow measurements. |
+| `mark_to_market` | Require the reconciled end-of-day order-ledger equity. |
+| `annual_risk_free_rate` | Effective annual decimal rate for Sharpe/Sortino; finite and greater than `-1` (safe default `0.0`). |
+| `bootstrap_samples` | Number of deterministic moving-block bootstrap samples (minimum 100). |
+| `bootstrap_block_days` | Daily return block length. |
+| `expectancy_cluster_days` | Width of fixed UTC close-time clusters; all pairs closing in one cluster remain together (positive integer, default `1`). |
+| `trade_bootstrap_block` | Moving-block length in close-time clusters, not individual trades. |
+| `bootstrap_confidence` | Confidence level strictly between 0.5 and 1.0. |
+
 ### Walk-Forward Optimization
 
 | Option | Description |
@@ -197,17 +210,12 @@ genetic_algorithm:
 - Population size affects genetic diversity - too small leads to premature convergence
 
 **Combinations:** 
-- Combine with higher `elite_size` (10-15% of population) to preserve winners
+- Keep `elite_size` below the population and declare its ratio as a tested factor
 - Use larger populations with `fitness_sharing` to maintain diversity
 - Balance with `generations` - more population OR more generations for thorough search
 
-**Reference values:**
-| Use Case | Population Size |
-|----------|----------------|
-| Quick test | 10-20 |
-| Standard optimization | 30-50 |
-| Thorough search | 100-200 |
-| Research/exhaustive | 500+ |
+There is no validated universal range. Population size consumes evaluation budget directly, so
+compare it against an unchanged control with the same total budget, seeds and replay panel.
 
 **Example:**
 ```yaml
@@ -323,17 +331,12 @@ genetic_algorithm:
 - Prevents regression (losing good progress)
 
 **Combinations:**
-- Should be ~10-15% of population_size
+- Must satisfy `0 <= elite_size < population_size`
 - Higher elite_size = more stability, less exploration
 - Works with `random_immigrants` to balance preservation with diversity
 
-**Reference values:**
-| Population Size | Recommended Elite |
-|-----------------|-------------------|
-| 15-20 | 2-3 |
-| 30-50 | 4-6 |
-| 100 | 10-15 |
-| 200+ | 20-30 |
+No fixed elite percentage is proven. A higher ratio deterministically leaves fewer slots for
+offspring and immigrants; its economic effect must be measured.
 
 **Example:**
 ```yaml
@@ -362,7 +365,7 @@ genetic_algorithm:
 | Tournament Size | Effect |
 |-----------------|--------|
 | 2-3 | Low pressure, high diversity |
-| 4-5 | Moderate pressure (recommended) |
+| 4-5 | Moderate pressure |
 | 7-10 | High pressure, fast convergence |
 | 15+ | Very aggressive, may lose diversity |
 
@@ -691,6 +694,40 @@ backtesting:
     - "BTC/USDT"
     - "ETH/USDT"
 ```
+
+---
+
+### V2 Evaluation
+
+`evaluation_v2` controls the auditable shadow metric path. Its risk convention is versioned as
+`calendar-effective-v1`: the complete crypto calendar uses 365 periods per year, the effective
+annual risk-free rate is converted geometrically, Sharpe uses sample volatility, and Sortino uses
+the lower partial moment over every observation. Undefinable ratios are `null`, not zero or a cap.
+
+```yaml
+evaluation_v2:
+  enabled: true
+  mark_to_market: true
+  annual_risk_free_rate: 0.0
+  bootstrap_samples: 1000
+  bootstrap_block_days: 10
+  expectancy_cluster_days: 1
+  trade_bootstrap_block: 5
+  bootstrap_confidence: 0.95
+```
+
+The default `0.0` is a declared assumption. If an experiment uses a non-zero rate, store it in the
+resolved config rather than adjusting reported ratios afterward. The result artifact persists both
+the annual rate and its derived daily rate.
+
+Net expectancy uses the versioned `net-expectancy-clustered-v1` contract. It reports both the
+equal-trade mean and net profit divided by committed margin (maximum stake adjusted for the entry
+fee), each with a deterministic lower confidence bound. Trades from all pairs that close in the
+same fixed UTC cluster are resampled together, and `trade_bootstrap_block` controls consecutive
+clusters. This preserves contemporaneous cross-pair shocks. The contract also reports serial,
+capital-weight and temporal-cluster effective sample sizes, pair-capital HHI, and maximum
+trade/cluster capital shares. It does not infer stop-loss capital-at-risk; that requires separately
+audited initial-stop evidence.
 
 ---
 

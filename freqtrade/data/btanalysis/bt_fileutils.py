@@ -53,6 +53,7 @@ BT_DATA_COLUMNS = [
     "close_timestamp",
     "orders",
     "funding_fees",
+    "funding_fee_events",
 ]
 
 
@@ -381,6 +382,8 @@ def _load_backtest_data_df_compatibility(df: pd.DataFrame) -> pd.DataFrame:
         df["orders"] = None
     if "funding_fees" not in df.columns:
         df["funding_fees"] = 0.0
+    if "funding_fee_events" not in df.columns:
+        df["funding_fee_events"] = None
     return df
 
 

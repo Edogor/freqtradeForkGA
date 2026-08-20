@@ -1,0 +1,23 @@
+config_schema_version: 2
+preset: hardcore_multipair_v5_15m
+
+backtesting:
+  timeframe: 1h
+  timerange: "1683590400-1774566000"
+
+strategy_constraints:
+  timeframes: [1h]
+
+raw_multipair_score:
+  period_start: "2023-05-09T00:00:00+00:00"
+  period_end: "2026-03-26T23:00:00+00:00"
+
+promotion_v2:
+  policy_version: hardcore-six-pair-manifest-1h-v5
+  required_scenarios:
+    - {scenario_id: dev-btc, pair: BTC/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-sol, pair: SOL/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-xrp, pair: XRP/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-bnb, pair: BNB/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-eth, pair: ETH/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-pepe, pair: PEPE/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}

@@ -1,0 +1,109 @@
+# Evidence-driven V5 production base.  The controller may lower the population
+# and generation budget for diagnostic arms, but never changes the panel or
+# safety contract declared here.
+config_schema_version: 2
+preset: hardcore_multipair_15m_v1
+
+raw_multipair_score:
+  enabled: true
+  policy_version: raw-multipair-score-v5
+  period_start: "2023-05-09T00:00:00+00:00"
+  period_end: "2026-03-26T23:45:00+00:00"
+  policy:
+    activity_target_trades_per_month_15m: 17.0
+    activity_target_trades_per_month_1h: 10.0
+    activity_target_trades_per_month_4h: 6.0
+    holding_median_target_hours_15m: 8.0
+    holding_median_target_hours_1h: 12.0
+    holding_median_target_hours_4h: 24.0
+    holding_p90_target_hours_15m: 24.0
+    holding_p90_target_hours_1h: 36.0
+    holding_p90_target_hours_4h: 72.0
+    score_edge_weight: 0.45
+    score_productive_frequency_weight: 0.45
+
+# Technical containment only: each independent six-pair scenario is allowed
+# one minute. A pathological candidate becomes INVALID rather than consuming
+# an unbounded fraction of the single-run resource budget.
+backtesting:
+  timeout: 60
+
+parallel_evaluation:
+  backtest_timeout: 60
+
+genetic_algorithm:
+  population_size: 12
+  generations: 30
+  behavioral_distance_weight: 0.50
+
+generic_island_model:
+  population_per_island: 12
+  generations: 30
+  archive_seeding:
+    cross_niche_offspring_per_generation: 4
+    cross_niche_union_crossover: true
+  islands:
+    - &momentum
+      name: momentum-1
+      population_size: 12
+      generations: 30
+      seed: 4101
+      indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR, KAMA]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - <<: *momentum
+      name: momentum-2
+      seed: 4102
+      indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR, ATR]
+    - &trend
+      name: trend-1
+      population_size: 12
+      generations: 30
+      seed: 4103
+      indicator_pool: [EMA, SMA, TEMA, KAMA, SUPERTREND, AROON, PSAR, DONCHIAN]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - &volatility
+      name: volatility-volume-1
+      population_size: 12
+      generations: 30
+      seed: 4104
+      indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP, SUPERTREND]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - <<: *volatility
+      name: volatility-volume-2
+      seed: 4105
+      indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP, TEMA]
+    - <<: *volatility
+      name: volatility-volume-3
+      seed: 4106
+      indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP, KAMA]
+    - &broad
+      name: broad-1
+      population_size: 12
+      generations: 30
+      seed: 4107
+      indicator_pool: [AROON, ATR, BBANDS, CCI, CMF, DONCHIAN, EMA, KAMA, MACD, MFI, OBV, PSAR, ROC, RSI, SMA, STOCH, SUPERTREND, TEMA, VROC, VWAP, WILLR]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - <<: *broad
+      name: broad-2
+      seed: 4108
+    - <<: *broad
+      name: broad-3
+      seed: 4109
+    - &bridge
+      name: bridge-1
+      population_size: 12
+      generations: 30
+      seed: 4110
+      indicator_pool: [AROON, ATR, BBANDS, CCI, CMF, DONCHIAN, EMA, KAMA, MACD, MFI, OBV, PSAR, ROC, RSI, SMA, STOCH, SUPERTREND, TEMA, VROC, VWAP, WILLR]
+      pairs: [BTC/USDT, SOL/USDT, XRP/USDT, BNB/USDT, ETH/USDT, PEPE/USDT]
+      walk_forward_enabled: false
+    - <<: *bridge
+      name: bridge-2
+      seed: 4111
+    - <<: *bridge
+      name: bridge-3
+      seed: 4112

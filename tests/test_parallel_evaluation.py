@@ -9,6 +9,8 @@ proper integration with the evolution process.
 import os
 import pytest
 import time
+from collections import OrderedDict
+from concurrent.futures import Future
 from unittest.mock import MagicMock, patch
 from typing import Dict, Any, List
 
@@ -19,7 +21,9 @@ from genetic_algorithm.evaluation.parallel import (
     is_parallel_available,
     get_recommended_workers,
     _evaluate_strategy_in_worker,
-    _init_worker
+    _init_worker,
+    _isolate_worker_strategy_directory,
+    _prepopulate_shared_bt_data_cache,
 )
 from genetic_algorithm.core.strategy_gene import StrategyGene, IndicatorGene, ConditionGene
 from genetic_algorithm.core.individual import Individual
@@ -214,6 +218,204 @@ class TestWorkerFunction:
         
         assert result['success'] is False
         assert 'not initialized' in result['error'].lower()
+
+    def test_metrics_error_is_returned_as_worker_failure(
+        self, sample_strategy_gene, monkeypatch
+    ):
+        """Evaluator failures returned in metrics must not become successes."""
+        import genetic_algorithm.evaluation.parallel as parallel_module
+
+        evaluator = MagicMock()
+        evaluator.evaluate.return_value = (0.0, {'error': 'backtest failed'})
+        monkeypatch.setattr(parallel_module, '_worker_evaluator', evaluator)
+
+        result = _evaluate_strategy_in_worker(sample_strategy_gene.to_dict(), 0)
+
+        assert result['success'] is False
+        assert result['error'] == 'backtest failed'
+
+    def test_worker_uses_pool_unique_evaluation_id(
+        self, sample_strategy_gene, monkeypatch
+    ):
+        """Duplicate island-local ids must not share a generated class name."""
+        import genetic_algorithm.evaluation.parallel as parallel_module
+
+        observed_ids = []
+        evaluator = MagicMock()
+
+        def evaluate(gene):
+            observed_ids.append(gene.individual_id)
+            return 1.0, {}
+
+        evaluator.evaluate.side_effect = evaluate
+        monkeypatch.setattr(parallel_module, '_worker_evaluator', evaluator)
+
+        source = sample_strategy_gene.to_dict()
+        source['individual_id'] = 0
+        result = _evaluate_strategy_in_worker(
+            source,
+            17,
+            strategy_execution_id=731,
+        )
+
+        assert result['success'] is True
+        assert observed_ids == [731]
+        assert source['individual_id'] == 0
+
+    def test_batches_never_reuse_generated_strategy_execution_ids(
+        self, minimal_config, sample_individuals
+    ):
+        """A persistent pool needs unique module names across every batch."""
+        evaluator = ParallelEvaluator(minimal_config, num_workers=1)
+        future = Future()
+        future.set_result({
+            'index': 0,
+            'fitness': 0.75,
+            'metrics': {},
+            'success': True,
+        })
+        executor = MagicMock()
+        executor.submit.return_value = future
+        evaluator._check_pool_health = MagicMock(return_value=True)
+        evaluator._get_executor = MagicMock(return_value=executor)
+
+        evaluator.evaluate_batch([sample_individuals[0]])
+        evaluator.evaluate_batch([sample_individuals[0]])
+
+        first = executor.submit.call_args_list[0].kwargs
+        second = executor.submit.call_args_list[1].kwargs
+        assert first['strategy_execution_id'] == 0
+        assert second['strategy_execution_id'] == 1
+
+    def test_workers_receive_process_private_strategy_directories(self, tmp_path):
+        config_a = {
+            'storage': {'generated_strategy_dir': str(tmp_path / 'generated')}
+        }
+        config_b = {
+            'storage': {'generated_strategy_dir': str(tmp_path / 'generated')}
+        }
+
+        first = _isolate_worker_strategy_directory(config_a, worker_pid=101)
+        second = _isolate_worker_strategy_directory(config_b, worker_pid=202)
+
+        assert first != second
+        assert first.name == 'worker-101'
+        assert second.name == 'worker-202'
+        assert config_a['storage']['generated_strategy_dir'] == str(first)
+        assert config_b['storage']['generated_strategy_dir'] == str(second)
+
+    def test_batch_defensively_counts_metrics_error_as_failure(
+        self, minimal_config, sample_individuals
+    ):
+        """The parent rejects an inconsistent success flag from a worker."""
+        evaluator = ParallelEvaluator(minimal_config, num_workers=1)
+        future = Future()
+        future.set_result({
+            'index': 0,
+            'fitness': 0.75,
+            'metrics': {'error': 'worker-reported failure'},
+            'success': True,
+        })
+        executor = MagicMock()
+        executor.submit.return_value = future
+        evaluator._check_pool_health = MagicMock(return_value=True)
+        evaluator._get_executor = MagicMock(return_value=executor)
+
+        individual = sample_individuals[0]
+        result = evaluator.evaluate_batch([individual])
+
+        assert result.successful == 0
+        assert result.failed == 1
+        assert individual.metrics['error'] == 'worker-reported failure'
+
+    def test_batch_adopts_worker_canonical_genome_without_changing_identity(
+        self, minimal_config, sample_individuals
+    ):
+        """The coordinator must evolve the exact phenotype the worker measured."""
+
+        evaluator = ParallelEvaluator(minimal_config, num_workers=1)
+        individual = sample_individuals[0]
+        original_generation = individual.strategy_gene.generation
+        original_id = individual.strategy_gene.individual_id
+        canonical = individual.strategy_gene.copy()
+        canonical.indicators = canonical.indicators[:1]
+        canonical.assign_instance_ids()
+        canonical.individual_id = 987654
+
+        future = Future()
+        future.set_result({
+            'index': 0,
+            'fitness': 0.75,
+            'metrics': {},
+            'success': True,
+            'canonical_strategy_gene': canonical.to_dict(),
+        })
+        executor = MagicMock()
+        executor.submit.return_value = future
+        evaluator._check_pool_health = MagicMock(return_value=True)
+        evaluator._get_executor = MagicMock(return_value=executor)
+
+        result = evaluator.evaluate_batch([individual])
+
+        assert result.successful == 1
+        assert [item.type for item in individual.strategy_gene.indicators] == ['RSI']
+        assert individual.strategy_gene.generation == original_generation
+        assert individual.strategy_gene.individual_id == original_id
+
+    def test_independent_pair_shared_cache_survives_multiple_candidates(self):
+        """All six singleton overrides reuse shared OHLCV across candidates."""
+        development_pairs = ['BTC/USDT', 'SOL/USDT', 'XRP/USDT']
+        validation_pairs = ['BNB/USDT', 'ETH/USDT', 'PEPE/USDT']
+        panel = development_pairs + validation_pairs
+        shared_frames = {pair: object() for pair in panel}
+        config = {
+            'backtesting': {'timerange': '20230509-20260327'},
+            'strategy_constraints': {'timeframes': ['15m']},
+            'pair_validation': {
+                'enabled': True,
+                'evaluation_mode': 'independent_pairs',
+                'training_pairs': development_pairs,
+                'validation_pairs': validation_pairs,
+            },
+        }
+        backtester = MagicMock()
+        backtester._bt_data_cache = OrderedDict()
+        backtester._bt_data_cache_max = 3
+        evaluator = MagicMock()
+        evaluator.backtester = backtester
+
+        entry_count = _prepopulate_shared_bt_data_cache(
+            evaluator,
+            config,
+            shared_frames,
+            {'timeframe': '15m'},
+        )
+
+        # full panel + development group + validation group + six singletons
+        assert entry_count == 9
+        assert len(backtester._bt_data_cache) == 9
+        assert backtester._bt_data_cache_max >= 9
+
+        disk_loads = []
+        for candidate_id in range(2):
+            for pair in panel:
+                singleton = (pair,)
+                key = (
+                    singleton,
+                    '20230509-20260327',
+                    '15m',
+                    '',
+                    singleton,
+                )
+                cached = backtester._bt_data_cache.get(key)
+                if cached is None:
+                    disk_loads.append((candidate_id, pair))
+                    continue
+                backtester._bt_data_cache.move_to_end(key)
+                data, _timerange = cached
+                assert data[pair] is shared_frames[pair]
+
+        assert disk_loads == []
 
 
 # ============================================================================

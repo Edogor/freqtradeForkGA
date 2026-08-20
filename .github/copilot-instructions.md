@@ -85,27 +85,27 @@ The core loop that runs autonomously on the server:
 6. **Archive** — Results written to `data/`, HoF updated, config moved to `done/{wave}/`
 7. **Learn** — SIS corpus rebuilt from accumulated HoF strategies; next generation benefits
 
-## Critical Conventions (Verified from Experiments)
+## Configuration and evidence conventions
 
-| Rule | Why |
-|------|-----|
-| Population size 10-15 for standard GA | >15 causes 59-65% overfitting (E19, E30) |
-| Island population ≥ 60 per island | <6 per island → 62-100% overfitting (E24) |
-| Never combine island model + walk-forward | Data partitioning conflict causes failures |
-| `tournament_size` ≥ 3 | =1 is random search, >6 premature convergence |
-| Set `auto_download: false` only with verified data | Silent 0-trade runs if data missing |
-| Disable fitness sharing with NSGA-II | Distorts Pareto front |
-| Walk-forward applied post-hoc on top-5 | In-loop would cause N×W worker explosion |
-| `elite_size` ≈ 10% of population | Balances exploitation vs exploration |
-
-See [GA_CONFIG_CHEATSHEET.md](../GA_CONFIG_CHEATSHEET.md) for all parameter ranges.
-See [KNOWN_ISSUES.md](../KNOWN_ISSUES.md) for active issues and anti-patterns.
+- The executable contract is `config/schema.py` plus the versioned mechanical invariants in
+  `config/invariants.py`.
+- Population, island size, pair count, generations, mutation, elitism and tournament pressure are
+  experimental factors; no fixed value is a universal overfitting boundary.
+- Compare tuning changes with paired seeds, the same panel and budget, then decide from the
+  hash-verified V2 analysis.
+- `tournament_size: 1` is mechanically valid and means uniform-random tournament selection.
+- Classic `island_model` plus walk-forward is rejected because that engine disables the requested
+  walk-forward setting. Generic islands have a separate explicit contract.
+- Automatic waves use `safe_v2`; optional features remain experimental until promotion evidence
+  supports enabling them.
+- Data availability and exact period coverage are proven by the data manifest, never assumed from
+  `auto_download` or a mutable path.
 
 ## Config YAML Key Sections
 
 ```yaml
 genetic_algorithm:
-  population_size: 12          # 10-15 for standard, 60+ per island
+  population_size: 30          # Experimental factor; pair against a control
   generations: 25
   mutation_rate: 0.20          # Adapts up on convergence
   crossover_rate: 0.75

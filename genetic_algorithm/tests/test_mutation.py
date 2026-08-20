@@ -272,6 +272,20 @@ class TestMutateParameters:
         result = mutate_parameters(ind, 1.0, config)
         assert ind.id in result.parent_ids
 
+    def test_roi_mutation_scales_checkpoints_to_one_hour_candles(self):
+        gene = _make_gene()
+        gene.timeframe = "1h"
+        ind = _make_individual(gene)
+        config = _make_config()
+
+        random.seed(42)
+        result = mutate_parameters(ind, 1.0, config)
+        checkpoints = sorted(int(key) for key in result.strategy_gene.minimal_roi)
+
+        assert checkpoints[0] == 0
+        assert 120 <= checkpoints[1] <= 240
+        assert 300 <= checkpoints[2] <= 480
+
 
 # ============================================================================
 # mutate_indicators

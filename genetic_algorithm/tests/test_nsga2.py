@@ -418,10 +418,31 @@ class TestExtractObjectivesFromMetrics:
         assert objectives[1] == -1.0  # minimize drawdown → -1.0
         assert objectives[2] == -1e6  # maximize sharpe → large negative
 
-    def test_missing_metric_defaults_to_zero(self):
+    def test_missing_metric_fails_closed(self):
         metrics = {'num_trades': 20}  # missing profit, sharpe, drawdown
-        objectives = extract_objectives_from_metrics(metrics, DEFAULT_OBJECTIVES)
-        assert all(isinstance(o, float) for o in objectives)
+        with pytest.raises(ValueError, match="objective metric 'profit'.*missing"):
+            extract_objectives_from_metrics(metrics, DEFAULT_OBJECTIVES)
+
+    @pytest.mark.parametrize('value', [None, float('nan'), float('inf'), True])
+    def test_non_finite_or_non_numeric_metric_fails_closed(self, value):
+        metrics = {
+            'profit': value,
+            'max_drawdown': 0.1,
+            'sharpe_ratio': 1.0,
+            'num_trades': 20,
+        }
+
+        with pytest.raises(ValueError, match="objective metric 'profit' must be finite"):
+            extract_objectives_from_metrics(metrics, DEFAULT_OBJECTIVES)
+
+    @pytest.mark.parametrize('alias', ['trade_frequency', 'trade_count'])
+    def test_legacy_trade_count_alias_uses_num_trades(self, alias):
+        config = [{'name': alias, 'type': 'maximize', 'scale': 100.0}]
+        metrics = {'num_trades': 25}
+
+        objectives = extract_objectives_from_metrics(metrics, config)
+
+        assert objectives == pytest.approx([0.25])
 
 
 # =============================================================================
@@ -707,4 +728,3 @@ class TestNSGA2SelectionIntegration:
         # Good dominates bad — should be in rank-1 front
         assert ind_good.rank == 1
         assert ind_bad.rank == 2
-

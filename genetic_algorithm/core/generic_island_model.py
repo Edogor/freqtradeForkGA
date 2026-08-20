@@ -34,28 +34,67 @@ import glob
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import signal
 import tempfile
-import time
 import threading
-import yaml
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
+import yaml
+
+from genetic_algorithm.config.invariants import derive_island_population_slots
+from genetic_algorithm.core.culling import StrategyCuller
 from genetic_algorithm.core.evolution import GeneticAlgorithm
-from genetic_algorithm.core.individual import Individual
+from genetic_algorithm.core.hall_of_fame import HallOfFame
+from genetic_algorithm.core.individual import (
+    FITNESS_EVIDENCE_BACKTEST_FAILED,
+    Individual,
+)
 from genetic_algorithm.core.population import (
     Population,
     apply_fitness_sharing,
     calculate_pairwise_distances,
 )
-from genetic_algorithm.core.hall_of_fame import HallOfFame
-from genetic_algorithm.core.culling import StrategyCuller
+from genetic_algorithm.engine.checkpoint_contract import (
+    CHECKPOINT_VERSION,
+    CheckpointCompatibilityError,
+    checkpoint_generation_from_path,
+    checkpoint_provenance_from_config,
+    latest_checkpoint_by_generation,
+    seal_checkpoint,
+    verify_resume_checkpoint,
+)
+from genetic_algorithm.engine.island_results import extract_island_finalists
+from genetic_algorithm.engine.operators.crossover import (
+    _enforce_min_entry_conditions,
+    _fix_invalid_operators,
+    crossover,
+    cross_niche_union_crossover,
+)
+from genetic_algorithm.engine.operators.mutation import mutate
+from genetic_algorithm.evaluation.fitness import FitnessEvaluator
+from genetic_algorithm.evaluation.panel_contract import (
+    PANEL_ROLE_COMMON_REPLAY,
+    build_evaluation_panel,
+    phenotype_fingerprint,
+    replay_on_common_panel,
+)
+from genetic_algorithm.orchestration.generation_trace_v2 import GenerationTraceWriterV2
+
 
 logger = logging.getLogger(__name__)
+
+
+OUTCOME_PLATEAU = "PLATEAU"
+OUTCOME_TECHNICAL_INVALID = "TECHNICAL_INVALID"
+OUTCOME_DIVERSITY_COLLAPSE = "DIVERSITY_COLLAPSE"
+OUTCOME_COMPLETED_BUDGET = "COMPLETED_BUDGET"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -165,8 +204,9 @@ class GenericIslandModelEvolution:
         visualize: bool = False,
         interactive: bool = True,
     ):
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+        from genetic_algorithm.config.schema import load_config
+
+        self.config = load_config(config_path)
 
         self.config_path = config_path
         self.visualize = visualize
@@ -202,6 +242,81 @@ class GenericIslandModelEvolution:
             tournament_size=mig_cfg.get('tournament_size', 3),
         )
 
+        common_cfg = gim_cfg.get('common_panel_replay', {})
+        self.common_panel_replay_enabled = bool(common_cfg.get('enabled', False))
+        self.common_panel_replay_interval = int(common_cfg.get('interval', 3))
+        self.common_panel_top_n = int(common_cfg.get('top_n_per_island', 3))
+        self.common_panel_early_stop_patience = int(
+            common_cfg.get('early_stop_patience', 4)
+        )
+        self.common_panel_min_improvement = float(
+            common_cfg.get('min_improvement', 0.002)
+        )
+        # ``min_generation`` is one-based for operators (generation 9 means
+        # the ninth fully evaluated population).  Defaults preserve the
+        # historical behavior of allowing a stop at the first stale check.
+        self.common_panel_min_generation = int(common_cfg.get('min_generation', 1))
+        self.common_panel_relative_min_improvement = float(
+            common_cfg.get('relative_min_improvement', 0.0)
+        )
+        incumbent_score = common_cfg.get('incumbent_score')
+        if incumbent_score is not None:
+            if (
+                isinstance(incumbent_score, bool)
+                or not isinstance(incumbent_score, (int, float))
+                or not math.isfinite(float(incumbent_score))
+            ):
+                raise ValueError(
+                    "generic_island_model.common_panel_replay.incumbent_score "
+                    "must be null or a finite number"
+                )
+            incumbent_score = float(incumbent_score)
+        self.common_panel_incumbent_score: Optional[float] = incumbent_score
+
+        diversity_cfg = gim_cfg.get('diversity_recovery', {})
+        self.diversity_recovery_enabled = bool(diversity_cfg.get('enabled', False))
+        self.diversity_island_threshold_count = int(
+            diversity_cfg.get('island_threshold_count', 9)
+        )
+        self.diversity_checks_before_recovery = int(
+            diversity_cfg.get('consecutive_checks_before_recovery', 2)
+        )
+        self.diversity_checks_after_recovery = int(
+            diversity_cfg.get('consecutive_checks_after_recovery', 2)
+        )
+        self.diversity_duplicate_fraction_threshold = float(
+            diversity_cfg.get('duplicate_fraction_threshold', 0.75)
+        )
+        self.diversity_genetic_threshold = float(
+            diversity_cfg.get('genetic_diversity_threshold', 0.10)
+        )
+        self.diversity_replacement_fraction = float(
+            diversity_cfg.get('replacement_fraction', 0.25)
+        )
+        self.diversity_recovery_mutation_rate = float(
+            diversity_cfg.get('recovery_mutation_rate', 0.35)
+        )
+
+        archive_cfg = gim_cfg.get('archive_seeding', {})
+        self.archive_seeding_enabled = bool(archive_cfg.get('enabled', False))
+        self.archive_seeding_island_names = list(archive_cfg.get('island_names', []))
+        self.archive_seeding_max_per_island = int(
+            archive_cfg.get('max_seeds_per_island', 4)
+        )
+        self.archive_seed_assignments = copy.deepcopy(
+            archive_cfg.get('assignments', {})
+        )
+        self.cross_niche_offspring_per_generation = int(
+            archive_cfg.get('cross_niche_offspring_per_generation', 0)
+        )
+        self.cross_niche_union_enabled = bool(
+            archive_cfg.get('cross_niche_union_crossover', False)
+        )
+        graceful_marker = gim_cfg.get('graceful_stop_marker')
+        self.graceful_stop_marker = (
+            Path(graceful_marker).resolve() if graceful_marker else None
+        )
+
         # Walk-forward config (per-island override)
         wf_cfg = gim_cfg.get('walk_forward', {})
         self.island_walk_forward: Optional[bool] = (
@@ -209,16 +324,35 @@ class GenericIslandModelEvolution:
         )
 
         # Base seed (from GA config or default)
-        self.base_seed: int = (
-            self.config.get('genetic_algorithm', {}).get('seed', 42)
-        )
+        configured_seed = self.config.get('genetic_algorithm', {}).get('random_seed')
+        self.base_seed: int = 42 if configured_seed is None else configured_seed
 
         # Build island configs
         explicit_islands = gim_cfg.get('islands', [])
         if explicit_islands:
+            if len(explicit_islands) != self.num_islands:
+                raise ValueError(
+                    "generic_island_model.num_islands must exactly match the "
+                    "number of explicit islands"
+                )
             self.island_configs = self._parse_explicit_islands(explicit_islands)
         else:
             self.island_configs = self._auto_generate_islands()
+        island_names = [island.name for island in self.island_configs]
+        if len(set(island_names)) != len(island_names):
+            raise ValueError("generic island names must be unique")
+        unknown_archive_islands = sorted(
+            set(self.archive_seeding_island_names) - set(island_names)
+        )
+        if unknown_archive_islands:
+            raise ValueError(
+                "archive_seeding references unknown islands: "
+                + ", ".join(unknown_archive_islands)
+            )
+        if len(set(self.archive_seeding_island_names)) != len(
+            self.archive_seeding_island_names
+        ):
+            raise ValueError("archive_seeding.island_names must be unique")
 
         # Runtime state
         self.islands: Dict[str, GeneticAlgorithm] = {}
@@ -259,6 +393,9 @@ class GenericIslandModelEvolution:
         )
         self.checkpoint_interval: int = storage_config.get('checkpoint_interval', 5)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.generation_trace = GenerationTraceWriterV2(
+            self.checkpoint_dir.parent / "generation_trace_v2.jsonl"
+        )
         self._checkpoint_requested = False  # for SIGUSR1 manual trigger
 
         # Thread safety
@@ -266,6 +403,431 @@ class GenericIslandModelEvolution:
         self._stats_lock = threading.Lock()
         self._migration_lock = threading.Lock()
         self._shutdown_requested = False
+        self._strict_initial_seeds: List[Individual] = []
+        self._archive_initial_seeds: Dict[str, List[Individual]] = {}
+        self._evaluated_generation_elites: Dict[str, List[Individual]] = {}
+        self._evaluated_generation_populations: Dict[str, List[Individual]] = {}
+        # A lane-global incumbent makes a new evolution a continuation of the
+        # search rather than an isolated run.  The first replay is therefore
+        # a genuine improvement check (and can be the first of four stale
+        # checks) instead of silently resetting the plateau clock.
+        self._common_panel_best: Optional[float] = self.common_panel_incumbent_score
+        self._common_panel_no_improvement_checks = 0
+        self.common_panel_replay_history: List[Dict[str, Any]] = []
+        self._rng_lock = threading.RLock()
+        self._island_random_states: Dict[str, Dict[str, Any]] = {}
+        self._diversity_bad_checks = 0
+        self._diversity_post_recovery_bad_checks = 0
+        self._diversity_recovery_applied = False
+        self.diversity_events: List[Dict[str, Any]] = []
+        self._stop_reason: Optional[str] = None
+        self._stop_detail: Optional[str] = None
+        self._last_completed_generation = -1
+        self.evolution_outcome: Dict[str, Any] = {
+            'status': 'PENDING',
+            'reason': None,
+            'generations_completed': 0,
+            'last_generation': None,
+            'common_panel_curve': [],
+            'valid_evaluations': 0,
+            'failed_evaluations': 0,
+            'common_panel_valid_evaluations': 0,
+            'common_panel_failed_evaluations': 0,
+            'diversity_events': [],
+            'incumbent_score': self.common_panel_incumbent_score,
+            'best_score': self.common_panel_incumbent_score,
+            'evaluation_history': [],
+            'detail': None,
+        }
+
+    def set_common_panel_incumbent(self, score: Optional[float]) -> None:
+        """Set the prior lane-global score before the first replay.
+
+        The config contract is
+        ``generic_island_model.common_panel_replay.incumbent_score``.  This
+        setter is intentionally also exposed for orchestration bridges which
+        build an engine before materialising the final derived config.
+        """
+
+        if self.common_panel_replay_history:
+            raise RuntimeError(
+                "common-panel incumbent cannot change after replay has started"
+            )
+        if score is not None:
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, (int, float))
+                or not math.isfinite(float(score))
+            ):
+                raise ValueError("common-panel incumbent must be null or finite")
+            score = float(score)
+        self.common_panel_incumbent_score = score
+        self._common_panel_best = score
+        self._common_panel_no_improvement_checks = 0
+        self.evolution_outcome['incumbent_score'] = score
+        self.evolution_outcome['best_score'] = score
+
+    def set_strict_initial_seeds(self, seeds: List[Individual]) -> None:
+        """Inject the same immutable parent set into every island.
+
+        The per-island ``GeneticAlgorithm`` performs the canonical deep-copy
+        and genome validation.  Keeping this hook at the island coordinator
+        prevents V2 exploit/replication attempts from silently falling back to
+        a scratch population.
+        """
+
+        if len(seeds) > min(
+            island.population_size for island in self.island_configs
+        ):
+            raise ValueError("strict initial seeds exceed the smallest island population")
+        if any(not isinstance(seed, Individual) for seed in seeds):
+            raise TypeError("strict initial seeds must contain only Individual values")
+        for island in self.island_configs:
+            archive_count = len(self._archive_initial_seeds.get(island.name, []))
+            if len(seeds) + archive_count > island.population_size:
+                raise ValueError(
+                    f'strict and archive seeds exceed population size for {island.name}'
+                )
+        self._strict_initial_seeds = list(seeds)
+
+    def set_archive_initial_seeds(self, seeds: List[Individual]) -> None:
+        """Distribute distinct archive champions only to configured islands."""
+
+        if not self.archive_seeding_enabled:
+            if seeds:
+                raise ValueError("archive seeding is not enabled")
+            self._archive_initial_seeds = {}
+            return
+        if not self.archive_seeding_island_names:
+            raise ValueError("archive seeding requires at least one island name")
+        if any(not isinstance(seed, Individual) for seed in seeds):
+            raise TypeError("archive seeds must contain only Individual values")
+
+        unique: List[Individual] = []
+        seen: set[str] = set()
+        for seed in seeds:
+            fingerprint = self._gene_hash(seed)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            unique.append(seed)
+
+        assignments = {
+            island_name: [] for island_name in self.archive_seeding_island_names
+        }
+        by_candidate_id = {
+            str(seed.metrics.get('archive_candidate_id')): seed
+            for seed in unique
+            if seed.metrics.get('archive_candidate_id')
+        }
+        if self.archive_seed_assignments:
+            for island_name in self.archive_seeding_island_names:
+                for row in self.archive_seed_assignments.get(island_name, []):
+                    seed = by_candidate_id.get(str(row.get('candidate_id')))
+                    if seed is None:
+                        continue
+                    clone = copy.deepcopy(seed)
+                    clone.metrics['archive_niche'] = str(row['niche'])
+                    assignments[island_name].append(clone)
+                if len(assignments[island_name]) > self.archive_seeding_max_per_island:
+                    raise ValueError(
+                        f'archive seed assignment exceeds capacity for {island_name}'
+                    )
+                island_size = next(
+                    island.population_size
+                    for island in self.island_configs
+                    if island.name == island_name
+                )
+                if (
+                    len(assignments[island_name]) + len(self._strict_initial_seeds)
+                    > island_size
+                ):
+                    raise ValueError(
+                        f'archive seeds exceed population size for {island_name}'
+                    )
+            self._archive_initial_seeds = assignments
+            return
+        capacity = (
+            len(self.archive_seeding_island_names)
+            * self.archive_seeding_max_per_island
+        )
+        for index, seed in enumerate(unique[:capacity]):
+            island_name = self.archive_seeding_island_names[
+                index % len(self.archive_seeding_island_names)
+            ]
+            assignments[island_name].append(seed)
+
+        island_sizes = {
+            island.name: island.population_size for island in self.island_configs
+        }
+        for island_name, assigned in assignments.items():
+            if len(assigned) + len(self._strict_initial_seeds) > island_sizes[island_name]:
+                raise ValueError(
+                    f'archive seeds exceed population size for {island_name}'
+                )
+        self._archive_initial_seeds = assignments
+
+    @staticmethod
+    def _capture_random_state() -> Dict[str, Any]:
+        """Capture process RNGs used by legacy genome operators."""
+
+        state: Dict[str, Any] = {'python': random.getstate()}
+        try:
+            import numpy as np
+
+            state['numpy'] = np.random.get_state()
+        except ImportError:
+            pass
+        return state
+
+    @staticmethod
+    def _restore_random_state(state: Dict[str, Any]) -> None:
+        random.setstate(state['python'])
+        if 'numpy' in state:
+            try:
+                import numpy as np
+
+                np.random.set_state(state['numpy'])
+            except ImportError:
+                pass
+
+    @staticmethod
+    def _random_state_to_json(state: Dict[str, Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {'python': state['python']}
+        if 'numpy' in state:
+            numpy_state = state['numpy']
+            payload['numpy'] = (
+                numpy_state[0],
+                numpy_state[1].tolist(),
+                int(numpy_state[2]),
+                int(numpy_state[3]),
+                float(numpy_state[4]),
+            )
+        return payload
+
+    @staticmethod
+    def _random_state_from_json(state: Dict[str, Any]) -> Dict[str, Any]:
+        python_state = state['python']
+        restored: Dict[str, Any] = {
+            'python': (
+                python_state[0], tuple(python_state[1]), python_state[2]
+            )
+        }
+        if 'numpy' in state:
+            try:
+                import numpy as np
+
+                numpy_state = state['numpy']
+                restored['numpy'] = (
+                    numpy_state[0],
+                    np.array(numpy_state[1], dtype=np.uint32),
+                    int(numpy_state[2]),
+                    int(numpy_state[3]),
+                    float(numpy_state[4]),
+                )
+            except ImportError:
+                pass
+        return restored
+
+    def _initial_random_state_for_island(self, island_name: str) -> Dict[str, Any]:
+        island_config = next(
+            item for item in self.island_configs if item.name == island_name
+        )
+        state: Dict[str, Any] = {
+            'python': random.Random(island_config.seed).getstate(),
+        }
+        try:
+            import numpy as np
+
+            state['numpy'] = np.random.RandomState(island_config.seed).get_state()
+        except ImportError:
+            pass
+        return state
+
+    @contextmanager
+    def _island_random_scope(self, island_name: str):
+        """Give an island an independent deterministic legacy RNG stream.
+
+        A number of old operators still use module-level ``random`` and
+        ``numpy.random``.  Swapping their state under one lock is the only
+        safe way to isolate islands without rewriting every operator.  This
+        intentionally serializes ``parallel_islands`` around GA work; the
+        shared process evaluation pool still provides the expensive
+        backtesting parallelism.
+        """
+
+        with self._rng_lock:
+            caller_state = self._capture_random_state()
+            island_state = self._island_random_states.get(island_name)
+            if island_state is None:
+                island_state = self._initial_random_state_for_island(island_name)
+            self._restore_random_state(island_state)
+            try:
+                yield
+            finally:
+                self._island_random_states[island_name] = self._capture_random_state()
+                self._restore_random_state(caller_state)
+
+    @staticmethod
+    def _configure_behavioral_distance(ga: GeneticAlgorithm) -> float:
+        """Wire the configured behavioral blend into the implementation module.
+
+        ``core.population`` is a compatibility shim.  Assigning its module
+        global (as the standard GA historically did) does not update the
+        global referenced by functions defined in ``engine.population``.
+        Generic-island evaluation therefore binds both explicitly.
+        """
+
+        weight = float(
+            ga.config.get('genetic_algorithm', {}).get(
+                'behavioral_distance_weight', 0.0
+            )
+        )
+        import genetic_algorithm.core.population as population_shim
+        import genetic_algorithm.engine.population as population_impl
+
+        population_shim._BEHAVIORAL_DISTANCE_WEIGHT = weight
+        population_impl._BEHAVIORAL_DISTANCE_WEIGHT = weight
+        return weight
+
+    def _request_stop(self, reason: str, detail: str) -> None:
+        """Set one terminal reason; technical invalidity outranks economics."""
+
+        if self._stop_reason is None or (
+            reason == OUTCOME_TECHNICAL_INVALID
+            and self._stop_reason != OUTCOME_TECHNICAL_INVALID
+        ):
+            self._stop_reason = reason
+            self._stop_detail = detail
+        self._shutdown_requested = True
+
+    @staticmethod
+    def _is_failed_evidence(individual: Individual) -> bool:
+        return bool(individual.metrics.get('error')) or (
+            individual.fitness_evidence == FITNESS_EVIDENCE_BACKTEST_FAILED
+        )
+
+    def _is_valid_evidence(self, individual: Individual) -> bool:
+        if (
+            not individual.has_measured_fitness
+            or self._is_failed_evidence(individual)
+        ):
+            return False
+        raw_config = self.config.get('raw_multipair_score', {})
+        if not raw_config.get('enabled', False):
+            return True
+        expected_pairs = {
+            *raw_config.get('development_pairs', []),
+            *raw_config.get('validation_pairs', []),
+        }
+        expected_score_version = str(
+            raw_config.get('policy_version', 'raw-multipair-score-v4')
+        )
+        raw_pair_metrics = individual.metrics.get('raw_pair_metrics')
+        return (
+            individual.metrics.get('raw_multipair_score_version')
+            == expected_score_version
+            and individual.metrics.get('raw_multipair_status') == 'VALID'
+            and isinstance(raw_pair_metrics, dict)
+            and set(raw_pair_metrics) == expected_pairs
+            and len(expected_pairs) == 6
+        )
+
+    def _record_generation_evidence(self, generation: int) -> bool:
+        """Record evaluated evidence and fail fast when a generation has none."""
+
+        individuals = [
+            individual
+            for island_name in sorted(self._evaluated_generation_populations)
+            for individual in self._evaluated_generation_populations[island_name]
+        ]
+        valid = sum(self._is_valid_evidence(item) for item in individuals)
+        failed = sum(self._is_failed_evidence(item) for item in individuals)
+        record = {
+            'generation': generation,
+            'valid_evaluations': valid,
+            'failed_evaluations': failed,
+            'population_size': len(individuals),
+        }
+        self.evolution_outcome['evaluation_history'].append(record)
+        self.evolution_outcome['valid_evaluations'] += valid
+        self.evolution_outcome['failed_evaluations'] += failed
+        if valid == 0:
+            self._request_stop(
+                OUTCOME_TECHNICAL_INVALID,
+                f'generation {generation + 1} produced zero valid backtest evidence',
+            )
+            return False
+        return True
+
+    def _finalize_evolution_outcome(self) -> Dict[str, Any]:
+        reason = self._stop_reason or OUTCOME_COMPLETED_BUDGET
+        status = (
+            'FAILED'
+            if reason == OUTCOME_TECHNICAL_INVALID
+            else 'EARLY_STOPPED'
+            if reason in {OUTCOME_PLATEAU, OUTCOME_DIVERSITY_COLLAPSE}
+            else 'COMPLETED'
+        )
+        self.evolution_outcome.update({
+            'status': status,
+            'reason': reason,
+            'generations_completed': max(0, self._last_completed_generation + 1),
+            'last_generation': (
+                self._last_completed_generation
+                if self._last_completed_generation >= 0
+                else None
+            ),
+            'common_panel_curve': [
+                {
+                    key: event.get(key)
+                    for key in (
+                        'generation', 'best_fitness', 'median_fitness',
+                        'improved', 'no_improvement_checks',
+                    )
+                }
+                for event in self.common_panel_replay_history
+            ],
+            'diversity_events': copy.deepcopy(self.diversity_events),
+            'incumbent_score': self.common_panel_incumbent_score,
+            'best_score': self._common_panel_best,
+            'detail': self._stop_detail,
+        })
+        self._persist_evolution_outcome()
+        return copy.deepcopy(self.evolution_outcome)
+
+    def get_evolution_outcome(self) -> Dict[str, Any]:
+        """Return a JSON-safe snapshot for orchestration code."""
+
+        return copy.deepcopy(self.evolution_outcome)
+
+    def _persist_evolution_outcome(self) -> Path:
+        """Atomically persist the canonical outcome and its SHA-256 digest."""
+
+        path = self.checkpoint_dir.parent / 'evolution_outcome.json'
+        payload = json.dumps(
+            self.evolution_outcome,
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode('utf-8')
+        digest = hashlib.sha256(payload).hexdigest()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        outcome_tmp = path.with_name(path.name + '.tmp')
+        digest_path = path.with_name(path.name + '.sha256')
+        digest_tmp = digest_path.with_name(digest_path.name + '.tmp')
+        with outcome_tmp.open('wb') as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(outcome_tmp, path)
+        with digest_tmp.open('w', encoding='ascii') as handle:
+            handle.write(digest + '\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(digest_tmp, digest_path)
+        return path
 
     # ------------------------------------------------------------------
     # Island configuration building
@@ -423,14 +985,18 @@ class GenericIslandModelEvolution:
         cfg = copy.deepcopy(self.config)
 
         # Override population size and related params
-        cfg['genetic_algorithm']['population_size'] = ic.population_size
-        cfg['genetic_algorithm']['elite_size'] = max(2, ic.population_size // 10)
-        cfg['genetic_algorithm']['random_immigrants'] = max(
-            2, ic.population_size // 10,
+        elite_size, random_immigrants = derive_island_population_slots(
+            ic.population_size
         )
+        cfg['genetic_algorithm']['population_size'] = ic.population_size
+        cfg['genetic_algorithm']['elite_size'] = elite_size
+        cfg['genetic_algorithm']['random_immigrants'] = random_immigrants
 
-        # Set seed
-        cfg['genetic_algorithm']['seed'] = ic.seed
+        # GeneticAlgorithm consumes ``random_seed``.  Writing the historical
+        # ``seed`` alias here made every island inherit the same base seed and
+        # rendered seed rotation ineffective.
+        cfg['genetic_algorithm']['random_seed'] = ic.seed
+        cfg['genetic_algorithm'].pop('seed', None)
 
         # Set generations (per-island override or global)
         island_gens = ic.generations if ic.generations is not None else self.generations
@@ -453,25 +1019,41 @@ class GenericIslandModelEvolution:
         if ic.pairs is not None:
             cfg.setdefault('backtesting', {})['pairs'] = list(ic.pairs)
 
-        # Disable nested island models to prevent recursion
-        cfg['island_model'] = {'enabled': False}
-        cfg['generic_island_model'] = {'enabled': False}
-
-        # Disable terminal monitor for sub-islands
-        cfg['terminal_monitor'] = {'enabled': False}
-
-        # Tag island name for logging
-        cfg['_island_name'] = ic.name
-
         # Apply extra config overrides using deep merge so that partial
         # overrides (e.g. only genetic_algorithm.selection_method) don't
         # wipe sibling keys in the same section.
         self._deep_merge(cfg, ic.extra_config)
 
+        # These invariants must be applied *after* extra_config so an island
+        # override cannot accidentally recurse into another island model or
+        # spawn its own monitor/process pool.  Preserve all sibling settings
+        # in the resolved contract.
+        cfg.setdefault('island_model', {})['enabled'] = False
+        cfg.setdefault('generic_island_model', {})['enabled'] = False
+        cfg.setdefault('terminal_monitor', {})['enabled'] = False
+        if (
+            cfg.get('safety_profile', {}).get('name')
+            == 'automation_island_v2'
+        ):
+            # The coordinator owns the outer automation contract.  A child is
+            # a standard GA with pair validation and must not satisfy the
+            # top-level requirement that the island coordinator is enabled.
+            cfg['safety_profile']['name'] = 'automation_island_child_v2'
+        elif (
+            cfg.get('safety_profile', {}).get('name')
+            == 'hardcore_multipair_v1'
+        ):
+            # The immutable parent contract has already validated the twelve
+            # explicit specialists and the complete six-pair panel.  A child
+            # is a standard GA evaluated by the coordinator's shared pool, so
+            # it must keep every raw-multipair safety invariant while
+            # explicitly disabling recursive island orchestration.
+            cfg['safety_profile']['name'] = 'hardcore_multipair_child_v1'
+
         # Disable per-island parallel evaluation — the island model
         # creates ONE shared ParallelEvaluator to avoid spawning
         # N_islands × N_workers processes (OOM on 16 GB systems).
-        cfg['parallel_evaluation'] = {'enabled': False}
+        cfg.setdefault('parallel_evaluation', {})['enabled'] = False
 
         return cfg
 
@@ -504,6 +1086,7 @@ class GenericIslandModelEvolution:
 
         # Share the hall of fame
         ga.hall_of_fame = self.hall_of_fame
+        ga._evaluation_island = ic.name
 
         return ga
 
@@ -581,7 +1164,8 @@ class GenericIslandModelEvolution:
         parallel_config = self.config.get('parallel_evaluation', {})
         if parallel_config.get('enabled', False):
             from genetic_algorithm.evaluation.parallel import (
-                ParallelEvaluator, is_parallel_available,
+                ParallelEvaluator,
+                is_parallel_available,
             )
             if is_parallel_available():
                 self._shared_parallel_evaluator = ParallelEvaluator(
@@ -600,6 +1184,8 @@ class GenericIslandModelEvolution:
             # PHASE 1: CREATE ISLANDS
             # ═══════════════════════════════════════════════════════════
             self._phase1_create_islands()
+
+            self._enforce_search_panel_contract()
 
             # ── Try resuming from checkpoint ──
             resume_gen = self.load_island_checkpoint()
@@ -621,15 +1207,33 @@ class GenericIslandModelEvolution:
             # ═══════════════════════════════════════════════════════════
             total_elapsed = time.time() - start_time
             self._phase3_report(results, total_elapsed)
+            extract_island_finalists(
+                results,
+                expected_islands=[
+                    island_config.name for island_config in self.island_configs
+                ],
+                require_finalists=True,
+            )
 
             self.monitor.on_evolution_complete({
                 'total_time': total_elapsed,
-                'generations': self.generations,
+                'generations': self.evolution_outcome['generations_completed'],
                 'islands': len(self.islands),
                 'migrations': len(self.migration_history),
+                'stop_reason': self.evolution_outcome['reason'],
             })
 
             return results
+        except Exception as exc:
+            self._request_stop(
+                OUTCOME_TECHNICAL_INVALID,
+                f'unhandled generic-island error: {type(exc).__name__}: {exc}',
+            )
+            try:
+                self._finalize_evolution_outcome()
+            except Exception:
+                self.logger.exception("[OUTCOME] Failed to persist technical outcome")
+            raise
         finally:
             # Always clean up the shared pool (crash, interrupt, or normal exit)
             if self._shared_parallel_evaluator is not None:
@@ -651,12 +1255,21 @@ class GenericIslandModelEvolution:
 
         for ic in self.island_configs:
             ga = self._create_island_ga(ic)
+            island_seeds = [
+                *self._strict_initial_seeds,
+                *self._archive_initial_seeds.get(ic.name, []),
+            ]
+            ga.set_strict_initial_seeds(island_seeds)
             self.islands[ic.name] = ga
             self.island_stats[ic.name] = GenericIslandStats(name=ic.name)
             self.generation_stats[ic.name] = []
 
             pop = ga.initialize_population()
             self.island_populations[ic.name] = pop
+            # GeneticAlgorithm seeds the legacy global RNGs from ``ic.seed``;
+            # capture the post-initialization position before another island
+            # changes them.
+            self._island_random_states[ic.name] = self._capture_random_state()
 
             pool_desc = (
                 f"pool={len(ic.indicator_pool)} indicators"
@@ -675,6 +1288,24 @@ class GenericIslandModelEvolution:
             "  Phase 1 complete: %.1f seconds. %d islands created.",
             phase_elapsed, len(self.islands),
         )
+
+    def _enforce_search_panel_contract(self) -> bool:
+        """Disable shared execution when island evaluator semantics differ."""
+        search_panel_ids = {
+            ga.evaluation_panel.panel_id for ga in self.islands.values()
+        }
+        self._search_panels_comparable = len(search_panel_ids) == 1
+        if not self._search_panels_comparable and self._shared_parallel_evaluator:
+            # One evaluator cannot truthfully execute several pair/cost/
+            # fitness configs. Fall back to each island's own sequential
+            # evaluator rather than stamp base-config results as local.
+            self.logger.warning(
+                "[ISLAND] Distinct evaluation panels detected; shared "
+                "parallel evaluator disabled for provenance correctness"
+            )
+            self._shared_parallel_evaluator.shutdown()
+            self._shared_parallel_evaluator = None
+        return self._search_panels_comparable
 
     # ------------------------------------------------------------------
     # Phase 2: Evolution
@@ -697,6 +1328,8 @@ class GenericIslandModelEvolution:
         self.logger.info("═" * 70)
 
         overall_best_individual = None
+        self.evolution_outcome['status'] = 'RUNNING'
+        self._last_completed_generation = start_generation - 1
 
         for gen in range(start_generation, self.generations):
             if self._shutdown_requested:
@@ -723,9 +1356,20 @@ class GenericIslandModelEvolution:
                         gen,
                     )
 
+            self._last_completed_generation = gen
+            generation_has_evidence = self._record_generation_evidence(gen)
+            if generation_has_evidence:
+                self._maybe_replay_common_panel(gen)
+
+            self._persist_generation_trace(gen)
+
+            if generation_has_evidence and self._stop_reason is None:
+                self._maybe_handle_diversity(gen)
+
             # Migration (skip generation 0 — populations not yet evaluated)
             if (
-                gen > 0
+                not self._shutdown_requested
+                and gen > 0
                 and self.migration.interval > 0
                 and (gen + 1) % self.migration.interval == 0
             ):
@@ -733,7 +1377,8 @@ class GenericIslandModelEvolution:
 
             # External migration (cross-machine strategy exchange)
             if (
-                self.external_migration_enabled
+                not self._shutdown_requested
+                and self.external_migration_enabled
                 and gen > 0
                 and self.external_migration_interval > 0
                 and (gen + 1) % self.external_migration_interval == 0
@@ -743,7 +1388,8 @@ class GenericIslandModelEvolution:
 
             # Merge rounds (global pool-and-redistribute)
             if (
-                gen > 0
+                not self._shutdown_requested
+                and gen > 0
                 and self.migration.merge_rounds
                 and self.migration.merge_interval > 0
                 and (gen + 1) % self.migration.merge_interval == 0
@@ -769,31 +1415,38 @@ class GenericIslandModelEvolution:
             gen_elapsed = time.time() - gen_start
             self._log_generation_summary(gen, gen_elapsed)
 
-            # Update overall best and notify monitor
-            for ic in self.island_configs:
-                pop = self.island_populations.get(ic.name)
-                if pop:
-                    best_list = pop.get_best(1)
-                    if best_list:
-                        cand = best_list[0]
+            # A global best/average exists only when every island uses the
+            # same exact evaluation panel.
+            if self._search_panels_comparable:
+                for ic in self.island_configs:
+                    measured = [
+                        individual
+                        for individual in self._evaluated_generation_populations.get(
+                            ic.name, []
+                        )
+                        if self._is_valid_evidence(individual)
+                    ]
+                    if measured:
+                        cand = max(measured, key=lambda item: float(item.raw_fitness))
                         if (
-                            cand.raw_fitness
-                            and (
-                                overall_best_individual is None
-                                or cand.raw_fitness > (overall_best_individual.raw_fitness or 0)
-                            )
+                            overall_best_individual is None
+                            or float(cand.raw_fitness)
+                            > float(overall_best_individual.raw_fitness)
                         ):
                             overall_best_individual = cand
                             self.monitor.on_new_best(cand)
-
-            agg_best = max(
-                (ist.best_fitness for ist in self.island_stats.values()),
-                default=0,
-            )
-            agg_avg = (
-                sum(ist.avg_fitness for ist in self.island_stats.values())
-                / max(len(self.island_stats), 1)
-            )
+                agg_best = max(
+                    (ist.best_fitness for ist in self.island_stats.values()),
+                    default=0,
+                )
+                agg_avg = (
+                    sum(ist.avg_fitness for ist in self.island_stats.values())
+                    / max(len(self.island_stats), 1)
+                )
+            else:
+                overall_best_individual = None
+                agg_best = 0.0
+                agg_avg = 0.0
             _agg_stats = _AggregateStats(
                 best_fitness=agg_best,
                 avg_fitness=agg_avg,
@@ -808,6 +1461,7 @@ class GenericIslandModelEvolution:
                 extras={
                     'island_count': len(self.islands),
                     'migrations': len(self.migration_history),
+                    'global_fitness_comparable': self._search_panels_comparable,
                 },
             )
 
@@ -823,16 +1477,65 @@ class GenericIslandModelEvolution:
                     )
                     break
 
-        # Collect results: pool top-5 from every island, deduplicate
-        results = self._collect_final_results()
+            if self._shutdown_requested:
+                break
+
+            if (
+                self.graceful_stop_marker is not None
+                and self.graceful_stop_marker.is_file()
+            ):
+                try:
+                    requested = json.loads(
+                        self.graceful_stop_marker.read_text(encoding='utf-8')
+                    ).get('reason')
+                except (OSError, json.JSONDecodeError, AttributeError):
+                    requested = 'CAMPAIGN_DEADLINE'
+                self.logger.info(
+                    '[SHUTDOWN] Graceful marker observed after generation %d: %s',
+                    gen + 1,
+                    requested,
+                )
+                terminal_reason = (
+                    requested
+                    if requested
+                    in {
+                        OUTCOME_PLATEAU,
+                        OUTCOME_TECHNICAL_INVALID,
+                        OUTCOME_DIVERSITY_COLLAPSE,
+                        OUTCOME_COMPLETED_BUDGET,
+                        'CAMPAIGN_DEADLINE',
+                        'NO_GLOBAL_PROGRESS',
+                    }
+                    else 'CAMPAIGN_DEADLINE'
+                )
+                self._request_stop(
+                    terminal_reason,
+                    f'graceful stop marker observed after generation {gen + 1}',
+                )
+                self._checkpoint_requested = True
+
+        # A campaign/deadline stop has already reached a generation boundary
+        # and checkpoint.  Do not turn it into an unbounded final replay of
+        # dozens of candidates: there is no promotion decision to make and a
+        # canonical terminal outcome is sufficient for the controller.  All
+        # normal terminal reasons retain the full finalist-union replay.
+        if self._stop_reason == 'CAMPAIGN_DEADLINE':
+            self.logger.info(
+                '[SHUTDOWN] Skipping final finalist replay after campaign stop'
+            )
+            results = {island_config.name: [] for island_config in self.island_configs}
+        else:
+            results = self._collect_final_results()
+
+        self._finalize_evolution_outcome()
 
         # Final checkpoint at end of evolution
-        try:
-            last_gen = self.generations - 1
-            self.save_island_checkpoint(last_gen)
-            self.export_best_strategies(last_gen)
-        except Exception as e:
-            self.logger.error("[CHECKPOINT] Final save failed: %s", e)
+        if self._last_completed_generation >= 0:
+            try:
+                self.save_island_checkpoint(self._last_completed_generation)
+                self.export_best_strategies(self._last_completed_generation)
+            except Exception as e:
+                self.logger.error("[CHECKPOINT] Final save failed: %s", e)
 
         phase_elapsed = time.time() - phase_start
         self.logger.info("")
@@ -844,11 +1547,46 @@ class GenericIslandModelEvolution:
 
         return results
 
+    def _persist_generation_trace(self, generation: int) -> None:
+        """Persist comparable diagnostics before migration mutates populations."""
+
+        for island_config in self.island_configs:
+            island_name = island_config.name
+            evaluated_population = self._evaluated_generation_populations.get(
+                island_name
+            )
+            stats_history = self.generation_stats.get(island_name, [])
+            if not stats_history or evaluated_population is None:
+                raise RuntimeError(
+                    f"missing generation statistics for {island_name} generation {generation}"
+                )
+            panel_id = self.islands[island_name].evaluation_panel.panel_id
+            self.generation_trace.append(
+                generation=generation,
+                island_name=island_name,
+                panel_id=panel_id,
+                individuals=evaluated_population,
+                stats=stats_history[-1],
+            )
+
     # ------------------------------------------------------------------
     # Single-island evolution (one generation)
     # ------------------------------------------------------------------
 
     def _evolve_island_one_generation(
+        self,
+        ga: GeneticAlgorithm,
+        population: Population,
+        island_name: str,
+        generation: int,
+    ):
+        with self._island_random_scope(island_name):
+            self._configure_behavioral_distance(ga)
+            return self._evolve_island_one_generation_unscoped(
+                ga, population, island_name, generation
+            )
+
+    def _evolve_island_one_generation_unscoped(
         self,
         ga: GeneticAlgorithm,
         population: Population,
@@ -876,13 +1614,44 @@ class GenericIslandModelEvolution:
         # Step 1: Evaluate fitness
         ga.evaluate_population(population)
 
+        # Some legacy/third-party workers reported ``success=True`` while
+        # returning ``metrics.error``.  The error marker is authoritative for
+        # production evidence and must not leak into measured elites.
+        for individual in population.individuals:
+            if individual.metrics.get('error'):
+                individual.fitness_evidence = FITNESS_EVIDENCE_BACKTEST_FAILED
+                individual.metrics['fitness_evidence'] = (
+                    FITNESS_EVIDENCE_BACKTEST_FAILED
+                )
+
+        # Keep the complete evaluated generation for trace/evidence accounting,
+        # but never let technical failures compete with signed raw scores.  A
+        # failed worker historically returned fitness=0 which can outrank a
+        # perfectly valid (but negative) raw-multipair candidate and would then
+        # leak into elitism and parent selection.
+        evaluated_individuals = list(population.individuals)
+        raw_multipair_enabled = bool(
+            self.config.get('raw_multipair_score', {}).get('enabled', False)
+        )
+        reproduction_population = population
+        if raw_multipair_enabled:
+            reproduction_population = Population(
+                size=population.size,
+                generation=population.generation,
+            )
+            reproduction_population.individuals = [
+                individual
+                for individual in evaluated_individuals
+                if self._is_valid_evidence(individual)
+            ]
+
         # Step 1b: Feed evaluated population to surrogate model so it can
         # learn and (from the next generation onward) pre-filter candidates.
         # evaluate_population() is called directly here instead of via
         # ga.evolve(), so we must drive the surrogate manually.
         if hasattr(ga, '_surrogate') and ga._surrogate is not None and ga._surrogate.enabled:
             try:
-                ga._surrogate.add_training_data(population)
+                ga._surrogate.add_training_data(reproduction_population)
                 ga._surrogate.maybe_retrain()
             except Exception as _surr_exc:
                 self.logger.debug(
@@ -891,31 +1660,52 @@ class GenericIslandModelEvolution:
                 )
 
         # Step 2: Fitness sharing
-        if ga.fitness_sharing and len(population.individuals) >= 2:
+        if ga.fitness_sharing and len(reproduction_population.individuals) >= 2:
             distance_matrix = calculate_pairwise_distances(
-                list(population.individuals),
+                list(reproduction_population.individuals),
             )
             apply_fitness_sharing(
-                population, sigma_share=ga.sharing_radius,
+                reproduction_population, sigma_share=ga.sharing_radius,
                 distance_matrix=distance_matrix,
             )
 
         # Step 2b: Strategy culling (after evaluation & sharing, before HoF)
-        if self.culler.enabled:
+        if self.culler.enabled and reproduction_population.individuals:
             self.culler.cull_population(
-                population, generation=generation, elite_size=ga.elite_size,
+                reproduction_population,
+                generation=generation,
+                elite_size=ga.elite_size,
             )
 
         # Step 3: Get stats
-        stats = population.get_stats()
+        stats = reproduction_population.get_stats()
+        # The trace still represents the complete evaluated generation; only
+        # the fitness aggregates are restricted to valid evidence.
+        stats.size = len(evaluated_individuals)
 
         # Update best
-        best = population.get_best(1)
+        measured_by_raw_score = sorted(
+            [
+                individual
+                for individual in reproduction_population.individuals
+                if self._is_valid_evidence(individual)
+                and individual.raw_fitness is not None
+            ],
+            key=lambda individual: float(individual.raw_fitness),
+            reverse=True,
+        )
+        best = measured_by_raw_score[:1]
         if best:
             best_ind = best[0]
             with self._stats_lock:
                 ist = self.island_stats[island_name]
-                if best_ind.raw_fitness and best_ind.raw_fitness > ist.best_fitness:
+                if (
+                    best_ind.raw_fitness is not None
+                    and (
+                        ist.generations_completed == 0
+                        or best_ind.raw_fitness > ist.best_fitness
+                    )
+                ):
                     ist.best_fitness = best_ind.raw_fitness
                     profit = best_ind.metrics.get('profit', 0)
                     ist.best_profit = profit
@@ -927,22 +1717,23 @@ class GenericIslandModelEvolution:
                     )
                 ist.avg_fitness = stats.avg_fitness
                 ist.generations_completed = generation + 1
+        else:
+            with self._stats_lock:
+                ist = self.island_stats[island_name]
+                ist.avg_fitness = stats.avg_fitness or 0.0
+                ist.generations_completed = generation + 1
 
-        # Step 4: Update hall of fame
-        try:
-            with self._hof_lock:
-                ga.hall_of_fame.update(population, generation)
-        except Exception as e:
-            self.logger.warning(
-                "Hall of fame update failed for %s: %s", island_name, e,
-            )
+        # Local island scores are search signals only.  They may come from
+        # different pair subsets or scoring overrides and therefore cannot
+        # enter the shared Hall of Fame.  HOF update happens once after the
+        # common-panel replay in _collect_final_results().
 
         # Step 5: Log island stats
         self.logger.info(
             "  [%-25s] best=%.4f avg=%.4f diversity=%.4f",
             island_name,
-            stats.best_fitness,
-            stats.avg_fitness,
+            stats.best_fitness or 0.0,
+            stats.avg_fitness or 0.0,
             stats.genetic_diversity or 0,
         )
 
@@ -950,6 +1741,12 @@ class GenericIslandModelEvolution:
         stats.generation = generation
         with self._stats_lock:
             self.generation_stats[island_name].append(stats)
+            self._evaluated_generation_populations[island_name] = copy.deepcopy(
+                evaluated_individuals
+            )
+            self._evaluated_generation_elites[island_name] = copy.deepcopy(
+                measured_by_raw_score[:self.common_panel_top_n]
+            )
 
         # Step 6b: Record LLM strategy performance
         if ga.llm_enabled and ga.strategy_designer and ga.strategy_designer.enabled:
@@ -963,8 +1760,166 @@ class GenericIslandModelEvolution:
 
         # Step 7: Create next generation
         if generation < self.generations - 1:
-            next_pop = ga.create_next_generation(population)
+            if raw_multipair_enabled and len(reproduction_population.individuals) < 2:
+                next_pop = self._fresh_generation_without_self_crossover(
+                    ga,
+                    reproduction_population,
+                    generation=generation,
+                    population_size=population.size,
+                )
+            else:
+                next_pop = ga.create_next_generation(reproduction_population)
             self.island_populations[island_name] = next_pop
+            self._inject_cross_niche_offspring(
+                ga,
+                next_pop,
+                island_name=island_name,
+                generation=generation + 1,
+            )
+
+    def _inject_cross_niche_offspring(
+        self,
+        ga: GeneticAlgorithm,
+        population: Population,
+        *,
+        island_name: str,
+        generation: int,
+    ) -> None:
+        """Reserve a bridge budget for EDGE/Productive/Activity recombination."""
+
+        count = self.cross_niche_offspring_per_generation
+        if count <= 0 or island_name not in self.archive_seeding_island_names:
+            return
+        seeds = self._archive_initial_seeds.get(island_name, [])
+        evaluated = self._evaluated_generation_populations.get(island_name, [])
+
+        def component(individual: Individual, name: str) -> float:
+            result = individual.metrics.get('raw_multipair_result', {})
+            aggregate = result.get('aggregate_components', {}) if isinstance(result, dict) else {}
+            value = aggregate.get(name) if isinstance(aggregate, dict) else None
+            return float(value) if isinstance(value, (int, float)) else float('-inf')
+
+        def live_top(name: str) -> list[Individual]:
+            return sorted(
+                [
+                    item for item in evaluated
+                    if item.metrics.get('raw_multipair_status') == 'VALID'
+                ],
+                key=lambda item: component(item, name),
+                reverse=True,
+            )[:3]
+
+        # Archive parents preserve across-run learning, while live leaders
+        # make the bridge react to newly discovered niches in this generation.
+        edge = [item for item in seeds if item.metrics.get('archive_niche') == 'EDGE'] + live_top('edge_score')
+        activity = [
+            item for item in seeds if item.metrics.get('archive_niche') == 'ACTIVITY'] + live_top('activity_score')
+        productive = [
+            item for item in seeds if item.metrics.get('archive_niche') == 'PRODUCTIVE'] + live_top('productive_frequency_score')
+        secondary = productive or activity
+        if not edge or not secondary:
+            return
+        replacements: list[Individual] = []
+        attempts = 0
+        while len(replacements) < min(count, population.size):
+            attempts += 1
+            if attempts > max(4, count * 4):
+                self.logger.warning(
+                    '[BRIDGE] Could not create the requested cross-niche offspring for %s',
+                    island_name,
+                )
+                break
+            parent_edge = random.choice(edge)
+            # Alternate productive and activity secondary parents when both
+            # frontiers exist; this gives each bridge two cross-niche children
+            # of each kind in the V5 production configuration.
+            selected_secondary = (
+                productive if productive and (len(replacements) // 2) % 2 == 0 else activity
+            ) or secondary
+            parent_secondary = random.choice(selected_secondary)
+            parent_niches = [
+                'EDGE',
+                'PRODUCTIVE' if selected_secondary is productive else 'ACTIVITY',
+            ]
+            try:
+                crossover_fn = (
+                    cross_niche_union_crossover
+                    if self.cross_niche_union_enabled
+                    else crossover
+                )
+                if self.cross_niche_union_enabled:
+                    child1, child2 = crossover_fn(
+                        parent_edge,
+                        parent_secondary,
+                        generation=generation,
+                        ind_id=max(0, population.size - count + len(replacements)),
+                        config=ga.config,
+                    )
+                else:
+                    child1, child2 = crossover_fn(
+                        parent_edge,
+                        parent_secondary,
+                        generation=generation,
+                        ind_id=max(0, population.size - count + len(replacements)),
+                        config=ga.config,
+                        method=ga.crossover_method,
+                    )
+            except (TypeError, ValueError) as exc:
+                self.logger.warning(
+                    '[BRIDGE] Quarantined incompatible EDGE/ACTIVITY mating on %s: %s',
+                    island_name,
+                    exc,
+                )
+                continue
+            for child in (child1, child2):
+                if len(replacements) >= count:
+                    break
+                child = mutate(child, ga.mutation_rate, ga.config)
+                _fix_invalid_operators(child.strategy_gene)
+                _enforce_min_entry_conditions(child.strategy_gene, ga.config)
+                child.evaluated = False
+                child.fitness = None
+                child.raw_fitness = None
+                child.metrics = {
+                    'origin': 'cross_niche_bridge',
+                    'parent_niches': parent_niches,
+                    'cross_niche_operator': (
+                        'union' if self.cross_niche_union_enabled else ga.crossover_method
+                    ),
+                    'parent_ids': [parent_edge.id, parent_secondary.id],
+                }
+                replacements.append(child)
+        if replacements:
+            population.individuals[-len(replacements):] = replacements
+
+    @staticmethod
+    def _fresh_generation_without_self_crossover(
+        ga: GeneticAlgorithm,
+        valid_population: Population,
+        *,
+        generation: int,
+        population_size: int,
+    ) -> Population:
+        """Build a fresh generation when fewer than two valid parents exist."""
+
+        next_generation = generation + 1
+        next_pop = Population(size=population_size, generation=next_generation)
+        if valid_population.individuals and ga.elite_size > 0:
+            elite = copy.deepcopy(valid_population.individuals[0])
+            elite.strategy_gene.generation = next_generation
+            elite.strategy_gene.individual_id = 0
+            next_pop.add_individual(elite)
+
+        while len(next_pop) < population_size:
+            individual_id = len(next_pop)
+            gene = ga.strategy_generator.generate_random_strategy(
+                generation=next_generation,
+                individual_id=individual_id,
+            )
+            immigrant = Individual(strategy_gene=gene)
+            immigrant.metrics['origin'] = 'insufficient_valid_parents'
+            next_pop.add_individual(immigrant)
+        return next_pop
 
     def _evolve_all_islands_parallel(self, generation: int):
         """Evolve all islands in parallel using ThreadPoolExecutor."""
@@ -972,6 +1927,7 @@ class GenericIslandModelEvolution:
 
         max_workers = min(len(self.island_configs), os.cpu_count() or 1)
 
+        first_error = None
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for ic in self.island_configs:
@@ -993,6 +1949,12 @@ class GenericIslandModelEvolution:
                         "Island %s failed at generation %d: %s",
                         island_name, generation, e,
                     )
+                    if first_error is None:
+                        first_error = e
+        if first_error is not None:
+            raise RuntimeError(
+                f'island worker failed in generation {generation + 1}'
+            ) from first_error
 
     # ------------------------------------------------------------------
     # Checkpoint save / load / export
@@ -1050,8 +2012,18 @@ class GenericIslandModelEvolution:
         except Exception as e:
             self.logger.warning("[CHECKPOINT] Could not serialise hall of fame: %s", e)
 
+        provenance = checkpoint_provenance_from_config(
+            self.config,
+            engine_kind="GENERIC_ISLAND",
+            island_names=(ic.name for ic in self.island_configs),
+            required=False,
+        )
         checkpoint = {
-            'version': 1,
+            'version': CHECKPOINT_VERSION,
+            'resume_eligible': provenance is not None,
+            'provenance': (
+                provenance.model_dump(mode='json') if provenance is not None else None
+            ),
             'type': 'island_model',
             'timestamp': datetime.now().isoformat(),
             'generation': generation,
@@ -1062,6 +2034,23 @@ class GenericIslandModelEvolution:
             'island_stats': stats_data,
             'hall_of_fame': hof_data,
             'migration_history_count': len(self.migration_history),
+            'common_panel_replay': {
+                'incumbent_score': self.common_panel_incumbent_score,
+                'best_fitness': self._common_panel_best,
+                'no_improvement_checks': self._common_panel_no_improvement_checks,
+                'history': self.common_panel_replay_history,
+            },
+            'diversity_recovery': {
+                'bad_checks': self._diversity_bad_checks,
+                'post_recovery_bad_checks': self._diversity_post_recovery_bad_checks,
+                'recovery_applied': self._diversity_recovery_applied,
+                'events': self.diversity_events,
+            },
+            'evolution_outcome': self.evolution_outcome,
+            'island_random_states': {
+                name: self._random_state_to_json(state)
+                for name, state in self._island_random_states.items()
+            },
             'config_snapshot': {
                 'genetic_algorithm': self.config.get('genetic_algorithm', {}),
                 'backtesting': self.config.get('backtesting', {}),
@@ -1087,8 +2076,7 @@ class GenericIslandModelEvolution:
 
         # Atomic write
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-        json_bytes = json.dumps(checkpoint, indent=2, default=str).encode('utf-8')
-        checkpoint['checksum'] = hashlib.sha256(json_bytes).hexdigest()
+        checkpoint = seal_checkpoint(checkpoint)
 
         tmp_path = filepath + '.tmp'
         with open(tmp_path, 'w') as f:
@@ -1112,79 +2100,85 @@ class GenericIslandModelEvolution:
             The generation to resume FROM (i.e. next gen to run), or None
             if no checkpoint was found.
         """
-        # Find latest checkpoint file
-        pattern = str(self.checkpoint_dir / 'island_checkpoint_gen*.json')
-        candidates = sorted(glob.glob(pattern))
-        if not candidates:
+        expected_provenance = checkpoint_provenance_from_config(
+            self.config,
+            engine_kind="GENERIC_ISLAND",
+            island_names=(ic.name for ic in self.island_configs),
+            required=False,
+        )
+        if expected_provenance is None:
+            self.logger.info(
+                "[CHECKPOINT] Resume disabled: immutable checkpoint provenance "
+                "was not supplied"
+            )
             return None
 
-        filepath = candidates[-1]
+        filepath = latest_checkpoint_by_generation(
+            self.checkpoint_dir.glob('island_checkpoint_gen*.json')
+        )
+        if filepath is None:
+            return None
         self.logger.info("[CHECKPOINT] Loading island checkpoint: %s", filepath)
 
         with open(filepath, 'r') as f:
             checkpoint = json.load(f)
-
-        # Verify checksum
-        stored_checksum = checkpoint.pop('checksum', None)
-        if stored_checksum:
-            json_bytes = json.dumps(checkpoint, indent=2, default=str).encode('utf-8')
-            computed = hashlib.sha256(json_bytes).hexdigest()
-            if computed != stored_checksum:
-                self.logger.warning(
-                    "[CHECKPOINT] Checksum mismatch — file may be corrupted"
-                )
+        checkpoint = verify_resume_checkpoint(checkpoint, expected_provenance)
+        if checkpoint.get('type') != 'island_model':
+            raise CheckpointCompatibilityError(
+                "checkpoint type is not generic island_model"
+            )
 
         saved_gen = checkpoint['generation']
+        filename_gen = checkpoint_generation_from_path(filepath)
+        if saved_gen != filename_gen:
+            raise CheckpointCompatibilityError(
+                "checkpoint generation differs from its filename"
+            )
 
         # Restore island populations
-        # Try name-based matching first, then fall back to index-based
         island_pop_data = checkpoint.get('island_populations', {})
         current_names = [ic.name for ic in self.island_configs]
-        ckpt_names = list(island_pop_data.keys())
-
-        # Check if name-based match works
-        name_matches = sum(1 for n in ckpt_names if n in self.island_populations)
-        use_index = name_matches == 0 and len(ckpt_names) > 0
-
-        if use_index:
-            self.logger.info(
-                "[CHECKPOINT] No island name matches — using index-based mapping "
-                "(%d checkpoint → %d current islands)",
-                len(ckpt_names), len(current_names),
+        if list(island_pop_data) != current_names:
+            raise CheckpointCompatibilityError(
+                "checkpoint island populations differ in names/order"
             )
 
-        restored = 0
-        for idx, (ckpt_name, pop_data) in enumerate(island_pop_data.items()):
-            # Determine target island name
-            if use_index and idx < len(current_names):
-                target_name = current_names[idx]
-            elif ckpt_name in self.island_populations:
-                target_name = ckpt_name
-            else:
-                self.logger.warning(
-                    "[CHECKPOINT] Island %s in checkpoint but not in current config — skipping",
-                    ckpt_name,
+        restored_populations = {}
+        for island_config in self.island_configs:
+            pop_data = island_pop_data[island_config.name]
+            expected_size = island_config.population_size
+            saved_size = pop_data.get('size')
+            individuals_data = pop_data.get('individuals')
+            if saved_size != expected_size or not isinstance(individuals_data, list):
+                raise CheckpointCompatibilityError(
+                    f"checkpoint population shape differs for {island_config.name}"
                 )
-                continue
-
             pop = Population(
-                size=pop_data.get('size', self.population_per_island),
+                size=saved_size,
                 generation=pop_data.get('generation', saved_gen),
             )
-            # Clear default individuals and load from checkpoint
             pop.individuals = []
-            for ind_data in pop_data['individuals']:
+            for ind_data in individuals_data:
                 pop.add_individual(Individual.from_dict(ind_data))
-            self.island_populations[target_name] = pop
-            restored += 1
+            if len(pop.individuals) != expected_size:
+                raise CheckpointCompatibilityError(
+                    f"checkpoint individual count differs for {island_config.name}"
+                )
+            restored_populations[island_config.name] = pop
 
+        stats_data = checkpoint.get('island_stats', {})
+        if set(stats_data) != set(current_names):
+            raise CheckpointCompatibilityError(
+                "checkpoint island statistics differ from current islands"
+            )
+
+        self.island_populations.update(restored_populations)
         self.logger.info(
             "[CHECKPOINT] Restored %d/%d island populations from generation %d",
-            restored, len(self.island_configs), saved_gen,
+            len(restored_populations), len(self.island_configs), saved_gen,
         )
 
         # Restore island stats
-        stats_data = checkpoint.get('island_stats', {})
         for name, sd in stats_data.items():
             if name in self.island_stats:
                 ist = self.island_stats[name]
@@ -1194,6 +2188,51 @@ class GenericIslandModelEvolution:
                 ist.generations_completed = sd.get('generations_completed', 0)
                 ist.migrants_sent = sd.get('migrants_sent', 0)
                 ist.migrants_received = sd.get('migrants_received', 0)
+
+        common_state = checkpoint.get('common_panel_replay', {})
+        if isinstance(common_state, dict):
+            best = common_state.get('best_fitness')
+            self._common_panel_best = float(best) if best is not None else None
+            self._common_panel_no_improvement_checks = int(
+                common_state.get('no_improvement_checks', 0)
+            )
+            history = common_state.get('history', [])
+            self.common_panel_replay_history = (
+                list(history) if isinstance(history, list) else []
+            )
+
+        diversity_state = checkpoint.get('diversity_recovery', {})
+        if isinstance(diversity_state, dict):
+            self._diversity_bad_checks = int(diversity_state.get('bad_checks', 0))
+            self._diversity_post_recovery_bad_checks = int(
+                diversity_state.get('post_recovery_bad_checks', 0)
+            )
+            self._diversity_recovery_applied = bool(
+                diversity_state.get('recovery_applied', False)
+            )
+            events = diversity_state.get('events', [])
+            self.diversity_events = list(events) if isinstance(events, list) else []
+
+        stored_outcome = checkpoint.get('evolution_outcome')
+        if isinstance(stored_outcome, dict):
+            for key in self.evolution_outcome:
+                if key in stored_outcome:
+                    self.evolution_outcome[key] = stored_outcome[key]
+
+        stored_island_states = checkpoint.get('island_random_states', {})
+        if isinstance(stored_island_states, dict):
+            restored_states = {}
+            for name, state in stored_island_states.items():
+                if name not in current_names or not isinstance(state, dict):
+                    continue
+                try:
+                    restored_states[name] = self._random_state_from_json(state)
+                except Exception as exc:
+                    raise CheckpointCompatibilityError(
+                        f'invalid RNG state for island {name}'
+                    ) from exc
+            if set(restored_states) == set(current_names):
+                self._island_random_states = restored_states
 
         # Restore random state
         random_state = checkpoint.get('random_state', {})
@@ -1306,7 +2345,11 @@ class GenericIslandModelEvolution:
             source = names[i]
             target = names[(i + 1) % n]
 
-            top = self._get_top_individuals(source, self.migration.count)
+            top = self._get_top_individuals(
+                source,
+                self.migration.count,
+                target_island=target,
+            )
             if not top:
                 continue
 
@@ -1410,6 +2453,53 @@ class GenericIslandModelEvolution:
                 default=0,
             )
 
+            panel_ids = {
+                ind.fitness_panel_id
+                for ind in top_a + top_b
+                if ind.fitness_panel_id is not None
+            }
+            panels_comparable = (
+                bool(top_a and top_b)
+                and len(panel_ids) == 1
+                and all(ind.fitness_panel_id is not None for ind in top_a + top_b)
+            )
+
+            if not panels_comparable:
+                # A tournament winner cannot be inferred from scores produced
+                # on different pair/policy panels. Exchange locally ranked
+                # genomes in both directions and force target re-evaluation.
+                replaced_b = self._inject_migrants(
+                    island_b, top_a, generation, source=island_a
+                ) if top_a else 0
+                replaced_a = self._inject_migrants(
+                    island_a, top_b, generation, source=island_b
+                ) if top_b else 0
+                for source, target, migrants, replaced in (
+                    (island_a, island_b, top_a, replaced_b),
+                    (island_b, island_a, top_b, replaced_a),
+                ):
+                    if not migrants:
+                        continue
+                    self.migration_history.append(GenericMigrationEvent(
+                        generation=generation,
+                        source=source,
+                        target=target,
+                        count=replaced,
+                        fitnesses=[
+                            ind.raw_fitness for ind in migrants
+                            if ind.raw_fitness is not None
+                        ],
+                    ))
+                    with self._stats_lock:
+                        self.island_stats[source].migrants_sent += len(migrants)
+                        self.island_stats[target].migrants_received += replaced
+                self.logger.info(
+                    "  TOURNAMENT: %s ↔ %s (incomparable panels; "
+                    "bidirectional re-evaluation)",
+                    island_a, island_b,
+                )
+                continue
+
             if best_a >= best_b and top_a:
                 winner, loser = island_a, island_b
                 migrants = top_a
@@ -1419,7 +2509,9 @@ class GenericIslandModelEvolution:
             else:
                 continue
 
-            replaced = self._inject_migrants(loser, migrants, generation)
+            replaced = self._inject_migrants(
+                loser, migrants, generation, source=winner
+            )
             fitnesses = [
                 ind.raw_fitness for ind in migrants if ind.raw_fitness is not None
             ]
@@ -1513,37 +2605,29 @@ class GenericIslandModelEvolution:
         )
 
         # Pool top individuals from every island
-        global_pool: List[Individual] = []
+        pools: List[List[Individual]] = []
         for ic in self.island_configs:
             top = self._get_top_individuals(ic.name, self.migration.count * 2)
-            global_pool.extend(top)
+            pools.append(top)
+
+        global_pool = [individual for pool in pools for individual in pool]
 
         if not global_pool:
             self.logger.info("  MERGE: No eligible individuals to merge")
             return
 
-        # Deduplicate by gene hash
-        seen_hashes = set()
-        unique_pool: List[Individual] = []
-        for ind in global_pool:
-            gene_hash = self._gene_hash(ind)
-            if gene_hash not in seen_hashes:
-                seen_hashes.add(gene_hash)
-                unique_pool.append(ind)
-
-        # Rank globally by raw fitness
-        unique_pool.sort(
-            key=lambda x: x.raw_fitness if x.raw_fitness is not None else -1,
-            reverse=True,
+        top_global, panels_comparable, unique_count = self._select_cross_panel_pool(
+            pools, self.migration.count
         )
-
-        # Take top-N to redistribute
-        top_global = unique_pool[:self.migration.count]
 
         self.logger.info(
             "  MERGE: Pooled %d unique individuals, redistributing top %d",
-            len(unique_pool), len(top_global),
+            unique_count, len(top_global),
         )
+        if not panels_comparable:
+            self.logger.info(
+                "  MERGE: panel scores differ; selected round-robin by local rank"
+            )
 
         # Inject into every island
         for ic in self.island_configs:
@@ -1558,22 +2642,100 @@ class GenericIslandModelEvolution:
     # ------------------------------------------------------------------
 
     def _get_top_individuals(
-        self, island_name: str, count: int,
+        self,
+        island_name: str,
+        count: int,
+        target_island: Optional[str] = None,
     ) -> List[Individual]:
-        """Get top-N individuals from an island's population by raw_fitness."""
+        """Get top-N compatible individuals ranked by raw fitness.
+
+        When a target is supplied, incompatible elites are skipped before
+        slicing so ring migration deterministically falls through to the next
+        locally ranked compatible candidate.
+        """
         pop = self.island_populations.get(island_name)
         if pop is None:
             return []
+        source_individuals = self._evaluated_generation_populations.get(
+            island_name, pop.individuals
+        )
 
         ranked = sorted(
             [
-                ind for ind in pop.individuals
-                if ind.raw_fitness is not None and ind.raw_fitness > 0
+                ind for ind in source_individuals
+                if self._is_valid_evidence(ind)
+                and ind.raw_fitness is not None
+                and (
+                    target_island is None
+                    or self._is_indicator_pool_compatible(target_island, ind)
+                )
             ],
             key=lambda x: x.raw_fitness,
             reverse=True,
         )
         return ranked[:count]
+
+    def _is_indicator_pool_compatible(
+        self,
+        target_island: str,
+        individual: Individual,
+    ) -> bool:
+        """Return whether every indicator gene is allowed on the target."""
+
+        target_config = next(
+            (
+                island
+                for island in self.island_configs
+                if island.name == target_island
+            ),
+            None,
+        )
+        # Unknown targets preserve the legacy helper behavior used by
+        # external callers.  A missing/empty pool means unrestricted.
+        if target_config is None or not target_config.indicator_pool:
+            return True
+        allowed = set(target_config.indicator_pool)
+        used = {
+            indicator.type
+            for indicator in individual.strategy_gene.indicators
+        }
+        return bool(used) and used.issubset(allowed)
+
+    def _select_cross_panel_pool(
+        self,
+        pools: List[List[Individual]],
+        count: int,
+    ) -> tuple[List[Individual], bool, int]:
+        """Select without comparing scores unless every panel is identical."""
+        flattened = [individual for pool in pools for individual in pool]
+        panel_ids = {individual.fitness_panel_id for individual in flattened}
+        comparable = bool(flattened) and None not in panel_ids and len(panel_ids) == 1
+
+        if comparable:
+            ordered = sorted(
+                flattened,
+                key=lambda item: float(item.raw_fitness),
+                reverse=True,
+            )
+        else:
+            # Each pool is already locally ranked. Interleave ranks so no
+            # island wins merely because its score scale is larger.
+            ordered = []
+            max_depth = max((len(pool) for pool in pools), default=0)
+            for rank in range(max_depth):
+                for pool in pools:
+                    if rank < len(pool):
+                        ordered.append(pool[rank])
+
+        unique: List[Individual] = []
+        seen: set[str] = set()
+        for individual in ordered:
+            fingerprint = self._gene_hash(individual)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            unique.append(individual)
+        return unique[:count], comparable, len(unique)
 
     def _inject_migrants(
         self,
@@ -1592,14 +2754,32 @@ class GenericIslandModelEvolution:
         if pop is None or not migrants:
             return 0
 
+        compatible_migrants = [
+            migrant
+            for migrant in migrants
+            if self._is_indicator_pool_compatible(target_island, migrant)
+        ]
+        if not compatible_migrants:
+            return 0
+
         # Sort population worst-first
         sorted_inds = sorted(
             pop.individuals,
-            key=lambda x: x.raw_fitness if x.raw_fitness is not None else -1,
+            # Migration is injected into the already-created next generation,
+            # which normally contains measured elites and unevaluated
+            # offspring.  Raw multipair fitness is signed, so using ``-1`` for
+            # missing fitness can rank a valid negative elite below an
+            # unevaluated child.  Unmeasured slots are the replacement target
+            # and must sort before every finite score.
+            key=lambda x: (
+                x.raw_fitness
+                if x.raw_fitness is not None
+                else float('-inf')
+            ),
         )
 
         replaced = 0
-        for migrant in migrants:
+        for migrant in compatible_migrants:
             if replaced >= len(sorted_inds):
                 break
 
@@ -1708,23 +2888,21 @@ class GenericIslandModelEvolution:
         """
         self.external_export_dir.mkdir(parents=True, exist_ok=True)
 
-        # Collect top-N globally across all islands (deduplicated)
-        seen_hashes = set()
-        top_individuals = []
+        # Collect locally ranked candidates without comparing panel scores.
+        pools: List[List[Individual]] = []
 
         for ic in self.island_configs:
-            for ind in self._get_top_individuals(ic.name, self.external_migration_count):
-                h = self._gene_hash(ind)
-                if h not in seen_hashes:
-                    seen_hashes.add(h)
-                    top_individuals.append(ind)
+            pools.append(
+                self._get_top_individuals(ic.name, self.external_migration_count)
+            )
 
-        # Sort by raw fitness and take top-N
-        top_individuals.sort(
-            key=lambda x: x.raw_fitness if x.raw_fitness else 0,
-            reverse=True,
+        top_individuals, panels_comparable, _ = self._select_cross_panel_pool(
+            pools, self.external_migration_count
         )
-        top_individuals = top_individuals[:self.external_migration_count]
+        if not panels_comparable and top_individuals:
+            self.logger.info(
+                "[EXT-MIGRATION] Incomparable panels; exporting round-robin local ranks"
+            )
 
         if not top_individuals:
             return 0
@@ -1760,12 +2938,7 @@ class GenericIslandModelEvolution:
     def _gene_hash(ind: Individual) -> str:
         """Compute a hash of an individual's strategy gene for deduplication."""
         try:
-            gene_dict = ind.strategy_gene.to_dict()
-            # Remove volatile fields
-            gene_dict.pop('generation', None)
-            gene_dict.pop('individual_id', None)
-            serialized = json.dumps(gene_dict, sort_keys=True, default=str)
-            return hashlib.md5(serialized.encode()).hexdigest()
+            return phenotype_fingerprint(ind.strategy_gene)
         except Exception:
             logger.warning(f"[ISLAND] Gene hashing failed for individual {getattr(ind, 'id', '?')}", exc_info=True)
             return str(id(ind))
@@ -1776,61 +2949,588 @@ class GenericIslandModelEvolution:
 
     def _collect_final_results(self) -> Dict[str, List[Individual]]:
         """
-        Pool top-5 from every island, deduplicate by gene hash,
-        rank by raw fitness, return per-island results plus a
-        '__global__' key with the top-N overall.
+        Pool the configured local top candidates, replay unique phenotypes on one common
+        panel, and return the comparable ranking under ``__global__``.
         """
-        results: Dict[str, List[Individual]] = {}
+        results: Dict[str, List[Individual]] = {
+            island_config.name: [] for island_config in self.island_configs
+        }
 
-        # Per-island top-5
-        global_pool: List[Individual] = []
+        # Search metrics already contain the full six-pair panel. Preselect a
+        # compact union of balanced, edge and activity leaders, then replay
+        # that union once on the common panel.
+        all_evaluated: List[Individual] = []
         for ic in self.island_configs:
-            pop = self.island_populations.get(ic.name)
-            if pop:
-                top5 = sorted(
-                    [ind for ind in pop.individuals if ind.raw_fitness is not None],
-                    key=lambda x: x.raw_fitness,
-                    reverse=True,
-                )[:5]
-                results[ic.name] = top5
-                global_pool.extend(top5)
+            evaluated = self._evaluated_generation_populations.get(ic.name)
+            if evaluated is None:
+                pop = self.island_populations.get(ic.name)
+                evaluated = list(pop.individuals) if pop else []
+            if evaluated:
+                valid = [ind for ind in evaluated if self._is_valid_evidence(ind)]
+                for individual in valid:
+                    individual.metrics['evaluation_island'] = ic.name
+                all_evaluated.extend(valid)
 
-        # Global deduplication and ranking
-        seen_hashes = set()
-        unique_global: List[Individual] = []
-        for ind in sorted(
-            global_pool,
-            key=lambda x: x.raw_fitness if x.raw_fitness is not None else -1,
-            reverse=True,
-        ):
-            gene_hash = self._gene_hash(ind)
-            if gene_hash not in seen_hashes:
-                seen_hashes.add(gene_hash)
-                unique_global.append(ind)
+        def descriptor(individual: Individual, name: str) -> float:
+            result = individual.metrics.get('raw_multipair_result', {})
+            aggregate = result.get('aggregate_components', {})
+            value = aggregate.get(name)
+            return float(value) if isinstance(value, (int, float)) else -math.inf
 
-        results['__global__'] = unique_global[:20]  # Top-20 globally
+        def take(
+            values: List[Individual],
+            *,
+            key,
+            limit: int,
+        ) -> List[Individual]:
+            selected: List[Individual] = []
+            seen: set[str] = set()
+            for individual in sorted(values, key=key, reverse=True):
+                fingerprint = self._gene_hash(individual)
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                selected.append(individual)
+                if len(selected) >= limit:
+                    break
+            return selected
 
-        # Quality gate: filter out negative-profit strategies from global results
-        neg_profit_count = sum(
-            1 for ind in results['__global__']
-            if ind.metrics.get('profit', 0) < 0
+        preselected = [
+            *take(all_evaluated, key=lambda item: float(item.raw_fitness), limit=12),
+            *take(
+                all_evaluated,
+                key=lambda item: (
+                    descriptor(item, 'edge_score'),
+                    float(item.raw_fitness),
+                ),
+                limit=12,
+            ),
+            *take(
+                all_evaluated,
+                key=lambda item: (
+                    descriptor(item, 'activity_score'),
+                    float(item.raw_fitness),
+                ),
+                limit=12,
+            ),
+        ]
+        global_pool = take(
+            preselected,
+            key=lambda item: 0.0,
+            limit=36,
         )
-        if neg_profit_count > 0:
-            results['__global__'] = [
-                ind for ind in results['__global__']
-                if ind.metrics.get('profit', 0) >= 0
-            ]
-            self.logger.info(
-                "[RESULTS] Filtered %d negative-profit strategies from global top results",
-                neg_profit_count,
-            )
+        for individual in global_pool:
+            island_name = str(individual.metrics['evaluation_island'])
+            results[island_name].append(individual)
+
+        replayed = self._replay_global_candidates(global_pool)
+        niche_finalists: List[Individual] = []
+        selected_hashes: set[str] = set()
+        niche_specs = (
+            ('BALANCED', lambda item: (float(item.raw_fitness), descriptor(item, 'edge_score'))),
+            ('EDGE', lambda item: (descriptor(item, 'edge_score'), float(item.raw_fitness))),
+            (
+                'ACTIVITY',
+                lambda item: (
+                    descriptor(item, 'activity_score'),
+                    float(item.raw_fitness),
+                ),
+            ),
+        )
+        rankings = {
+            niche: sorted(replayed, key=key, reverse=True)
+            for niche, key in niche_specs
+        }
+        for _round in range(4):
+            for niche, _key in niche_specs:
+                individual = next(
+                    (
+                        item
+                        for item in rankings[niche]
+                        if self._gene_hash(item) not in selected_hashes
+                    ),
+                    None,
+                )
+                if individual is None:
+                    continue
+                fingerprint = self._gene_hash(individual)
+                individual.metrics['archive_niche_candidate'] = niche
+                niche_finalists.append(individual)
+                selected_hashes.add(fingerprint)
+        results['__global__'] = sorted(
+            niche_finalists,
+            key=lambda item: float(item.raw_fitness),
+            reverse=True,
+        )[:12]
 
         self.logger.info(
-            "Final results: %d unique strategies across %d islands (top-20 global)",
-            len(unique_global), len(self.island_configs),
+            "Final results: %d niche finalists across %d islands",
+            len(results['__global__']), len(self.island_configs),
         )
 
         return results
+
+    def _create_common_replay_evaluator(self):
+        """Build the base-config evaluator used only for global comparison."""
+        comparison_config = copy.deepcopy(self.config)
+        comparison_config.setdefault('generic_island_model', {})['enabled'] = False
+        comparison_config.setdefault('island_model', {})['enabled'] = False
+        if comparison_config.get('regime_aware', {}).get('enabled', False):
+            from genetic_algorithm.evaluation.regime_aware import (
+                create_regime_aware_evaluator,
+            )
+            evaluator = create_regime_aware_evaluator(
+                comparison_config, auto_detect=True
+            )
+        else:
+            evaluator = FitnessEvaluator(comparison_config)
+        panel = build_evaluation_panel(
+            comparison_config,
+            evaluator=evaluator,
+            role=PANEL_ROLE_COMMON_REPLAY,
+        )
+        return evaluator, panel
+
+    def _replay_global_candidates(
+        self, candidates: List[Individual]
+    ) -> List[Individual]:
+        """Replay local finalists on one panel, then update the shared HOF."""
+        if not candidates:
+            return []
+        unique_candidate_count = len({self._gene_hash(item) for item in candidates})
+        evaluator, panel = self._create_common_replay_evaluator()
+        replayed = replay_on_common_panel(
+            candidates,
+            evaluator=evaluator,
+            panel=panel,
+            logger=self.logger,
+            parallel_evaluator=getattr(
+                self, '_shared_parallel_evaluator', None
+            ),
+        )
+        parity_failures = self._raw_replay_parity_failures(replayed)
+        if parity_failures:
+            self._request_stop(
+                OUTCOME_TECHNICAL_INVALID,
+                'raw common-panel replay changed deterministic source scores: '
+                + '; '.join(parity_failures[:3]),
+            )
+            # One drift proves that the replay batch is not trustworthy.  Do
+            # not salvage apparently matching siblings from the same batch or
+            # allow any of them to reach HOF/strict replay.
+            self.evolution_outcome['common_panel_failed_evaluations'] += (
+                unique_candidate_count
+            )
+            return []
+        replayed = [item for item in replayed if self._is_valid_evidence(item)]
+        failed_count = max(0, unique_candidate_count - len(replayed))
+        self.evolution_outcome['common_panel_valid_evaluations'] += len(replayed)
+        self.evolution_outcome['common_panel_failed_evaluations'] += failed_count
+        self.hall_of_fame.bind_panel(
+            panel.panel_id,
+            panel.role,
+            data_identity_verified=panel.data_identity_verified,
+        )
+        if replayed:
+            replay_population = Population(size=len(replayed))
+            replay_population.individuals = replayed
+            self.hall_of_fame.update(
+                replay_population,
+                generation=max(0, self.generations - 1),
+            )
+        return replayed
+
+    def _raw_replay_parity_failures(
+        self,
+        candidates: List[Individual],
+    ) -> List[str]:
+        """Return deterministic score drifts for the immutable raw panel.
+
+        Every raw-multipair search candidate has already been evaluated on the
+        exact same six-pair panel.  Replaying an unchanged phenotype may
+        refresh provenance, but it must not change its raw score.  Treat a
+        drift as technical corruption (for example a generated-strategy file
+        collision) instead of allowing it to steer plateau or archive state.
+        """
+
+        if not self.config.get('raw_multipair_score', {}).get('enabled', False):
+            return []
+        failures: List[str] = []
+        for candidate in candidates:
+            source = candidate.metrics.get('source_fitness')
+            replay = candidate.raw_fitness
+            if source is None or replay is None:
+                continue
+            try:
+                source_value = float(source)
+                replay_value = float(replay)
+            except (TypeError, ValueError, OverflowError):
+                failures.append(f'{candidate.id}:non-numeric score')
+                continue
+            if (
+                not math.isfinite(source_value)
+                or not math.isfinite(replay_value)
+                or not math.isclose(
+                    source_value,
+                    replay_value,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                failures.append(
+                    f'{candidate.id}:source={source_value:.12g},'
+                    f'replay={replay_value:.12g}'
+                )
+        return failures
+
+    def _maybe_handle_diversity(self, generation: int) -> None:
+        """Recover one broad island collapse, then stop if it persists."""
+
+        if (
+            not self.diversity_recovery_enabled
+            or self.common_panel_replay_interval <= 0
+            or (generation + 1) % self.common_panel_replay_interval != 0
+        ):
+            return
+
+        island_observations: Dict[str, Dict[str, float]] = {}
+        collapsed_islands: List[str] = []
+        for island_config in self.island_configs:
+            island_name = island_config.name
+            individuals = self._evaluated_generation_populations.get(island_name, [])
+            unique_genomes = len({self._gene_hash(item) for item in individuals})
+            duplicate_fraction = (
+                0.0
+                if not individuals
+                else 1.0 - unique_genomes / len(individuals)
+            )
+            stats_history = self.generation_stats.get(island_name, [])
+            genetic_diversity = (
+                float(stats_history[-1].genetic_diversity or 0.0)
+                if stats_history
+                else 0.0
+            )
+            island_observations[island_name] = {
+                'duplicate_fraction': duplicate_fraction,
+                'genetic_diversity': genetic_diversity,
+            }
+            if (
+                duplicate_fraction >= self.diversity_duplicate_fraction_threshold
+                or genetic_diversity <= self.diversity_genetic_threshold
+            ):
+                collapsed_islands.append(island_name)
+
+        broadly_collapsed = (
+            len(collapsed_islands) >= self.diversity_island_threshold_count
+        )
+        action = 'HEALTHY'
+        replacements: Dict[str, int] = {}
+        if not broadly_collapsed:
+            self._diversity_bad_checks = 0
+            self._diversity_post_recovery_bad_checks = 0
+        elif not self._diversity_recovery_applied:
+            self._diversity_bad_checks += 1
+            action = 'COLLAPSE_OBSERVED'
+            if self._diversity_bad_checks >= self.diversity_checks_before_recovery:
+                replacements = self._apply_diversity_recovery(
+                    collapsed_islands, generation
+                )
+                self._diversity_recovery_applied = True
+                self._diversity_bad_checks = 0
+                action = 'RECOVERY_APPLIED'
+        else:
+            self._diversity_post_recovery_bad_checks += 1
+            action = 'POST_RECOVERY_COLLAPSE'
+            if (
+                self._diversity_post_recovery_bad_checks
+                >= self.diversity_checks_after_recovery
+            ):
+                action = 'STOP_DIVERSITY_COLLAPSE'
+                self._request_stop(
+                    OUTCOME_DIVERSITY_COLLAPSE,
+                    'broad diversity collapse persisted after one recovery',
+                )
+
+        event_type = {
+            'COLLAPSE_OBSERVED': 'COLLAPSE_OBSERVED',
+            'POST_RECOVERY_COLLAPSE': 'COLLAPSE_OBSERVED',
+            'RECOVERY_APPLIED': 'RECOVERY_APPLIED',
+            'STOP_DIVERSITY_COLLAPSE': 'RECOVERY_FAILED',
+        }.get(action)
+        affected_observations = [
+            island_observations[name] for name in collapsed_islands
+        ]
+
+        event = {
+            'generation': generation + 1,
+            'event_type': event_type,
+            'affected_islands': collapsed_islands,
+            'duplicate_fraction': max(
+                (
+                    item['duplicate_fraction']
+                    for item in affected_observations
+                ),
+                default=0.0,
+            ),
+            'genetic_diversity': min(
+                (
+                    item['genetic_diversity']
+                    for item in affected_observations
+                ),
+                default=1.0,
+            ),
+            'mutation_rate_after': (
+                self.diversity_recovery_mutation_rate
+                if action == 'RECOVERY_APPLIED'
+                else None
+            ),
+            'collapsed_island_count': len(collapsed_islands),
+            'collapsed_islands': collapsed_islands,
+            'islands': island_observations,
+            'action': action,
+            'replacements': replacements,
+            'bad_checks_before_recovery': self._diversity_bad_checks,
+            'bad_checks_after_recovery': self._diversity_post_recovery_bad_checks,
+        }
+        if action != 'HEALTHY':
+            self.diversity_events.append(event)
+        self.logger.info(
+            "[DIVERSITY] gen=%d collapsed=%d/%d action=%s",
+            generation + 1,
+            len(collapsed_islands),
+            len(self.island_configs),
+            action,
+        )
+
+    def _apply_diversity_recovery(
+        self, island_names: List[str], generation: int
+    ) -> Dict[str, int]:
+        if generation >= self.generations - 1:
+            return {island_name: 0 for island_name in island_names}
+        replacements: Dict[str, int] = {}
+        for island_name in island_names:
+            ga = self.islands[island_name]
+            ga.mutation_rate = max(
+                float(ga.mutation_rate), self.diversity_recovery_mutation_rate
+            )
+            evaluated = self._evaluated_generation_populations.get(island_name)
+            if not evaluated:
+                replacements[island_name] = 0
+                continue
+
+            # ``island_populations`` already contains offspring for the next
+            # generation, whose fitness is normally None.  Ranking that
+            # population therefore replaced arbitrary list positions rather
+            # than the weakest strategies which triggered recovery.  Build
+            # the recovery generation from the immutable evaluated snapshot:
+            # retain its best 75% and replace its measured bottom quartile
+            # with fresh immigrants.  The snapshot itself remains untouched
+            # for traces, replay evidence, and audit output.
+            population = Population(size=len(evaluated), generation=generation + 1)
+            population.individuals = copy.deepcopy(evaluated)
+            nominal_replacement_count = max(
+                1,
+                int(len(population.individuals) * self.diversity_replacement_fraction),
+            )
+            failed_indices = [
+                index
+                for index, individual in enumerate(population.individuals)
+                if not self._is_valid_evidence(individual)
+            ]
+            valid_indices = sorted(
+                (
+                    index
+                    for index, individual in enumerate(population.individuals)
+                    if self._is_valid_evidence(individual)
+                ),
+                key=lambda index: (
+                    float(population.individuals[index].raw_fitness)
+                    if population.individuals[index].raw_fitness is not None
+                    else float('-inf'),
+                    index,
+                ),
+            )
+            replacement_count = max(
+                nominal_replacement_count,
+                len(failed_indices),
+            )
+            target_indices = failed_indices + valid_indices[
+                :max(0, replacement_count - len(failed_indices))
+            ]
+            with self._island_random_scope(island_name):
+                for target_index in target_indices:
+                    target = population.individuals[target_index]
+                    individual_id = target.strategy_gene.individual_id
+                    gene = ga.strategy_generator.generate_random_strategy(
+                        generation=generation + 1,
+                        individual_id=individual_id,
+                    )
+                    replacement = Individual(strategy_gene=gene)
+                    replacement.metrics['origin'] = 'diversity_recovery'
+                    population.individuals[target_index] = replacement
+            self.island_populations[island_name] = population
+            replacements[island_name] = replacement_count
+        return replacements
+
+    def _maybe_replay_common_panel(self, generation: int) -> None:
+        """Periodically compare local elites on one immutable common panel."""
+        if (
+            not self.common_panel_replay_enabled
+            or self.common_panel_replay_interval <= 0
+            or (generation + 1) % self.common_panel_replay_interval != 0
+        ):
+            return
+        candidates = [
+            individual
+            for island_name in sorted(self._evaluated_generation_elites)
+            for individual in self._evaluated_generation_elites[island_name]
+        ]
+        if not candidates:
+            event = {
+                'generation': generation,
+                'panel_id': None,
+                'candidate_count': 0,
+                'valid_count': 0,
+                'failed_count': 0,
+                'best_fitness': None,
+                'median_fitness': None,
+                'improved': False,
+                'material_improvement_threshold': None,
+                'no_improvement_checks': self._common_panel_no_improvement_checks,
+                'early_stop_triggered': False,
+                'technical_stop_triggered': True,
+            }
+            self.common_panel_replay_history.append(event)
+            self._request_stop(
+                OUTCOME_TECHNICAL_INVALID,
+                f'common-panel replay at generation {generation + 1} had no candidates',
+            )
+            return
+        unique_candidate_count = len({self._gene_hash(item) for item in candidates})
+        evaluator, panel = self._create_common_replay_evaluator()
+        replayed = replay_on_common_panel(
+            candidates,
+            evaluator=evaluator,
+            panel=panel,
+            logger=self.logger,
+            parallel_evaluator=getattr(
+                self, '_shared_parallel_evaluator', None
+            ),
+        )
+        parity_failures = self._raw_replay_parity_failures(replayed)
+        if parity_failures:
+            event = {
+                'generation': generation,
+                'panel_id': panel.panel_id,
+                'candidate_count': unique_candidate_count,
+                'valid_count': 0,
+                'failed_count': len(parity_failures),
+                'best_fitness': None,
+                'median_fitness': None,
+                'improved': False,
+                'material_improvement_threshold': None,
+                'no_improvement_checks': self._common_panel_no_improvement_checks,
+                'early_stop_triggered': False,
+                'technical_stop_triggered': True,
+                'parity_failures': parity_failures,
+            }
+            self.common_panel_replay_history.append(event)
+            self.evolution_outcome['common_panel_failed_evaluations'] += len(
+                parity_failures
+            )
+            self._request_stop(
+                OUTCOME_TECHNICAL_INVALID,
+                'raw common-panel replay changed deterministic source scores: '
+                + '; '.join(parity_failures[:3]),
+            )
+            return
+        measured = [item for item in replayed if self._is_valid_evidence(item)]
+        failed_count = max(0, unique_candidate_count - len(measured))
+        self.evolution_outcome['common_panel_valid_evaluations'] += len(measured)
+        self.evolution_outcome['common_panel_failed_evaluations'] += failed_count
+        scores = sorted(
+            (float(item.raw_fitness) for item in measured), reverse=True
+        )
+        if not scores:
+            event = {
+                'generation': generation,
+                'panel_id': panel.panel_id,
+                'candidate_count': unique_candidate_count,
+                'valid_count': 0,
+                'failed_count': failed_count,
+                'best_fitness': None,
+                'median_fitness': None,
+                'improved': False,
+                'material_improvement_threshold': None,
+                'no_improvement_checks': self._common_panel_no_improvement_checks,
+                'early_stop_triggered': False,
+                'technical_stop_triggered': True,
+            }
+            self.common_panel_replay_history.append(event)
+            self._request_stop(
+                OUTCOME_TECHNICAL_INVALID,
+                f'common-panel replay at generation {generation + 1} produced zero valid evidence',
+            )
+            return
+        best = scores[0]
+        threshold = (
+            None
+            if self._common_panel_best is None
+            else max(
+                self.common_panel_min_improvement,
+                self.common_panel_relative_min_improvement
+                * max(1.0, abs(self._common_panel_best)),
+            )
+        )
+        improved = (
+            self._common_panel_best is None
+            or best - self._common_panel_best >= threshold
+        )
+        if improved:
+            self._common_panel_best = best
+            self._common_panel_no_improvement_checks = 0
+        else:
+            self._common_panel_no_improvement_checks += 1
+        stopped = (
+            self.common_panel_early_stop_patience > 0
+            and self._common_panel_no_improvement_checks
+            >= self.common_panel_early_stop_patience
+            and generation + 1 >= self.common_panel_min_generation
+        )
+        event = {
+            'generation': generation,
+            'panel_id': panel.panel_id,
+            'candidate_count': unique_candidate_count,
+            'valid_count': len(measured),
+            'failed_count': failed_count,
+            'best_fitness': best,
+            'median_fitness': scores[len(scores) // 2],
+            'improved': improved,
+            'material_improvement_threshold': threshold,
+            'no_improvement_checks': self._common_panel_no_improvement_checks,
+            'early_stop_triggered': stopped,
+            'technical_stop_triggered': False,
+        }
+        self.common_panel_replay_history.append(event)
+        self.logger.info(
+            "[COMMON-PANEL] gen=%d candidates=%d best=%.4f improved=%s stale=%d/%d",
+            generation + 1,
+            len(measured),
+            best,
+            improved,
+            self._common_panel_no_improvement_checks,
+            self.common_panel_early_stop_patience,
+        )
+        if stopped:
+            self._request_stop(
+                OUTCOME_PLATEAU,
+                f'{self._common_panel_no_improvement_checks} common-panel checks '
+                'without material improvement',
+            )
+            self.logger.info(
+                "[COMMON-PANEL] Early stop requested after %d checks without material improvement",
+                self._common_panel_no_improvement_checks,
+            )
 
     # ------------------------------------------------------------------
     # Phase 3: Reporting
@@ -1849,7 +3549,15 @@ class GenericIslandModelEvolution:
         self.logger.info("  Total time: %.1f seconds (%.1f minutes)",
                          total_elapsed, total_elapsed / 60)
         self.logger.info("  Islands: %d", len(self.islands))
-        self.logger.info("  Generations: %d", self.generations)
+        self.logger.info(
+            "  Generations: %d/%d",
+            self.evolution_outcome.get('generations_completed', self.generations),
+            self.generations,
+        )
+        self.logger.info(
+            "  Stop reason: %s",
+            self.evolution_outcome.get('reason', OUTCOME_COMPLETED_BUDGET),
+        )
         self.logger.info("  Migrations: %d events", len(self.migration_history))
         self.logger.info("")
 

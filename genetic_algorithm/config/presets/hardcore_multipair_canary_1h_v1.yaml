@@ -1,0 +1,21 @@
+# Reduced one-hour half of the dual-lane integration canary.
+
+config_schema_version: 2
+preset: hardcore_multipair_canary_15m_v1
+
+backtesting:
+  timeframe: 1h
+  timerange: "1683590400-1774566000"
+
+strategy_constraints:
+  timeframes: [1h]
+
+promotion_v2:
+  policy_version: hardcore-six-pair-canary-1h-v1
+  required_scenarios:
+    - {scenario_id: dev-btc, pair: BTC/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-sol, pair: SOL/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: dev-xrp, pair: XRP/USDT, timeframe: 1h, role: TRAIN, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-bnb, pair: BNB/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-eth, pair: ETH/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}
+    - {scenario_id: val-pepe, pair: PEPE/USDT, timeframe: 1h, role: PAIR_VALIDATION, period_start: "2023-05-09", period_end: "2026-03-26", cost_multiplier: 1.0}

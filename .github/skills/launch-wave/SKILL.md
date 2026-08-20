@@ -43,28 +43,27 @@ python -m genetic_algorithm.intelligence.run_sis all --verbose
 
 ## Phase 1: Review Previous Wave
 
-Read these files to understand what worked and what failed:
-- `CONFIG_RANKING.md` — ranked experiment list, top performers
-- `KNOWN_ISSUES.md` — active anti-patterns to avoid
-- `genetic_algorithm/data/hall_of_fame/hall_of_fame.json` — best strategies so far
-- Latest `final_results.json` in `genetic_algorithm/data/`
+Read the reconciled parent `WaveResultSnapshotV2`, its matching immutable analysis decision and
+the hash-verified candidate/scenario artifacts. Legacy rankings, logs and raw HOF metrics are
+diagnostic only.
 
 Key questions:
-- Which indicators dominated the HoF? (lens for SIS indicator bias)
-- What population sizes avoided overfitting? (stay 10-15 for standard)
+- Which candidates are eligible on the same common replay panel?
+- Which population/search-budget hypothesis should be tested against an unchanged control?
 - Did walk-forward pass? (>30% degradation = overfitting)
 - Which timeranges had most data coverage?
 
-## Phase 2: Compose Wave (3-6 Configs)
+## Phase 2: Compose a controlled wave proposal
 
-A well-balanced wave mixes exploitation and exploration. Recommended composition:
+A controlled wave contains an unchanged control and only hypotheses that the current planner can
+express:
 
 | Slot | Purpose | Base Preset |
 |------|---------|-------------|
 | 1-2 | **Exploit** best regions from previous wave | `presets/standard.yaml` |
 | 3-4 | **Explore** new indicator combos or timeframes | `presets/standard.yaml` |
-| 5 | **SIS-enabled** production run | `presets/production.yaml` |
-| 6 | **A/B comparison** (e.g., holdout on vs off) | Clone of slot 1-2 |
+| 5 | **Optional-feature shadow arm** | Only when an explicit worker supports it |
+| 6 | **Paired comparison** | One declared factor versus an unchanged control |
 
 Available presets in `genetic_algorithm/config/presets/`:
 - `standard.yaml` — fast discovery, single-pop, ~30-60 min
@@ -78,35 +77,29 @@ Available presets in `genetic_algorithm/config/presets/`:
 - Use wave-scoped experiment numbers (e.g., E177, E178 … for wave 35)
 - Keep description short, snake_case
 
-**Config placement:** `genetic_algorithm/config/queue/`
+Configs are embedded in `ChildWavePlanV2` and frozen into attempt roots during materialization.
+They are not placed in the mutable legacy queue.
 
 ## Phase 3: Validate Before Queuing
 
 ```bash
-# Validate all queued configs
-for f in genetic_algorithm/config/queue/*.yaml; do
-    python -c "import yaml; yaml.safe_load(open('$f'))" && echo "OK: $f" || echo "FAIL: $f"
+# Validate all proposed configs through the runtime contract
+for f in genetic_algorithm/config/proposals/*.yaml; do
+    python -m genetic_algorithm config validate "$f"
 done
-
-# Check constraints (hook also runs automatically on file creation)
-python .github/hooks/scripts/validate_ga_config.py < /dev/null
 ```
 
 Common mistakes to check:
-- `population_size > 15` for standard GA → overfitting
-- Island + walk-forward combined → data conflict
-- `tournament_size < 3` → random search
-- `auto_download: false` without verified data → silent 0-trade runs
+- elite/tournament/immigrant counts outside the configured population
+- classic Island + walk-forward, which would otherwise ignore the requested validation
+- duplicated pairs or incomplete data-manifest coverage
+- unpaired seeds, changed panels or multiple undeclared factors
 
 ## Phase 4: Launch
 
 ```bash
-# Preferred: queue daemon manages order automatically
-./ga_auto_queue_v2.sh --wave <wave_number> --max 3 --persistent
-
-# Or launch a single config directly
-source .venv/bin/activate
-python genetic_algorithm/run_ga.py --config genetic_algorithm/config/queue/<name>.yaml
+# Materialize only an approved ChildWavePlanV2 through
+# queue_approved_materialization(), then let AttemptSchedulerV2 execute it.
 ```
 
 ## Phase 5: Monitor
@@ -138,15 +131,11 @@ mv genetic_algorithm/config/queue/<wave_configs> genetic_algorithm/config/done/w
 
 Then update `CONFIG_RANKING.md` with the new results.
 
-## Critical Constraints (Never Violate)
+## Binding constraints
 
-| Rule | Source |
-|------|--------|
-| Standard GA: `population_size` 10-15 | >15 → 59-65% overfitting |
-| Island model: ≥60 per island | <60 → 62-100% overfitting |
-| Never: island + walk-forward | Data partitioning conflict |
-| Always: `enable_cache: true` | 2-5x speedup |
-| `tournament_size` must be 3-6 | <3 = random, >6 = premature convergence |
-
-See [GA_CONFIG_CHEATSHEET.md](../../GA_CONFIG_CHEATSHEET.md) for all parameter ranges.
-See [KNOWN_ISSUES.md](../../KNOWN_ISSUES.md) for active anti-patterns.
+- The config must pass the canonical schema and versioned mechanical invariants.
+- Every treatment must have a same-panel, same-budget, paired-seed control.
+- Final-test cells may be exposed only through the usage ledger.
+- Approval, materialization and queue hashes must reconcile before execution.
+- Fixed “optimal” population, island, pair or tournament ranges are not binding constraints; they
+  are hypotheses requiring V2 evidence.

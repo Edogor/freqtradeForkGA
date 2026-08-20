@@ -1,0 +1,8 @@
+# A0: historical weighted-fitness control, on the same data/pair panel as A1.
+preset: quality_v3_a1_balanced
+fitness_weights: {profit: 0.28, sharpe_ratio: 0.18, sortino_ratio: 0.13, profit_factor: 0.08, drawdown: 0.15, win_rate: 0.05, trade_frequency: 0.05, monthly_stability: 0.04, cross_pair: 0.04, drawdown_duration: 0.0, consecutive_losses: 0.0}
+fitness_bounds: {profit_min: -10.0, profit_max: 10.0, drawdown_normalization_target: 0.0, profit_factor_break_even_normalization: false}
+fitness_penalties: {target_trades_per_active_month: 0.000001, pair_trade_coverage_exponent: 1.0}
+pair_validation: {worst_split_weight: 0.0, min_profitable_pair_ratio: 0.0, max_pair_loss_pct: 0.0}
+promotion_v2: {policy_version: quality-v3-a0-search}
+qualification_v3: {policy_version: quality-v3-a0-search}

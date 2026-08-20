@@ -397,6 +397,27 @@ class TestSelectParents:
         # Should have mostly unique parents
         unique_count = len(set(id(p) for p in parents))
         assert unique_count >= 3  # At least some uniqueness
+
+    def test_equal_fitness_does_not_collapse_identity_uniqueness(self, simple_strategy_gene):
+        population = Population(size=2)
+        for individual_id in range(2):
+            gene = simple_strategy_gene.copy()
+            gene.individual_id = individual_id
+            individual = Individual(strategy_gene=gene)
+            individual.fitness = individual.raw_fitness = -55.0
+            individual.evaluated = True
+            population.add_individual(individual)
+
+        parents = select_parents(
+            population,
+            num_parents=2,
+            method='tournament',
+            tournament_size=2,
+            allow_duplicates=False,
+        )
+
+        assert len(parents) == 2
+        assert parents[0] is not parents[1]
     
     def test_tournament_size_kwarg(self, population_with_fitness):
         """Tournament size can be passed via kwargs."""

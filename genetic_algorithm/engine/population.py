@@ -57,6 +57,30 @@ def calculate_behavioral_distance(ind1: Individual, ind2: Individual) -> Optiona
     m1 = ind1.metrics if ind1.metrics else {}
     m2 = ind2.metrics if ind2.metrics else {}
 
+    # V5 raw multi-pair candidates expose a fixed six-pair descriptor.  It
+    # captures economic behaviour (Q/A/F/R/D/U) and is paired with executable
+    # logic tokens, so ATR-like parameter variants no longer look diverse just
+    # because their genome IDs differ.  Legacy candidates retain the older
+    # descriptive path below.
+    raw1 = m1.get('raw_behavior_vector')
+    raw2 = m2.get('raw_behavior_vector')
+    if (
+        isinstance(raw1, (list, tuple))
+        and isinstance(raw2, (list, tuple))
+        and len(raw1) == len(raw2) == 36
+        and all(isinstance(value, (int, float)) for value in (*raw1, *raw2))
+    ):
+        signed_positions = {0, 2, 3}
+        economic = sum(
+            min(1.0, abs(float(left) - float(right)) / (2.0 if index % 6 in signed_positions else 1.0))
+            for index, (left, right) in enumerate(zip(raw1, raw2))
+        ) / 36.0
+        tokens1 = set(m1.get('raw_logic_tokens', []))
+        tokens2 = set(m2.get('raw_logic_tokens', []))
+        union = tokens1 | tokens2
+        logic = 0.0 if not union else 1.0 - len(tokens1 & tokens2) / len(union)
+        return 0.5 * economic + 0.5 * logic
+
     # Both must have been evaluated with per_pair_profit
     pp1: Dict = m1.get('per_pair_profit')  # type: ignore[assignment]
     pp2: Dict = m2.get('per_pair_profit')  # type: ignore[assignment]
@@ -220,9 +244,18 @@ def apply_fitness_sharing(population: 'Population', sigma_share: float = 0.3,
     else:
         distances = distance_matrix
     
-    # Calculate niche counts for each individual
+    # Calculate niche counts for each individual.  Traditional fitness
+    # sharing divides a positive score by the niche count.  For a maximized
+    # signed score, division would make a negative value *less* negative and
+    # therefore reward crowding.  Multiplication is the signed counterpart:
+    # it moves a negative score downward while preserving zero and keeps the
+    # historical positive-only behaviour unchanged.
     for i, individual in enumerate(individuals):
-        if individual.raw_fitness is None or individual.raw_fitness <= 0:
+        if individual.raw_fitness is None:
+            continue
+
+        raw_fitness = float(individual.raw_fitness)
+        if not math.isfinite(raw_fitness):
             continue
         
         # Calculate sharing function
@@ -236,7 +269,12 @@ def apply_fitness_sharing(population: 'Population', sigma_share: float = 0.3,
         
         # Adjust fitness by niche count (shared fitness)
         if niche_count > 0:
-            shared_fitness = individual.raw_fitness / niche_count
+            if raw_fitness > 0:
+                shared_fitness = raw_fitness / niche_count
+            elif raw_fitness < 0:
+                shared_fitness = raw_fitness * niche_count
+            else:
+                shared_fitness = 0.0
             individual.set_shared_fitness(shared_fitness)
 
 
@@ -337,6 +375,17 @@ class Population:
         """
         self.sort_by_fitness(reverse=True)
         return self.individuals[:n]
+
+    def get_best_measured(self, n: int = 1) -> List[Individual]:
+        """Return finalists backed by successful real backtests only."""
+        measured = [ind for ind in self.individuals if ind.has_measured_fitness]
+        return sorted(
+            measured,
+            key=lambda item: (
+                item.fitness if item.fitness is not None else float('-inf')
+            ),
+            reverse=True,
+        )[:n]
     
     def get_all(self) -> List[Individual]:
         """Return all individuals in the population (list copy, same references)."""

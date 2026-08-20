@@ -1,26 +1,32 @@
 ---
 applyTo: "genetic_algorithm/config/**/*.yaml"
-description: "GA experiment config constraints and validation rules. Use when: editing or reviewing YAML configs for GA experiments."
+description: "Canonical GA experiment config constraints and validation rules."
 ---
 
-# GA Config Constraints
+# GA Config Contract
 
-When editing experiment configs, enforce these verified constraints:
+Every config must pass the project resolver:
 
-**Population sizing:**
-- Standard GA: `population_size` 10-15 (>15 → 59-65% overfitting)
-- Island model: ≥ 60 per island (`population_size` × `num_islands` ≥ 60 per island)
+```bash
+python -m genetic_algorithm config validate <config.yaml>
+```
 
-**Selection pressure:**
-- `tournament_size` must be ≥ 3 (1 = random, >6 = premature convergence)
-- `elite_size` ≈ 10% of `population_size`
+The validator enforces only mechanical invariants:
 
-**Incompatible combinations (never allow):**
-- Island model + walk-forward together (data partitioning conflict)
-- Fitness sharing + NSGA-II mode (distorts Pareto front)
+- `population_size` is between 2 and the implementation guard of 10,000.
+- `0 <= elite_size < population_size`.
+- `1 <= tournament_size <= population_size`.
+- `random_immigrants` fits in the non-elite slots.
+- probabilities are finite and in `[0, 1]`.
+- runtime dispatch values name implemented modes, selectors and crossovers.
+- pair lists are non-empty, unique and contain non-empty strings.
+- explicit worker counts are positive.
+- classic `island_model` cannot request walk-forward because that engine disables it.
 
-**Required settings:**
-- `enable_cache: true` unless debugging cache issues
-- `auto_download: false` only with verified data presence
+Do not present population size, island size, pair count, elite ratio, tournament size, mutation
+rate or generation count as proven profitable ranges. They are experimental factors. Compare them
+with paired seeds, identical panels and budgets through the V2 planner/analyzer. Historical
+single-wave observations belong in hypotheses, not startup gates.
 
-See [GA_CONFIG_CHEATSHEET.md](../../GA_CONFIG_CHEATSHEET.md) for full parameter reference.
+Automatic waves currently require the enforced `safe_v2` profile. Unsupported features remain
+disabled there until their paired out-of-sample evidence passes the promotion contract.
