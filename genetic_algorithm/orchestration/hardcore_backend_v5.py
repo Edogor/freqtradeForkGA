@@ -482,15 +482,16 @@ class V2HardcoreAttemptBackendV5:
                 *(f"exit:{condition.indicator}" for condition in strategy.exit_conditions),
             }
         )
+        pair_components = result.pair_component_map()
         pairs = [
             {
                 "pair": pair,
-                "Q": result.pair_components[pair].components.edge_score,
-                "A": result.pair_components[pair].components.activity_score,
-                "F": result.pair_components[pair].components.productive_frequency_score,
-                "R": result.pair_components[pair].components.return_score,
-                "D": result.pair_components[pair].components.drawdown_risk,
-                "U": result.pair_components[pair].components.drawdown_duration_risk,
+                "Q": pair_components[pair].components.edge_score,
+                "A": pair_components[pair].components.activity_score,
+                "F": pair_components[pair].components.productive_frequency_score,
+                "R": pair_components[pair].components.return_score,
+                "D": pair_components[pair].components.drawdown_risk,
+                "U": pair_components[pair].components.drawdown_duration_risk,
                 "trades": records[pair].metrics.trade_count,
             }
             for pair in HARDCORE_PANEL_PAIRS
