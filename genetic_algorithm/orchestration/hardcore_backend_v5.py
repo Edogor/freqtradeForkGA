@@ -57,6 +57,7 @@ from genetic_algorithm.orchestration.hardcore_backend_v1 import (
 )
 from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
     HARDCORE_PANEL_PAIRS,
+    EvolutionStopReason,
     FailureClass,
 )
 from genetic_algorithm.orchestration.manifest_builder_v2 import build_attempt_manifest_bundle

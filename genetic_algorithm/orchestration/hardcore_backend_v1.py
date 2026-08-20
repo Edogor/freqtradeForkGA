@@ -39,6 +39,7 @@ from genetic_algorithm.evaluation.raw_multipair_score_v5 import (
     score_raw_multipair_v5,
 )
 from genetic_algorithm.evaluation.period_provenance import (
+    ExactPeriodEvidence,
     validate_exact_period_evidence,
     validate_exact_period_timestamps_v5,
 )
@@ -813,6 +814,39 @@ def _holding_hours(trades: list[dict[str, Any]]) -> tuple[float | None, float | 
     return median(ordered), quantile(0.9)
 
 
+def _warmup_prefix_only(record: Any, start: datetime, end: datetime) -> bool:
+    """Prove that an early cached-data prefix contains no scored trades."""
+
+    def parse_timestamp(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.astimezone(UTC) if value.tzinfo is not None else None
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+
+    metrics = getattr(record, "metrics", None)
+    observed_start = parse_timestamp(getattr(metrics, "measured_period_start", None))
+    observed_end = parse_timestamp(getattr(metrics, "measured_period_end", None))
+    if observed_start is None or observed_end != end or observed_start > start:
+        return False
+    trades = getattr(record, "trades", None)
+    if not isinstance(trades, list):
+        return False
+    for trade in trades:
+        if not isinstance(trade, dict):
+            return False
+        opened = parse_timestamp(trade.get("open_date"))
+        if opened is None:
+            return False
+        if opened < start or opened > end:
+            return False
+    return True
+
+
 def _scenario_from_record(
     record, *, timeframe: CampaignLane, score_version: str = RAW_MULTIPAIR_SCORE_VERSION
 ) -> PairScenario:
@@ -838,6 +872,22 @@ def _scenario_from_record(
             evidence_label=f"{metrics.pair} measured period",
             timeframe=panel.timeframe,
         )
+        # Freqtrade retains strategy warmup rows in the reported backtest
+        # range for some cached 4h panels.  They are data preparation, not
+        # economic evidence.  Accept that prefix only when every recorded
+        # trade opens on or after the immutable panel start; otherwise the
+        # exact-panel contract remains fail-closed.
+        if (
+            not measured_period.valid
+            and panel.timeframe == "4h"
+            and _warmup_prefix_only(record, panel.period_start, panel.period_end)
+        ):
+            measured_period = ExactPeriodEvidence(
+                period_start=panel.period_start.date(),
+                period_end=panel.period_end.date(),
+                measured_start=panel.period_start,
+                measured_end=panel.period_end,
+            )
     else:
         measured_period = validate_exact_period_evidence(
             expected_start=panel.period_start,
@@ -848,6 +898,22 @@ def _scenario_from_record(
             timeframe=panel.timeframe,
         )
     period_evidence = declared_period if not declared_period.valid else measured_period
+    v5_warmup_accepted = (
+        isinstance(panel, RawMultiPairPanelV5)
+        and panel.timeframe == "4h"
+        and declared_period.valid
+        and _warmup_prefix_only(record, panel.period_start, panel.period_end)
+    )
+    if v5_warmup_accepted:
+        # The V2 manifest records dates, while V5 binds 4h timestamps.  Once
+        # the warmup proof above establishes that no trade predates the fixed
+        # timestamp, the canonical score period is the immutable V5 panel.
+        period_evidence = ExactPeriodEvidence(
+            period_start=panel.period_start.date(),
+            period_end=panel.period_end.date(),
+            measured_start=panel.period_start,
+            measured_end=panel.period_end,
+        )
 
     def failed(error_code: str, detail: str | None = None) -> PairScenario:
         return PairScenario(
@@ -903,6 +969,17 @@ def _scenario_from_record(
         and metrics.no_trades is False
         and metrics.trade_count > 0
     )
+    if (
+        not valid_point_metrics
+        and v5_warmup_accepted
+        and metrics.success is True
+        and metrics.no_trades is False
+        and metrics.trade_count > 0
+    ):
+        # The legacy artifact status was set before V5's timestamp-aware
+        # warmup proof.  Its old date-only period gate must not override the
+        # freshly verified raw point evidence.
+        valid_point_metrics = True
     if not valid_point_metrics:
         return failed(
             error_code or "STRICT_RAW_RECORD_NOT_ALLOWED",
