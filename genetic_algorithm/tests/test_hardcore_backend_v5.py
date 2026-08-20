@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import genetic_algorithm.orchestration.hardcore_backend_v5 as backend_v5
+import pytest
 from genetic_algorithm.orchestration.hardcore_backend_v5 import V2HardcoreAttemptBackendV5
 from genetic_algorithm.config.schema import validate_resolved_config_v2_or_raise
 
@@ -194,3 +195,30 @@ def test_v5_archive_seeds_match_bridge_assignments_not_entire_archive(tmp_path, 
             "activity-1",
             "activity-2",
         ]
+
+
+def test_v5_retries_quarantine_only_an_unprepared_conflicting_request(tmp_path):
+    request_path = tmp_path / "attempt-0" / "run_request_v5.json"
+    request_path.parent.mkdir(parents=True)
+    request_path.write_bytes(b"old-preflight-request")
+    request_path.with_suffix(".json.sha256").write_text("old\n")
+
+    V2HardcoreAttemptBackendV5._quarantine_conflicting_unprepared_request(
+        request_path, b"new-preflight-request"
+    )
+
+    assert not request_path.exists()
+    quarantined = list(request_path.parent.glob("run_request_v5.preflight-rejected-*.json"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == b"old-preflight-request"
+    V2HardcoreAttemptBackendV5._persist_immutable_request(request_path, b"new-preflight-request")
+    assert request_path.read_bytes() == b"new-preflight-request"
+
+    request_path.write_bytes(b"executed-request")
+    worker_spec = request_path.parent / "worker" / "worker_spec.json"
+    worker_spec.parent.mkdir()
+    worker_spec.write_text("prepared")
+    with pytest.raises(ValueError, match="immutable V5 request differs"):
+        V2HardcoreAttemptBackendV5._quarantine_conflicting_unprepared_request(
+            request_path, b"different-request"
+        )

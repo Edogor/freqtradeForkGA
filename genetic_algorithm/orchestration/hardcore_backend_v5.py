@@ -147,14 +147,8 @@ class V2HardcoreAttemptBackendV5:
         root = self.root / "runs" / str(request["run_id"]) / "attempt-0" / "worker"
         root.parent.mkdir(parents=True, exist_ok=True)
         request_path = root.parent / "run_request_v5.json"
-        if request_path.exists() and request_path.read_bytes() != _canonical(persisted_request):
-            raise ValueError("immutable V5 request differs")
-        if not request_path.exists():
-            request_path.write_bytes(_canonical(persisted_request))
-            request_path.with_suffix(".json.sha256").write_text(
-                hashlib.sha256(_canonical(persisted_request)).hexdigest() + "\n",
-                encoding="ascii",
-            )
+        request_payload = _canonical(persisted_request)
+        self._quarantine_conflicting_unprepared_request(request_path, request_payload)
         policy = shadow_gate_policy_from_config(config)
         bundle = build_attempt_manifest_bundle(
             attempt_id=attempt_id,
@@ -183,6 +177,7 @@ class V2HardcoreAttemptBackendV5:
             created_at=datetime.now(UTC),
             top_n=top_n,
         )
+        self._persist_immutable_request(request_path, request_payload)
         binding = WorkerBindingV2(
             worker_kind=WorkerKind.GENERIC_ISLAND_EVOLUTION,
             argv=evolution_worker_argv(prepared, python_executable=self.python_executable),
@@ -212,6 +207,44 @@ class V2HardcoreAttemptBackendV5:
             )
         self._requests[attempt_id] = (dict(request), config)
         return attempt_id
+
+    @staticmethod
+    def _persist_immutable_request(request_path: Path, payload: bytes) -> None:
+        """Write a request only after worker preparation has succeeded.
+
+        Older versions wrote this file before validating archive assignments.
+        A rejected preflight then left a request without a worker spec, which
+        prevented the controller from retrying the same logical run after a
+        deterministic code repair.  Such a file is not an executed immutable
+        attempt, so retain it under a content-addressed quarantine name and
+        create the valid request.  Any prepared worker remains immutable.
+        """
+
+        if request_path.exists():
+            if request_path.read_bytes() == payload:
+                return
+            raise ValueError("immutable V5 request differs")
+        checksum_path = request_path.with_suffix(".json.sha256")
+        request_path.write_bytes(payload)
+        checksum_path.write_text(hashlib.sha256(payload).hexdigest() + "\n", encoding="ascii")
+
+    @staticmethod
+    def _quarantine_conflicting_unprepared_request(request_path: Path, payload: bytes) -> None:
+        """Preserve a rejected preflight request before preparing its retry."""
+
+        if not request_path.exists() or request_path.read_bytes() == payload:
+            return
+        worker_spec = request_path.parent / "worker" / "worker_spec.json"
+        if worker_spec.exists():
+            raise ValueError("immutable V5 request differs")
+        checksum_path = request_path.with_suffix(".json.sha256")
+        suffix = hashlib.sha256(request_path.read_bytes()).hexdigest()[:16]
+        quarantined = request_path.with_name(
+            f"run_request_v5.preflight-rejected-{suffix}.json"
+        )
+        request_path.replace(quarantined)
+        if checksum_path.exists():
+            checksum_path.replace(quarantined.with_suffix(".json.sha256"))
 
     @staticmethod
     def _archive_seeds(
