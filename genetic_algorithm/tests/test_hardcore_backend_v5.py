@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from genetic_algorithm.orchestration.hardcore_backend_v5 import V2HardcoreAttemptBackendV5
+from genetic_algorithm.config.schema import validate_resolved_config_v2_or_raise
 
 
 def test_v5_backend_materializes_every_lane_and_profile(tmp_path):
@@ -70,5 +71,37 @@ def test_v5_backend_queues_honest_intraday_4h_panel(tmp_path):
         restored_request, restored_config = backend._restore_request(state)
         assert restored_request["lane"] == "4h"
         assert restored_config["backtesting"]["timeframe"] == "4h"
+    finally:
+        backend.close()
+
+
+def test_v5_child_runtime_profile_accepts_4h_panel(tmp_path):
+    repo = Path(__file__).resolve().parents[2]
+    backend = V2HardcoreAttemptBackendV5(
+        state_path=tmp_path / "attempts.sqlite3",
+        automation_root=tmp_path / "campaign",
+        repo_root=repo,
+        python_executable=repo / ".venv/bin/python",
+    )
+    try:
+        config = backend._materialize(
+            {
+                "campaign_id": "v5-test",
+                "run_id": "test-4h",
+                "lane": "4h",
+                "profile": "edge",
+                "seed": 7,
+                "shape": {
+                    "population_size": 10,
+                    "generations": 12,
+                    "cross_niche_offspring": 2,
+                },
+                "config_path": str(
+                    repo / "genetic_algorithm/config/presets/hardcore_multipair_v5_4h.yaml"
+                ),
+            }
+        )
+        config["safety_profile"]["name"] = "hardcore_multipair_child_v1"
+        validate_resolved_config_v2_or_raise(config)
     finally:
         backend.close()

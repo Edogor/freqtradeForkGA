@@ -237,11 +237,7 @@ class EvolutionWorkerSpecV2(StrictV2Model):
             V2ArtifactStore.CODE_MANIFEST_NAME,
             V2ArtifactStore.SPLIT_MANIFEST_NAME,
             *(item.relative_path for item in self.seeds),
-            *(
-                [self.resume_checkpoint.relative_path]
-                if self.resume_checkpoint is not None
-                else []
-            ),
+            *([self.resume_checkpoint.relative_path] if self.resume_checkpoint is not None else []),
         }
         if set(self.input_hashes) != required:
             raise ValueError("worker input hash matrix is incomplete or contains extras")
@@ -336,7 +332,8 @@ def _validate_evolution_contract(
         raise EvolutionWorkerError("only one island engine may be enabled")
     if generic_enabled:
         if (
-            safety.get("name") not in {
+            safety.get("name")
+            not in {
                 "automation_island_v2",
                 "quality_experiment_v3",
                 "hardcore_multipair_v1",
@@ -357,9 +354,7 @@ def _validate_evolution_contract(
                 "automation_island_v2 uses fixed pair-validation, not island pair rotation"
             )
         if generic.get("external_migration", {}).get("enabled", False):
-            raise EvolutionWorkerError(
-                "automation_island_v2 forbids mutable external migration"
-            )
+            raise EvolutionWorkerError("automation_island_v2 forbids mutable external migration")
         islands = generic.get("islands", [])
         if not isinstance(islands, list) or len(islands) < 2:
             raise EvolutionWorkerError(
@@ -374,11 +369,10 @@ def _validate_evolution_contract(
             raise EvolutionWorkerError("explicit island names must be non-empty and unique")
         pair_validation = config.get("pair_validation", {})
         if not pair_validation.get("enabled", False):
-            raise EvolutionWorkerError(
-                "automation_island_v2 requires pair_validation.enabled"
-            )
+            raise EvolutionWorkerError("automation_island_v2 requires pair_validation.enabled")
         if (
-            safety.get("name") in {
+            safety.get("name")
+            in {
                 "automation_island_v2",
                 "hardcore_multipair_v1",
             }
@@ -405,13 +399,9 @@ def _validate_evolution_contract(
             )
     else:
         if classic_enabled:
-            raise EvolutionWorkerError(
-                "regime-locked island evolution has no canonical V2 worker"
-            )
+            raise EvolutionWorkerError("regime-locked island evolution has no canonical V2 worker")
         if safety.get("name") != "safe_v2" or not safety.get("enforce", False):
-            raise EvolutionWorkerError(
-                "standard evolution requires the enforced safe_v2 profile"
-            )
+            raise EvolutionWorkerError("standard evolution requires the enforced safe_v2 profile")
     timeframe = backtesting.get("timeframe")
     if not isinstance(timeframe, str) or not timeframe:
         raise EvolutionWorkerError("backtesting.timeframe must be explicit for evolution")
@@ -431,9 +421,7 @@ def _validate_evolution_contract(
         raise EvolutionWorkerError("runtime split plan differs from attempt manifest")
 
 
-def _validate_evolution_seed_capacity(
-    config: Mapping[str, Any], seed_ids: Sequence[str]
-) -> None:
+def _validate_evolution_seed_capacity(config: Mapping[str, Any], seed_ids: Sequence[str]) -> None:
     """Validate seed capacity against the engine that will consume the seeds.
 
     Standard evolution has one population, so its global population size is the
@@ -444,9 +432,7 @@ def _validate_evolution_seed_capacity(
     whenever different bridge islands receive different seeds.
     """
 
-    population_size = int(
-        config.get("genetic_algorithm", {}).get("population_size", 0)
-    )
+    population_size = int(config.get("genetic_algorithm", {}).get("population_size", 0))
     generic = config.get("generic_island_model", {})
     archive = generic.get("archive_seeding", {}) if isinstance(generic, Mapping) else {}
     assignments = archive.get("assignments", {}) if isinstance(archive, Mapping) else {}
@@ -469,18 +455,14 @@ def _validate_evolution_seed_capacity(
     assigned_ids: set[str] = set()
     for island_name, rows in assignments.items():
         if island_name not in islands or not isinstance(rows, list):
-            raise EvolutionWorkerError(
-                "archive seed assignment references an invalid island"
-            )
+            raise EvolutionWorkerError("archive seed assignment references an invalid island")
         row_ids = [
             str(row.get("candidate_id"))
             for row in rows
             if isinstance(row, Mapping) and row.get("candidate_id")
         ]
         if len(row_ids) != len(rows) or len(row_ids) != len(set(row_ids)):
-            raise EvolutionWorkerError(
-                "archive seed assignment IDs must be present and unique"
-            )
+            raise EvolutionWorkerError("archive seed assignment IDs must be present and unique")
         island_capacity = int(islands[island_name].get("population_size", 0))
         if len(row_ids) > min(max_per_island, island_capacity):
             raise EvolutionWorkerError(
@@ -488,9 +470,7 @@ def _validate_evolution_seed_capacity(
             )
         assigned_ids.update(row_ids)
     if set(seed_ids) != assigned_ids:
-        raise EvolutionWorkerError(
-            "immutable evolution seeds differ from archive seed assignments"
-        )
+        raise EvolutionWorkerError("immutable evolution seeds differ from archive seed assignments")
 
 
 def prepare_evolution_worker(
@@ -532,9 +512,7 @@ def prepare_evolution_worker(
     if len(seed_ids) != len(set(seed_ids)):
         raise EvolutionWorkerError("evolution seed candidate IDs must be unique")
     if replay_input_seeds and len(seed_list) != 1:
-        raise EvolutionWorkerError(
-            "immutable parent replay requires exactly one evolution seed"
-        )
+        raise EvolutionWorkerError("immutable parent replay requires exactly one evolution seed")
     _validate_evolution_seed_capacity(config, seed_ids)
     for seed in seed_list:
         validate_evolution_seed(seed, config)
@@ -573,11 +551,7 @@ def prepare_evolution_worker(
     input_paths = [
         *_base_input_paths(),
         *(item.relative_path for item in worker_seeds),
-        *(
-            [checkpoint_input.relative_path]
-            if checkpoint_input is not None
-            else []
-        ),
+        *([checkpoint_input.relative_path] if checkpoint_input is not None else []),
     ]
     input_hashes = {
         relative: _sha256_file(root / _safe_relative_path(relative))
@@ -779,10 +753,7 @@ def derive_search_seed(
     contract instead of incorrectly comparing every arm to the replay seed.
     """
 
-    if (
-        not isinstance(paired_evaluation_seed, int)
-        or isinstance(paired_evaluation_seed, bool)
-    ):
+    if not isinstance(paired_evaluation_seed, int) or isinstance(paired_evaluation_seed, bool):
         raise EvolutionWorkerError("paired evaluation seed must be an integer")
     if (
         not isinstance(search_seed_salt, int)
@@ -826,9 +797,7 @@ def derive_engine_config(
         or isinstance(search_seed_salt, bool)
         or search_seed_salt < 0
     ):
-        raise EvolutionWorkerError(
-            "genetic_algorithm.search_seed_salt must be an integer >= 0"
-        )
+        raise EvolutionWorkerError("genetic_algorithm.search_seed_salt must be an integer >= 0")
     search_seed = derive_search_seed(
         paired_evaluation_seed,
         search_seed_salt,
@@ -839,27 +808,34 @@ def derive_engine_config(
     parallel["num_workers"] = loaded.manifest.worker_count
     backtesting = config.setdefault("backtesting", {})
     timeframe = str(backtesting["timeframe"])
-    start = datetime.combine(
-        loaded.split_manifest.evolution_period_start,
-        time.min,
-        tzinfo=UTC,
-    )
-    exclusive_end = datetime.combine(
-        loaded.split_manifest.evolution_period_end_exclusive,
-        time.min,
-        tzinfo=UTC,
-    )
-    last_candle_open = exclusive_end - timedelta(
-        seconds=timeframe_to_seconds(timeframe)
-    )
+    raw_score = config.get("raw_multipair_score", {})
+    if raw_score.get("policy_version") == "raw-multipair-score-v5":
+        # The V2 split manifest is date-granular, whereas V5's honest 4h
+        # PEPE panel starts at 04:00. Keep the immutable timestamp contract
+        # instead of silently widening it to the midnight calendar date.
+        try:
+            start = datetime.fromisoformat(str(raw_score["period_start"])).astimezone(UTC)
+            last_candle_open = datetime.fromisoformat(str(raw_score["period_end"])).astimezone(UTC)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise EvolutionWorkerError("V5 raw score timestamps are invalid") from exc
+    else:
+        start = datetime.combine(
+            loaded.split_manifest.evolution_period_start,
+            time.min,
+            tzinfo=UTC,
+        )
+        exclusive_end = datetime.combine(
+            loaded.split_manifest.evolution_period_end_exclusive,
+            time.min,
+            tzinfo=UTC,
+        )
+        last_candle_open = exclusive_end - timedelta(seconds=timeframe_to_seconds(timeframe))
     if last_candle_open < start:
         raise EvolutionWorkerError("evolution split has no complete timeframe candle")
     # Freqtrade treats the stop timestamp as inclusive. Date-only config
     # ranges therefore admit the first candle of the exclusive end day.
     # Bind search to the same exact candle cells as the split and V2 replay.
-    backtesting["timerange"] = (
-        f"{int(start.timestamp())}-{int(last_candle_open.timestamp())}"
-    )
+    backtesting["timerange"] = f"{int(start.timestamp())}-{int(last_candle_open.timestamp())}"
     loaded.spec.output_layout.apply_to_engine_config(config)
     config.setdefault("terminal_monitor", {})["enabled"] = False
     config.setdefault("warm_start", {})["enabled"] = False
@@ -871,15 +847,10 @@ def derive_engine_config(
         # result, roots declared with different seeds reproduced the same
         # search population. Preserve deterministic island diversity while
         # making the attempt seed authoritative.
-        for ordinal, island in enumerate(
-            config["generic_island_model"].get("islands", [])
-        ):
+        for ordinal, island in enumerate(config["generic_island_model"].get("islands", [])):
             island["seed"] = (search_seed + ordinal) % (2**32)
     island_names = (
-        [
-            str(item["name"])
-            for item in config["generic_island_model"].get("islands", [])
-        ]
+        [str(item["name"]) for item in config["generic_island_model"].get("islands", [])]
         if generic_island
         else []
     )
@@ -887,18 +858,12 @@ def derive_engine_config(
         "schema_version": "3.0",
         "engine_kind": "GENERIC_ISLAND" if generic_island else "STANDARD",
         "config_hash": loaded.manifest.config_hash,
-        "code_manifest_hash": canonical_config_hash(
-            loaded.code_manifest.model_dump(mode="json")
-        ),
+        "code_manifest_hash": canonical_config_hash(loaded.code_manifest.model_dump(mode="json")),
         "data_manifest_hash": loaded.data_manifest.manifest_hash,
         "genome_schema_version": "strategy-gene-v2",
         "island_names": island_names,
     }
-    if (
-        generic_island
-        and config.get("safety_profile", {}).get("name")
-        == "hardcore_multipair_v1"
-    ):
+    if generic_island and config.get("safety_profile", {}).get("name") == "hardcore_multipair_v1":
         config["generic_island_model"]["graceful_stop_marker"] = str(
             Path(loaded.spec.output_layout.runtime_dir) / "graceful_stop.json"
         )
@@ -935,9 +900,7 @@ def _run_evolution_engine(
         results = algorithm.evolve()
         return extract_island_finalists(
             results,
-            expected_islands=[
-                island_config.name for island_config in algorithm.island_configs
-            ],
+            expected_islands=[island_config.name for island_config in algorithm.island_configs],
             require_finalists=True,
         ).finalists
 
@@ -1054,8 +1017,7 @@ def run_evolution_worker(
         strict_seeds: list[Individual] = []
         quarantined_seeds: list[dict[str, str]] = []
         hardcore = (
-            loaded.resolved_config.get("safety_profile", {}).get("name")
-            == "hardcore_multipair_v1"
+            loaded.resolved_config.get("safety_profile", {}).get("name") == "hardcore_multipair_v1"
         )
         for seed in loaded.seeds:
             try:
@@ -1063,9 +1025,7 @@ def run_evolution_worker(
             except EvolutionWorkerError as exc:
                 if not hardcore:
                     raise
-                quarantined_seeds.append(
-                    {"candidate_id": seed.candidate_id, "reason": str(exc)}
-                )
+                quarantined_seeds.append({"candidate_id": seed.candidate_id, "reason": str(exc)})
                 continue
             individual.metrics["archive_candidate_id"] = seed.candidate_id
             strict_seeds.append(individual)
@@ -1106,14 +1066,14 @@ def run_evolution_worker(
             raise EvolutionWorkerError("engine config path differs from output layout")
         if loaded.spec.resume_checkpoint is not None:
             checkpoint_input = (
-                Path(loaded.spec.artifact_root)
-                / loaded.spec.resume_checkpoint.relative_path
+                Path(loaded.spec.artifact_root) / loaded.spec.resume_checkpoint.relative_path
             )
             if _sha256_file(checkpoint_input) != loaded.spec.resume_checkpoint.sha256:
-                raise EvolutionWorkerError("resume checkpoint hash changed after input verification")
+                raise EvolutionWorkerError(
+                    "resume checkpoint hash changed after input verification"
+                )
             checkpoint_target = (
-                Path(loaded.spec.output_layout.checkpoint_dir)
-                / checkpoint_input.name
+                Path(loaded.spec.output_layout.checkpoint_dir) / checkpoint_input.name
             )
             checkpoint_target.parent.mkdir(parents=True, exist_ok=True)
             if checkpoint_target.exists():
@@ -1158,9 +1118,7 @@ def run_evolution_worker(
             store.write_frozen_candidate(seed.frozen_candidate)
             store.write_evolution_seed(seed)
         with attempt_output_scope(loaded.spec.output_layout, phase="replay"):
-            return runner.execute(
-                [seed.frozen_candidate for seed in output_seeds]
-            )
+            return runner.execute([seed.frozen_candidate for seed in output_seeds])
     except Exception as exc:
         return _finalize_worker_failure(spec_path, exc, finished_at=clock())
 
