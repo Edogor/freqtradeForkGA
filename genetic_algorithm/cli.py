@@ -926,7 +926,10 @@ def _cmd_hardcore_campaign_v5(args) -> int:
     )
     state = Path(args.state_db).resolve() if args.state_db else root / "hardcore_v5_state.sqlite3"
     with V2HardcoreAttemptBackendV5(
-        state_path=state, automation_root=root, repo_root=repo
+        state_path=state,
+        automation_root=root,
+        repo_root=repo,
+        python_executable=repo / ".venv/bin/python",
     ) as backend:
         controller = HardcoreCampaignControllerV5(policy=policy, backend=backend)
         while True:
