@@ -1137,6 +1137,28 @@ class TestProductionEvolutionSupervision:
         }
         assert model._is_valid_evidence(candidate) is True
 
+    def test_raw_multipair_v5_mode_accepts_configured_score_version(self):
+        model = _create_model_from_config(_minimal_config(num_islands=1))
+        model.config['raw_multipair_score'] = {
+            'enabled': True,
+            'policy_version': 'raw-multipair-score-v5',
+            'development_pairs': ['BTC/USDT', 'SOL/USDT', 'XRP/USDT'],
+            'validation_pairs': ['BNB/USDT', 'ETH/USDT', 'PEPE/USDT'],
+        }
+        candidate = _make_individual(fitness=-1.0)
+        candidate.metrics.update({
+            'raw_multipair_score_version': 'raw-multipair-score-v5',
+            'raw_multipair_status': 'VALID',
+            'raw_pair_metrics': {
+                pair: {}
+                for pair in (
+                    'BTC/USDT', 'SOL/USDT', 'XRP/USDT',
+                    'BNB/USDT', 'ETH/USDT', 'PEPE/USDT',
+                )
+            },
+        })
+        assert model._is_valid_evidence(candidate) is True
+
     def test_generation_trace_uses_evaluated_population_not_offspring(self):
         model = _create_model_from_config(_minimal_config(num_islands=1))
         island_name = model.island_configs[0].name

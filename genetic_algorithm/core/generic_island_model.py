@@ -720,10 +720,13 @@ class GenericIslandModelEvolution:
             *raw_config.get('development_pairs', []),
             *raw_config.get('validation_pairs', []),
         }
+        expected_score_version = str(
+            raw_config.get('policy_version', 'raw-multipair-score-v4')
+        )
         raw_pair_metrics = individual.metrics.get('raw_pair_metrics')
         return (
             individual.metrics.get('raw_multipair_score_version')
-            == 'raw-multipair-score-v4'
+            == expected_score_version
             and individual.metrics.get('raw_multipair_status') == 'VALID'
             and isinstance(raw_pair_metrics, dict)
             and set(raw_pair_metrics) == expected_pairs
