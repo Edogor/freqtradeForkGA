@@ -1511,8 +1511,18 @@ class GenericIslandModelEvolution:
                 )
                 self._checkpoint_requested = True
 
-        # Collect results: pool top-5 from every island, deduplicate
-        results = self._collect_final_results()
+        # A campaign/deadline stop has already reached a generation boundary
+        # and checkpoint.  Do not turn it into an unbounded final replay of
+        # dozens of candidates: there is no promotion decision to make and a
+        # canonical terminal outcome is sufficient for the controller.  All
+        # normal terminal reasons retain the full finalist-union replay.
+        if self._stop_reason == 'CAMPAIGN_DEADLINE':
+            self.logger.info(
+                '[SHUTDOWN] Skipping final finalist replay after campaign stop'
+            )
+            results = {island_config.name: [] for island_config in self.island_configs}
+        else:
+            results = self._collect_final_results()
 
         self._finalize_evolution_outcome()
 
