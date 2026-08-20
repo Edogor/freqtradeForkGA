@@ -115,6 +115,11 @@ def test_controller_keeps_three_lane_order_and_canary_requires_valid_each_lane(t
     controller = HardcoreCampaignControllerV5(policy=policy, backend=backend, started_at=now)
     controller.tick(now=now)
     assert backend.requests[-1]["lane"] == "15m"
+    assert backend.requests[-1]["shape"] == {
+        "population_size": 4,
+        "generations": 3,
+        "cross_niche_offspring": 2,
+    }
     backend.finished["h-0"] = _completed()
     controller.tick(now=now)
     assert backend.requests[-1]["lane"] == "1h"

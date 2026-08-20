@@ -23,12 +23,12 @@ raw_multipair_score:
     score_productive_frequency_weight: 0.45
 
 genetic_algorithm:
-  population_size: 16
+  population_size: 12
   generations: 30
   behavioral_distance_weight: 0.50
 
 generic_island_model:
-  population_per_island: 16
+  population_per_island: 12
   generations: 30
   archive_seeding:
     cross_niche_offspring_per_generation: 4
@@ -36,7 +36,7 @@ generic_island_model:
   islands:
     - &momentum
       name: momentum-1
-      population_size: 16
+      population_size: 12
       generations: 30
       seed: 4101
       indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR, KAMA]
@@ -48,7 +48,7 @@ generic_island_model:
       indicator_pool: [RSI, MACD, STOCH, CCI, MFI, ROC, WILLR, ATR]
     - &trend
       name: trend-1
-      population_size: 16
+      population_size: 12
       generations: 30
       seed: 4103
       indicator_pool: [EMA, SMA, TEMA, KAMA, SUPERTREND, AROON, PSAR, DONCHIAN]
@@ -56,7 +56,7 @@ generic_island_model:
       walk_forward_enabled: false
     - &volatility
       name: volatility-volume-1
-      population_size: 16
+      population_size: 12
       generations: 30
       seed: 4104
       indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP, SUPERTREND]
@@ -72,7 +72,7 @@ generic_island_model:
       indicator_pool: [BBANDS, ATR, DONCHIAN, OBV, CMF, VROC, VWAP, KAMA]
     - &broad
       name: broad-1
-      population_size: 16
+      population_size: 12
       generations: 30
       seed: 4107
       indicator_pool: [AROON, ATR, BBANDS, CCI, CMF, DONCHIAN, EMA, KAMA, MACD, MFI, OBV, PSAR, ROC, RSI, SMA, STOCH, SUPERTREND, TEMA, VROC, VWAP, WILLR]
@@ -86,7 +86,7 @@ generic_island_model:
       seed: 4109
     - &bridge
       name: bridge-1
-      population_size: 16
+      population_size: 12
       generations: 30
       seed: 4110
       indicator_pool: [AROON, ATR, BBANDS, CCI, CMF, DONCHIAN, EMA, KAMA, MACD, MFI, OBV, PSAR, ROC, RSI, SMA, STOCH, SUPERTREND, TEMA, VROC, VWAP, WILLR]

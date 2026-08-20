@@ -65,7 +65,12 @@ class RunShapeV5:
 
 DIAGNOSTIC_SHAPE_V5 = RunShapeV5(10, 12, 2)
 CONFIRMATION_SHAPE_V5 = RunShapeV5(12, 18, 4)
-PRODUCTION_SHAPE_V5 = RunShapeV5(16, 30, 4)
+# Thirty remains the upper generation budget; the runtime watchdog may finish
+# an attempt earlier at a generation boundary.
+PRODUCTION_SHAPE_V5 = RunShapeV5(12, 30, 4)
+# A canary validates the three-lane artifact and transition contract without
+# consuming an entire diagnostic arm.
+CANARY_SHAPE_V5 = RunShapeV5(4, 3, 2)
 
 
 @dataclass(frozen=True)
@@ -396,11 +401,19 @@ class HardcoreCampaignControllerV5:
                 for row in self.state["outcomes"]
                 if row.get("stage") == stage.value
             }  # type: ignore[union-attr]
-            return [
+            arms = [
                 arm
                 for arm in diagnostic_arms_v5(seed_by_lane=seed)
                 if (arm[0].value, arm[1].value) not in completed
             ]
+            if self.policy.campaign_mode == "canary":
+                # The first profile is EDGE and diagnostic ordering is
+                # 15m -> 1h -> 4h, exactly once each.
+                return [
+                    (lane, profile, arm_seed, CANARY_SHAPE_V5)
+                    for lane, profile, arm_seed, _shape in arms[:3]
+                ]
+            return arms
         if stage is CampaignStageV5.CONFIRMATION:
             decisions = self._decisions()
             second = {lane: self._seed(lane, 1) for lane in LANE_ORDER_V5}
