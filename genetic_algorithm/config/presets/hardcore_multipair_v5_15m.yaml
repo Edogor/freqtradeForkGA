@@ -22,6 +22,15 @@ raw_multipair_score:
     score_edge_weight: 0.45
     score_productive_frequency_weight: 0.45
 
+# Technical containment only: each independent six-pair scenario is allowed
+# one minute. A pathological candidate becomes INVALID rather than consuming
+# an unbounded fraction of the single-run resource budget.
+backtesting:
+  timeout: 60
+
+parallel_evaluation:
+  backtest_timeout: 60
+
 genetic_algorithm:
   population_size: 12
   generations: 30

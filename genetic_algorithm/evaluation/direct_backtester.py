@@ -356,7 +356,12 @@ class DirectBacktester:
         # Per-backtest timeout (seconds). Defence-in-depth for non-parallel paths.
         # The parallel evaluator also wraps each call with its own future timeout,
         # so this is a safety net that fires only if the parallel timeout misses.
-        self.backtest_timeout = self.backtest_config.get("backtest_timeout", 300)
+        # ``backtesting.timeout`` is the schema-backed setting used by all
+        # presets.  Keep the old spelling as a fallback for programmatic
+        # legacy callers that have not passed through config validation.
+        self.backtest_timeout = self.backtest_config.get(
+            "timeout", self.backtest_config.get("backtest_timeout", 300)
+        )
 
         # Initialize cache if enabled
         self.cache = None
