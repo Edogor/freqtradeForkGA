@@ -26,6 +26,7 @@ from genetic_algorithm.orchestration.hardcore_archive_v5 import (
 from genetic_algorithm.orchestration.hardcore_campaign_v1 import (
     EvolutionStopReason,
     FailureClass,
+    HardcoreQueueError,
     material_improvement,
 )
 
@@ -535,14 +536,84 @@ class HardcoreCampaignControllerV5:
                         for entry in self._lane(lane)["archive"]
                     ],
                 }
-                handle = self.backend.queue(request)
-                self.state["active"] = {"handle": handle, **request}
                 self.state["run_sequence"] = sequence
                 self._lane(lane)["runs_started"] = int(self._lane(lane)["runs_started"]) + 1
+                try:
+                    handle = self.backend.queue(request)
+                except HardcoreQueueError as exc:
+                    self._record_queue_failure(
+                        request,
+                        failure_class=exc.failure_class,
+                        error_code=exc.error_code,
+                        detail=str(exc),
+                        now=now,
+                    )
+                except (OSError, ValueError) as exc:
+                    # Queue-time validation and immutable-artifact failures
+                    # cannot be repaired by restarting the systemd service.
+                    # Suspend just this lane; the remaining lanes may still
+                    # supply useful, independent evidence.
+                    self._record_queue_failure(
+                        request,
+                        failure_class=FailureClass.DETERMINISTIC_CONFIG,
+                        error_code=f"QUEUE_{type(exc).__name__.upper()}",
+                        detail=str(exc),
+                        now=now,
+                    )
+                else:
+                    self.state["active"] = {"handle": handle, **request}
             elif self.state["stage"] == CampaignStageV5.PRODUCTION.value:
                 self.state["lifecycle"] = "COMPLETED"
         self._persist()
         return self.status(now)
+
+    def _record_queue_failure(
+        self,
+        request: dict[str, object],
+        *,
+        failure_class: FailureClass,
+        error_code: str,
+        detail: str,
+        now: datetime,
+    ) -> None:
+        """Persist a pre-worker failure and let other timeframes continue."""
+
+        lane = CampaignLaneV5(str(request["lane"]))
+        record = {
+            "run_id": request["run_id"],
+            "lane": lane.value,
+            "profile": request["profile"],
+            "seed": request["seed"],
+            "stage": request["stage"],
+            "valid": False,
+            "comparison_score": 0.0,
+            "productive_score": 0.0,
+            "clusters": 0,
+            "worst_drawdown": 1.0,
+            "stop_reason": EvolutionStopReason.TECHNICAL_INVALID.value,
+            "failure_class": failure_class.value,
+            "actual_generations": 0,
+            "score_curve": [],
+            "candidates": [],
+            "error_code": error_code,
+            "error_detail": detail[:2000],
+            "finished_at": now.isoformat(),
+        }
+        outcome_path = self.root / "runs" / str(request["run_id"]) / "evolution_outcome_v5.json"
+        payload = _canonical({"schema_version": "2.0", "outcome_version": "hardcore-v5", **record})
+        _atomic_write(outcome_path, payload)
+        _atomic_write(
+            outcome_path.with_suffix(outcome_path.suffix + ".sha256"),
+            (_sha256(payload) + "\n").encode("ascii"),
+        )
+        record["outcome_sha256"] = _sha256(payload)
+        self.state["outcomes"].append(record)  # type: ignore[union-attr]
+        lane_state = self._lane(lane)
+        lane_state["runs_completed"] = int(lane_state["runs_completed"]) + 1
+        if failure_class.suspends_lane:
+            lane_state["suspended_reason"] = error_code
+        self.state["active"] = None
+        self.state["next_lane"] = next_lane_v5(lane).value
 
     def _finalize_active(
         self, active: dict[str, object], polled: dict[str, object], now: datetime

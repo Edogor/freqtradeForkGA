@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+import hashlib
+
 from genetic_algorithm.orchestration.hardcore_campaign_v5 import (
     CampaignLaneV5,
     FitnessProfileV5,
@@ -28,6 +30,13 @@ class _Backend:
 
     def request_graceful_stop(self, handle, *, reason):
         self.stop_requests.append((handle, reason))
+
+
+class _QueueValidationFailureBackend(_Backend):
+    def queue(self, request):
+        if request["lane"] == "15m":
+            raise ValueError("invalid immutable archive assignment")
+        return super().queue(request)
 
 
 def _completed(score=1.0, valid=True):
@@ -147,6 +156,34 @@ def test_controller_kill_switch_waits_for_active_attempt(tmp_path):
     assert backend.stop_requests == [("h-0", "CAMPAIGN_DEADLINE")]
     backend.finished["h-0"] = _completed()
     assert controller.tick(now=now)["lifecycle"] == "COMPLETED"
+
+
+def test_controller_suspends_only_the_prequeue_failure_lane_and_persists_outcome(tmp_path):
+    backend = _QueueValidationFailureBackend()
+    policy = default_hardcore_campaign_policy_v5(
+        campaign_id="queue-failure-v5",
+        automation_root=tmp_path / "campaign",
+        config_15m=tmp_path / "15m.yaml",
+        config_1h=tmp_path / "1h.yaml",
+        config_4h=tmp_path / "4h.yaml",
+    )
+    now = datetime(2026, 8, 20, tzinfo=UTC)
+    controller = HardcoreCampaignControllerV5(policy=policy, backend=backend, started_at=now)
+
+    status = controller.tick(now=now)
+    assert status["lifecycle"] == "RUNNING"
+    assert controller.state["active"] is None
+    assert controller.state["lanes"]["15m"]["suspended_reason"] == "QUEUE_VALUEERROR"
+    assert controller.state["next_lane"] == "1h"
+    outcome = controller.state["outcomes"][0]
+    assert outcome["failure_class"] == "DETERMINISTIC_CONFIG"
+    path = tmp_path / "campaign" / "runs" / outcome["run_id"] / "evolution_outcome_v5.json"
+    assert path.is_file()
+    checksum = path.with_suffix(path.suffix + ".sha256")
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == checksum.read_text().strip()
+
+    controller.tick(now=now)
+    assert backend.requests[-1]["lane"] == "1h"
 
 
 def test_v5_archive_keeps_strict_candidate_and_its_seed_metadata():
