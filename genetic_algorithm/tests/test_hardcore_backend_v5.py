@@ -64,8 +64,10 @@ def test_v5_backend_queues_honest_intraday_4h_panel(tmp_path):
             }
         )
         assert handle.startswith("hardcore-v5-")
-        assert backend.store.get(handle).worker_binding is not None
-        restored_request, restored_config = backend._restore_request(backend.store.get(handle))
+        state = backend.store.get(handle)
+        assert state.worker_binding is not None
+        assert state.worker_binding.argv[0] == str(repo / ".venv/bin/python")
+        restored_request, restored_config = backend._restore_request(state)
         assert restored_request["lane"] == "4h"
         assert restored_config["backtesting"]["timeframe"] == "4h"
     finally:

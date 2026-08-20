@@ -98,7 +98,9 @@ class V2HardcoreAttemptBackendV5:
     ) -> None:
         self.root = Path(automation_root).resolve()
         self.repo_root = Path(repo_root).resolve()
-        self.python_executable = Path(python_executable).resolve()
+        # ``resolve()`` would collapse a virtualenv's python symlink to the
+        # base interpreter and silently drop site-packages (pandas/freqtrade).
+        self.python_executable = Path(python_executable).absolute()
         if not self.repo_root.is_dir() or not self.python_executable.is_file():
             raise ValueError("V5 backend repo/python input does not exist")
         self.store = AttemptStateStoreV2(Path(state_path).resolve())
